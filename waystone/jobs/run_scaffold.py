@@ -18,7 +18,12 @@ from waystone.runs.assurance import (
     parse_evaluation_evidence_bytes,
     parse_evaluation_spec_bytes,
 )
-from waystone.runs.outcome import OUTCOME_SCHEMA, parse_outcome_delta_bytes
+from waystone.runs.outcome import (
+    OUTCOME_SCHEMA,
+    OutcomeBindingRefusal,
+    _final_result_authority,
+    parse_outcome_delta_bytes,
+)
 from waystone.runs.spec import load_run_spec
 from waystone.runs.store import RecordNotFoundError
 
@@ -394,21 +399,6 @@ def scaffold_work_brief(assembly, task_id: str, content: bytes) -> bytes:
     return canonical
 
 
-def _final_result_reference(assembly, run_id: str):
-    with assembly.store._connection_lock:  # noqa: SLF001 - final-attempt projection
-        rows = assembly.store._connection.execute(  # noqa: SLF001
-            "SELECT attempt_id, state FROM attempts WHERE run_id = ? ORDER BY rowid",
-            (run_id,),
-        ).fetchall()
-    if not rows or rows[-1]["state"] != "completed":
-        raise RunScaffoldRefusal("run has no completed final attempt")
-    reference_id = f"worker-result:{rows[-1]['attempt_id']}"
-    try:
-        return assembly.store.get_artifact_reference(reference_id)
-    except RecordNotFoundError as error:
-        raise RunScaffoldRefusal("completed final attempt has no worker result") from error
-
-
 def _outcome_evidence(assembly, run_id: str, value: object) -> list[dict[str, str]]:
     if not isinstance(value, list):
         raise RunScaffoldRefusal("evidence_refs must be a list")
@@ -447,7 +437,10 @@ def scaffold_outcome_delta(assembly, run_id: str, content: bytes) -> bytes:
     draft = _document(content, "OutcomeDelta semantic draft")
     _exact(draft, _OUTCOME_FIELDS, "OutcomeDelta semantic draft")
     spec = load_run_spec(run_id, start=assembly.context.canonical_root)
-    result = _final_result_reference(assembly, run_id)
+    try:
+        result = _final_result_authority(assembly, spec)
+    except OutcomeBindingRefusal as error:
+        raise RunScaffoldRefusal(error.detail) from error
     payload = {
         "schema": OUTCOME_SCHEMA,
         "run_id": run_id,
@@ -456,7 +449,7 @@ def scaffold_outcome_delta(assembly, run_id: str, content: bytes) -> bytes:
         "objective_ref": spec.objective_ref.to_dict(),
         "kind": _string(draft["kind"], "kind"),
         "summary": _string(draft["summary"], "summary"),
-        "result_digest": result.digest,
+        "result_digest": result.result_digest,
         "evidence_refs": _outcome_evidence(assembly, run_id, draft["evidence_refs"]),
         "finding_refs": _strings(draft["finding_refs"], "finding_refs"),
         "recorded_by": {

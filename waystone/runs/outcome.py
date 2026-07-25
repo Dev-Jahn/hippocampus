@@ -27,11 +27,31 @@ from waystone.runs.artifacts import (
     StoredArtifact,
     validate_sha256_digest,
 )
-from waystone.runs.assurance import parse_evaluation_evidence_bytes
-from waystone.runs.effects import EffectResultState, EffectStateRefusal, GitRefEffect
+from waystone.runs.assurance import (
+    AssurancePlan,
+    ReviewCycle,
+    ReviewerEvidence,
+    parse_assurance_plan_bytes,
+    parse_evaluation_evidence_bytes,
+    parse_review_cycle_bytes,
+    parse_reviewer_evidence_bytes,
+)
+from waystone.runs.effects import (
+    EffectKind,
+    EffectResultState,
+    EffectStateRefusal,
+    GitRefEffect,
+    ObservationDisposition,
+)
 from waystone.runs.spec import RunSpec, load_run_spec
 from waystone.runs.store import EntityKind, RecordNotFoundError, TransitionReason
-from waystone.runs.verify import DecisionOutcome, IntegrationDecision, reload_integration_decision
+from waystone.runs.verify import (
+    DecisionOutcome,
+    IntegrationDecision,
+    VerifierEvidence,
+    reload_integration_decision,
+    reload_verifier_evidence,
+)
 from waystone.runs.worker_result import CompletedWorkerResult, parse_worker_result_bytes
 
 
@@ -251,6 +271,13 @@ class OutcomePublication:
     commit_oid: str
     outcome_digest: str
     closeout_digest: str
+
+
+@dataclass(frozen=True)
+class FinalResultAuthority:
+    attempt: object
+    result_digest: str
+    completion_references: tuple[Mapping[str, str], ...]
 
 
 def parse_outcome_delta_bytes(content: bytes) -> OutcomeDelta:
@@ -526,6 +553,288 @@ def _final_attempt(assembly, spec: RunSpec):
     return assembly.store.get_entity(EntityKind.ATTEMPT, row["attempt_id"])
 
 
+def _promotion_review_authority(
+        assembly, spec: RunSpec, plan: AssurancePlan, result_digest: str,
+        ) -> tuple[ReviewerEvidence | None, Mapping[str, str] | None]:
+    if not plan.requires("adversarial-review"):
+        return None, None
+    if spec.promotion_lineage is None:
+        raise OutcomeBindingRefusal("promotion review lacks a frozen lineage")
+    lineage_id = spec.promotion_lineage.id
+    indexed: dict[int, tuple[ReviewCycle, Mapping[str, str]]] = {}
+    head = spec.promotion_lineage.review_cycle_head_digest
+    inherited = []
+    while head is not None:
+        try:
+            cycle = parse_review_cycle_bytes(assembly.artifact_store.read(head))
+        except WorkflowError as error:
+            raise OutcomeBindingRefusal(
+                "inherited promotion review cycle cannot be reloaded") from error
+        inherited.append(cycle)
+        head = cycle.supersedes_digest
+    for cycle in reversed(inherited):
+        indexed[cycle.cycle] = (
+            cycle,
+            {
+                "reference_id": f"review-cycle:{lineage_id}:{cycle.cycle}",
+                "digest": cycle.digest,
+            },
+        )
+    prefix = f"review-cycle:{lineage_id}:"
+    with assembly.store._connection_lock:  # noqa: SLF001 - durable review projection
+        rows = assembly.store._connection.execute(  # noqa: SLF001
+            "SELECT reference_id FROM artifacts WHERE reference_id LIKE ?",
+            (prefix + "%",),
+        ).fetchall()
+    for row in rows:
+        reference_id = row["reference_id"]
+        suffix = reference_id.removeprefix(prefix)
+        if not suffix.isdigit() or int(suffix) < 1:
+            raise OutcomeBindingRefusal(
+                "promotion review cycle reference identity is invalid")
+        reference = assembly.store.get_artifact_reference(reference_id)
+        try:
+            cycle = parse_review_cycle_bytes(
+                assembly.artifact_store.read_reference(reference))
+        except WorkflowError as error:
+            raise OutcomeBindingRefusal(
+                "promotion review cycle cannot be reloaded") from error
+        prior = indexed.get(cycle.cycle)
+        if prior is not None and prior[0].digest != cycle.digest:
+            raise OutcomeBindingRefusal("promotion review cycle number is divergent")
+        indexed[cycle.cycle] = (
+            cycle,
+            {"reference_id": reference_id, "digest": reference.digest},
+        )
+    ordered = tuple(indexed[index] for index in sorted(indexed))
+    prior_digest = None
+    for index, (cycle, _reference) in enumerate(ordered, start=1):
+        if (cycle.promotion_lineage_id != lineage_id
+                or cycle.cycle != index
+                or cycle.supersedes_digest != prior_digest):
+            raise OutcomeBindingRefusal(
+                "promotion review cycle chain is divergent or non-contiguous")
+        prior_digest = cycle.digest
+    if not ordered:
+        raise OutcomeBindingRefusal(
+            "risk-gated promotion lacks reviewer completion evidence")
+    cycle, reference = ordered[-1]
+    try:
+        reviewer = parse_reviewer_evidence_bytes(
+            assembly.artifact_store.read(cycle.review_digest))
+    except WorkflowError as error:
+        raise OutcomeBindingRefusal(
+            "promotion reviewer evidence cannot be reloaded") from error
+    candidate = spec.candidate
+    expected_reviewer = assembly.profile.binding_for(Role.REVIEWER).binding_digest
+    if (not isinstance(candidate, Mapping)
+            or cycle.target_result_digest != result_digest
+            or cycle.review_digest != reviewer.digest
+            or reviewer.promotion_lineage_id != lineage_id
+            or reviewer.target_run_spec_digest != spec.run_spec_digest
+            or reviewer.candidate_digest != candidate.get("digest")
+            or reviewer.target_result_digest != result_digest
+            or reviewer.actor["actor_id"] != expected_reviewer):
+        raise OutcomeBindingRefusal(
+            "promotion reviewer evidence differs from the frozen result lineage")
+    return reviewer, reference
+
+
+def _promotion_apply_references(
+        assembly, spec: RunSpec, attempt_id: str,
+        ) -> tuple[Mapping[str, str], Mapping[str, str]]:
+    candidate = spec.candidate
+    if not isinstance(candidate, Mapping):
+        raise OutcomeBindingRefusal("promotion apply lacks a frozen candidate")
+    action_id = f"{spec.run_id}:target-ref-apply"
+    try:
+        action = assembly.store.get_entity(EntityKind.ACTION, action_id)
+        plan = assembly.effect_executor._load_plan(action_id)  # noqa: SLF001
+    except WorkflowError as error:
+        raise OutcomeBindingRefusal(
+            "promotion target-ref apply plan cannot be reloaded") from error
+    root = assembly.context.canonical_root
+    if (action.state != "completed"
+            or plan.run_id != spec.run_id
+            or plan.job_id != spec.job_id
+            or plan.attempt_id != attempt_id
+            or plan.kind is not EffectKind.GIT_REF
+            or Path(str(plan.spec.get("repository"))).resolve() != root
+            or plan.spec.get("ref") != spec.result_policy.target_ref
+            or plan.spec.get("expected_old_oid") != spec.result_policy.expected_oid
+            or plan.spec.get("desired_oid") != candidate.get("target_oid")):
+        raise OutcomeBindingRefusal(
+            "promotion target-ref apply plan differs from the frozen authority tuple")
+    observation = assembly.effect_executor._observe(plan)  # noqa: SLF001
+    if (observation.disposition is not ObservationDisposition.DESIRED
+            or observation.observed_digest is None):
+        raise OutcomeBindingRefusal(
+            "promotion target-ref apply is no longer positively observed")
+    receipt_error = assembly.effect_executor._observation_receipt_error(  # noqa: SLF001
+        plan, observation)
+    if receipt_error is not None:
+        raise OutcomeBindingRefusal(
+            f"promotion target-ref apply observation is invalid: {receipt_error}")
+    suffix = observation.observed_digest.split(":", 1)[1]
+    observation_id = f"effect-observation:{action_id}:{suffix}"
+    try:
+        observation_reference = assembly.store.get_artifact_reference(observation_id)
+    except RecordNotFoundError as error:
+        raise OutcomeBindingRefusal(
+            "promotion target-ref apply observation reference is absent") from error
+    return (
+        {
+            "reference_id": f"effect-plan:{action_id}",
+            "digest": plan.plan_digest,
+        },
+        {
+            "reference_id": observation_id,
+            "digest": observation_reference.digest,
+        },
+    )
+
+
+def _promotion_result_authority(
+        assembly, spec: RunSpec, attempt,
+        ) -> FinalResultAuthority:
+    candidate = spec.candidate
+    evaluation = spec.evaluation.get("evidence")
+    if (not isinstance(candidate, Mapping)
+            or not isinstance(evaluation, Mapping)
+            or spec.promotion_lineage is None):
+        raise OutcomeBindingRefusal(
+            "promotion result authority lacks frozen candidate/evaluation lineage")
+    try:
+        producer_result_digest = validate_sha256_digest(
+            candidate.get("producer_result_digest"))  # type: ignore[arg-type]
+    except ValueError as error:
+        raise OutcomeBindingRefusal(
+            "promotion candidate producer_result_digest is invalid") from error
+    attempt_id = attempt.entity_id
+    if attempt_id == f"{spec.run_id}:attempt:1":
+        verifier_action_id = f"{spec.run_id}:typed-independent-verify"
+        decision_action_id = f"{spec.run_id}:integration-decision"
+    else:
+        verifier_action_id = f"{attempt_id}:typed-independent-verify"
+        decision_action_id = f"{attempt_id}:integration-decision"
+    try:
+        verifier = reload_verifier_evidence(
+            spec.run_id,
+            attempt_id,
+            verifier_action_id,
+            start=assembly.context.canonical_root,
+        )
+        decision = reload_integration_decision(
+            spec.run_id,
+            attempt_id,
+            decision_action_id,
+            verifier_action_id,
+            start=assembly.context.canonical_root,
+        )
+        plan = parse_assurance_plan_bytes(
+            assembly.artifact_store.read(spec.assurance_plan.digest))
+    except WorkflowError as error:
+        raise OutcomeBindingRefusal(
+            f"promotion result authority cannot be reloaded: {error}") from error
+    reviewer, review_reference = _promotion_review_authority(
+        assembly, spec, plan, producer_result_digest)
+    expected_reviewers = () if reviewer is None else (reviewer.digest,)
+    run_state = assembly.store.get_run(spec.run_id).state
+    expected_outcome = (
+        DecisionOutcome.REJECT if run_state == "failed" else DecisionOutcome.ACCEPT)
+    evaluation_digest = evaluation.get("digest")
+    if (not isinstance(verifier, VerifierEvidence)
+            or verifier.run_id != spec.run_id
+            or verifier.job_id != spec.job_id
+            or verifier.attempt_id != attempt_id
+            or verifier.run_spec_digest != spec.run_spec_digest
+            or verifier.actor.role is not Role.VERIFIER
+            or verifier.verifier_sandbox.filesystem != "read-only"
+            or verifier.result.result_oid != candidate.get("target_oid")
+            or decision.run_id != spec.run_id
+            or decision.job_id != spec.job_id
+            or decision.attempt_id != attempt_id
+            or decision.actor.role is not Role.COORDINATOR
+            or decision.outcome is not expected_outcome
+            or decision.result_digest != verifier.result.result_digest
+            or decision.verifier_reference_id
+            != verifier.artifact_reference.reference_id
+            or decision.verifier_artifact_digest
+            != verifier.artifact_reference.digest
+            or decision.candidate_digest != candidate.get("digest")
+            or decision.evaluation_evidence_digest != evaluation_digest
+            or decision.reviewer_artifact_digests != expected_reviewers):
+        raise OutcomeBindingRefusal(
+            "promotion result differs from the approved GitResultTriple authority")
+    actor_ids = [verifier.actor.actor_id, decision.actor.actor_id]
+    if reviewer is not None:
+        actor_ids.append(reviewer.actor["actor_id"])
+    if len(actor_ids) != len(set(actor_ids)):
+        raise OutcomeBindingRefusal(
+            "promotion completion actor identities are not independent")
+    references = [{
+        "reference_id": verifier.artifact_reference.reference_id,
+        "digest": verifier.artifact_reference.digest,
+    }]
+    if review_reference is not None:
+        references.append(review_reference)
+    references.append({
+        "reference_id": decision.artifact_reference.reference_id,
+        "digest": decision.artifact_reference.digest,
+    })
+    if decision.outcome is DecisionOutcome.ACCEPT:
+        references.extend(_promotion_apply_references(
+            assembly, spec, attempt_id))
+    return FinalResultAuthority(
+        attempt,
+        decision.result_digest,
+        tuple(references),
+    )
+
+
+def _final_result_authority(assembly, spec: RunSpec) -> FinalResultAuthority:
+    """Reload the stage-owned final result and its durable completion evidence."""
+    attempt = _final_attempt(assembly, spec)
+    result_id = f"worker-result:{attempt.entity_id}"
+    try:
+        result_reference = assembly.store.get_artifact_reference(result_id)
+    except RecordNotFoundError:
+        result_reference = None
+    if spec.lifecycle_stage.value == "promote":
+        if result_reference is not None:
+            raise OutcomeBindingRefusal(
+                "promotion final attempt must not have a worker result")
+        return _promotion_result_authority(assembly, spec, attempt)
+    if result_reference is None:
+        raise OutcomeBindingRefusal("final attempt has no frozen worker result")
+    result_content = assembly.artifact_store.read_reference(result_reference)
+    try:
+        worker_result = parse_worker_result_bytes(
+            result_content,
+            expected_run_spec_digest=spec.run_spec_digest,
+            expected_attempt_id=attempt.entity_id,
+        )
+    except WorkflowError as error:
+        raise OutcomeBindingRefusal(f"final worker result is invalid: {error}") from error
+    if not isinstance(worker_result, CompletedWorkerResult):
+        raise OutcomeBindingRefusal("final result is not a completed worker result")
+    completion_references = [{
+        "reference_id": result_reference.reference_id,
+        "digest": result_reference.digest,
+    }]
+    for worker_evidence in worker_result.evidence_refs:
+        assembly.artifact_store.read(worker_evidence.digest)
+        completion_references.append({
+            "reference_id": worker_evidence.reference_id,
+            "digest": worker_evidence.digest,
+        })
+    return FinalResultAuthority(
+        attempt,
+        result_reference.digest,
+        tuple(completion_references),
+    )
+
+
 def _rejected_promotion_decision(
         assembly, spec: RunSpec, attempt) -> IntegrationDecision:
     with assembly.store._connection_lock:  # noqa: SLF001 - terminal evidence pair
@@ -628,25 +937,12 @@ def _validate_outcome_lineage(assembly, spec: RunSpec, outcome: OutcomeDelta):
     coordinator = assembly.profile.binding_for(Role.COORDINATOR)
     if outcome.recorded_by["binding_digest"] != coordinator.binding_digest:
         raise OutcomeBindingRefusal("recorded_by coordinator binding is stale")
-    attempt = _final_attempt(assembly, spec)
-    result_id = f"worker-result:{attempt.entity_id}"
-    try:
-        result_reference = assembly.store.get_artifact_reference(result_id)
-    except RecordNotFoundError as error:
-        raise OutcomeBindingRefusal("final attempt has no frozen worker result") from error
-    if result_reference.digest != outcome.result_digest:
+    authority = _final_result_authority(assembly, spec)
+    if authority.result_digest != outcome.result_digest:
+        if spec.lifecycle_stage.value == "promote":
+            raise OutcomeBindingRefusal(
+                "OutcomeDelta result_digest differs from the approved GitResultTriple")
         raise OutcomeBindingRefusal("OutcomeDelta result_digest differs from the final result")
-    result_content = assembly.artifact_store.read_reference(result_reference)
-    try:
-        worker_result = parse_worker_result_bytes(
-            result_content,
-            expected_run_spec_digest=spec.run_spec_digest,
-            expected_attempt_id=attempt.entity_id,
-        )
-    except WorkflowError as error:
-        raise OutcomeBindingRefusal(f"final worker result is invalid: {error}") from error
-    if not isinstance(worker_result, CompletedWorkerResult):
-        raise OutcomeBindingRefusal("final result is not a completed worker result")
     evidence_references = []
     measurement_claims = {
         (item.reference_id, item.digest)
@@ -680,16 +976,7 @@ def _validate_outcome_lineage(assembly, spec: RunSpec, outcome: OutcomeDelta):
     if not measurement_claims.issubset(frozen_measurements):
         raise OutcomeBindingRefusal(
             "measurement artifact is not frozen by the cited evaluation evidence")
-    completion_refs = [{
-        "reference_id": result_reference.reference_id,
-        "digest": result_reference.digest,
-    }]
-    for worker_evidence in worker_result.evidence_refs:
-        assembly.artifact_store.read(worker_evidence.digest)
-        completion_refs.append({
-            "reference_id": worker_evidence.reference_id,
-            "digest": worker_evidence.digest,
-        })
+    completion_refs = list(authority.completion_references)
     completion_refs.extend({
         "reference_id": reference.reference_id,
         "digest": reference.digest,
@@ -705,7 +992,7 @@ def _validate_outcome_lineage(assembly, spec: RunSpec, outcome: OutcomeDelta):
             raise OutcomeBindingRefusal(
                 "completion evidence reference id names conflicting digests")
         deduplicated[reference["reference_id"]] = reference["digest"]
-    return attempt, tuple(
+    return authority.attempt, tuple(
         {"reference_id": reference_id, "digest": digest}
         for reference_id, digest in deduplicated.items())
 

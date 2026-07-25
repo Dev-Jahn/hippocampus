@@ -52,14 +52,21 @@ from waystone.runs.preflight import (
     SandboxContract,
     ToolchainObservation,
     ToolchainRequirement,
+    VerificationPlanStateError,
     VerificationPlanDefinition,
     WorkingDirectoryRule,
     freeze_verification_plan,
+    load_dispatch_ready,
     preflight_for_dispatch,
     record_runner_proof,
 )
 from waystone.runs.spec import plan_one_task_run, read_base_snapshot
-from waystone.runs.store import EntityKind, FilesystemInfo, RunStore
+from waystone.runs.store import (
+    EntityKind,
+    FilesystemInfo,
+    RunStore,
+    TransitionReason,
+)
 from waystone.runs.verify import (
     ActorIdentity,
     ApplyBindingRefusal,
@@ -1797,6 +1804,77 @@ class RunVerifyTests(unittest.TestCase):
                 evidence.action_id,
                 start=fixture.root,
             )
+
+    def test_public_reload_revalidates_closeout_ready_and_completed_authority(self):
+        fixture = self.prepare()
+        evidence, decision = self.verified_decision(fixture)
+
+        with self.supported_filesystem(), RunStore.open(fixture.root) as store:
+            run = store.get_run(fixture.spec.run_id)
+            store.record_transition(
+                EntityKind.RUN,
+                fixture.spec.run_id,
+                expected_version=run.version,
+                next_state="running",
+                reason=TransitionReason.PROCESS_STARTED,
+            )
+        with self.supported_filesystem():
+            with self.assertRaises(VerificationPlanStateError):
+                reload_verifier_evidence(
+                    fixture.spec.run_id,
+                    evidence.attempt_id,
+                    evidence.action_id,
+                    start=fixture.root,
+                )
+            with self.assertRaises(VerificationPlanStateError):
+                reload_integration_decision(
+                    fixture.spec.run_id,
+                    decision.attempt_id,
+                    decision.action_id,
+                    evidence.action_id,
+                    start=fixture.root,
+                )
+
+        for state in ("closeout-ready", "completed"):
+            with self.supported_filesystem(), RunStore.open(fixture.root) as store:
+                run = store.get_run(fixture.spec.run_id)
+                store.record_transition(
+                    EntityKind.RUN,
+                    fixture.spec.run_id,
+                    expected_version=run.version,
+                    next_state=state,
+                    reason=TransitionReason.COMPLETED,
+                )
+            with self.supported_filesystem():
+                self.assertEqual(reload_verifier_evidence(
+                    fixture.spec.run_id,
+                    evidence.attempt_id,
+                    evidence.action_id,
+                    start=fixture.root,
+                ), evidence)
+                self.assertEqual(reload_integration_decision(
+                    fixture.spec.run_id,
+                    decision.attempt_id,
+                    decision.action_id,
+                    evidence.action_id,
+                    start=fixture.root,
+                ), decision)
+
+    def test_operational_dispatch_loader_stays_closed_after_dispatch_ready(self):
+        fixture = self.prepare()
+        with self.supported_filesystem(), RunStore.open(fixture.root) as store:
+            run = store.get_run(fixture.spec.run_id)
+            store.record_transition(
+                EntityKind.RUN,
+                fixture.spec.run_id,
+                expected_version=run.version,
+                next_state="closeout-ready",
+                reason=TransitionReason.COMPLETED,
+            )
+
+        with self.supported_filesystem(), self.assertRaisesRegex(
+                VerificationPlanStateError, "expected 'dispatch-ready'"):
+            load_dispatch_ready(fixture.spec.run_id, start=fixture.root)
 
     def test_pc20_public_evidence_reload_refuses_tampered_terminal_bytes(self):
         """Reload rehashes published verifier bytes instead of trusting their reference."""

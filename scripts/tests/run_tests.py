@@ -36,6 +36,7 @@ MODULES = (
     "test_run_verify",
     "test_run_spec",
     "test_run_outcome",
+    "test_promotion_closeout_authority",
     "test_run_preflight",
     "test_run_observe",
     "test_run_cli",

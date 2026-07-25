@@ -14,6 +14,7 @@ from waystone.jobs.completion import LifecycleStage
 from waystone.jobs.profile import RunAssembly as ProductionRunAssembly
 from waystone.jobs.domain import Role
 from waystone.project.context import ProjectContext
+from waystone.runs import outcome as outcome_module
 from waystone.runs.artifacts import (
     ArtifactReference,
     ArtifactReferenceKind,
@@ -593,22 +594,42 @@ class PromoteEvidenceContractTests(unittest.TestCase):
 
     def test_rejected_promotion_closes_no_delta_and_preserves_failed_state(self):
         fixture = test_run_outcome.OutcomeFixture(self)
-        original, result = fixture.ready_run()
-        faux_spec = SimpleNamespace(
-            run_id=original.run_id,
-            run_spec_digest=original.run_spec_digest,
+        original, _result = fixture.ready_run()
+        run = fixture.assembly.store.create_run(initial_state="dispatch-ready")
+        job_id = f"{run.run_id}:job"
+        fixture.assembly.store.create_job(
+            run.run_id, job_id, initial_state="running")
+        attempt_id = f"{run.run_id}:attempt:1"
+        attempt = fixture.assembly.store.create_attempt(
+            run.run_id, job_id, attempt_id, initial_state="running")
+        plan = self.plan(new_run_id(), risk=False)
+        plan_artifact = fixture.assembly.artifact_store.write(
+            plan.canonical_bytes())
+        spec = SimpleNamespace(
+            run_id=run.run_id,
+            run_spec_digest=self.d(12),
             lifecycle_stage=LifecycleStage.PROMOTE,
             objective_ref=original.objective_ref,
-            job_id=original.job_id,
+            job_id=job_id,
             job_input=original.job_input,
-            assurance_plan=original.assurance_plan,
+            assurance_plan=SimpleNamespace(digest=plan_artifact.digest),
+            promotion_lineage=SimpleNamespace(
+                id=plan.review["promotion_lineage_id"]),
+            candidate={
+                "digest": self.d(30),
+                "target_oid": "a" * 40,
+                "producer_result_digest": self.d(32),
+            },
+            evaluation={"evidence": {"digest": self.d(31)}},
         )
         verifier_artifact = fixture.assembly.artifact_store.write(b"rejected verifier")
         decision_artifact = fixture.assembly.artifact_store.write(b"reject decision")
         verifier = replace(
-            self.verifier(original.run_id),
+            self.verifier(run.run_id),
+            run_spec_digest=spec.run_spec_digest,
+            action_id=f"{run.run_id}:typed-independent-verify",
             artifact_reference=ArtifactReference(
-                f"verifier-evidence:{original.run_id}:typed-independent-verify",
+                f"verifier-evidence:{run.run_id}:typed-independent-verify",
                 ArtifactReferenceKind.EVIDENCE,
                 verifier_artifact.digest,
                 verifier_artifact.size,
@@ -616,18 +637,31 @@ class PromoteEvidenceContractTests(unittest.TestCase):
         )
         decision = replace(
             self.decision(
-                original.run_id, verifier, self.d(30), self.d(31), None,
+                run.run_id, verifier, spec.candidate["digest"],
+                spec.evaluation["evidence"]["digest"], None,
                 outcome=DecisionOutcome.REJECT),
             artifact_reference=ArtifactReference(
-                f"integration-decision:{original.run_id}:integration-decision",
+                f"integration-decision:{run.run_id}:integration-decision",
                 ArtifactReferenceKind.DECISION,
                 decision_artifact.digest,
                 decision_artifact.size,
             ),
         )
+        fixture.assembly.store.record_transition(
+            EntityKind.ATTEMPT,
+            attempt_id,
+            expected_version=attempt.version,
+            next_state="completed",
+            reason=TransitionReason.COMPLETED,
+            evidence_digest=decision.artifact_reference.digest,
+            artifact_references=(
+                verifier.artifact_reference,
+                decision.artifact_reference,
+            ),
+        )
         for kind, identity in (
-                (EntityKind.JOB, original.job_id),
-                (EntityKind.RUN, original.run_id)):
+                (EntityKind.JOB, job_id),
+                (EntityKind.RUN, run.run_id)):
             entity = (
                 fixture.assembly.store.get_run(identity)
                 if kind is EntityKind.RUN else
@@ -641,19 +675,44 @@ class PromoteEvidenceContractTests(unittest.TestCase):
                 reason=TransitionReason.PROCESS_FAILED,
                 evidence_digest=decision.artifact_reference.digest,
             )
-        body = yaml.safe_load(fixture.outcome_bytes(original, result))
-        body["lifecycle_stage"] = "promote"
-        outcome = yaml.safe_dump(body, sort_keys=False).encode()
+        binding = fixture.assembly.profile.binding_for(
+            Role.COORDINATOR).binding_digest
+        outcome = yaml.safe_dump({
+            "schema": "waystone-outcome-delta-1",
+            "run_id": spec.run_id,
+            "run_spec_digest": spec.run_spec_digest,
+            "lifecycle_stage": "promote",
+            "objective_ref": spec.objective_ref.to_dict(),
+            "kind": "no-objective-delta",
+            "summary": "The promotion was rejected.",
+            "result_digest": decision.result_digest,
+            "evidence_refs": [],
+            "finding_refs": [],
+            "recorded_by": {
+                "role": "coordinator",
+                "binding_digest": binding,
+                "principal": None,
+            },
+            "rationale": "The rejected candidate produced no objective delta.",
+        }, sort_keys=False).encode()
+        authority = outcome_module.FinalResultAuthority(
+            fixture.assembly.store.get_entity(EntityKind.ATTEMPT, attempt_id),
+            decision.result_digest,
+            (),
+        )
 
         with mock.patch(
-                "waystone.runs.outcome.load_run_spec", return_value=faux_spec), \
+                "waystone.runs.outcome.load_run_spec", return_value=spec), \
+                mock.patch(
+                    "waystone.runs.outcome._final_result_authority",
+                    return_value=authority), \
                 mock.patch(
                     "waystone.runs.outcome._rejected_promotion_decision",
                     return_value=decision):
-            StagedRunEngine(fixture.assembly).close(original.run_id, outcome)
+            StagedRunEngine(fixture.assembly).close(run.run_id, outcome)
 
         self.assertEqual(
-            fixture.assembly.store.get_run(original.run_id).state,
+            fixture.assembly.store.get_run(run.run_id).state,
             "failed",
         )
         entry = read_outcome_ledger(fixture.root)[0]

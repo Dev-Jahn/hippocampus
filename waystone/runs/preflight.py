@@ -2045,15 +2045,21 @@ def _load_receipt_manifest(
     return payloads
 
 
-def load_dispatch_ready(
-        run_id: str, *, start: Path | None = None) -> DispatchReady:
+def _load_dispatch_authority(
+        run_id: str, *, accepted_run_states: frozenset[str],
+        start: Path | None = None) -> DispatchReady:
     """Reconstruct dispatch authority only from committed, rehashed preflight artifacts."""
     root = _project_root(start)
     plan = load_verification_plan(run_id, start=root)
     with RunStore.open(root) as store:
         run = store.get_run(run_id)
-        if run.state != "dispatch-ready":
-            raise VerificationPlanStateError(run_id, run.state, "dispatch-ready")
+        if run.state not in accepted_run_states:
+            expected = (
+                next(iter(accepted_run_states))
+                if len(accepted_run_states) == 1
+                else "|".join(sorted(accepted_run_states))
+            )
+            raise VerificationPlanStateError(run_id, run.state, expected)
         try:
             reference = store.get_artifact_reference(
                 f"{_PREFLIGHT_REFERENCE_PREFIX}{run_id}")
@@ -2234,6 +2240,31 @@ def load_dispatch_ready(
         verification_plan_digest=plan.verification_plan_digest,
         preflight_evidence_digest=reference.digest,
         engine_actions=actions,
+    )
+
+
+def load_dispatch_ready(
+        run_id: str, *, start: Path | None = None) -> DispatchReady:
+    """Reconstruct current operational dispatch-ready authority."""
+    return _load_dispatch_authority(
+        run_id,
+        accepted_run_states=frozenset({"dispatch-ready"}),
+        start=start,
+    )
+
+
+def load_terminal_safe_dispatch_authority(
+        run_id: str, *, start: Path | None = None) -> DispatchReady:
+    """Reconstruct immutable dispatch authority in supported public reload states."""
+    return _load_dispatch_authority(
+        run_id,
+        accepted_run_states=frozenset({
+            "closeout-ready",
+            "completed",
+            "dispatch-ready",
+            "failed",
+        }),
+        start=start,
     )
 
 

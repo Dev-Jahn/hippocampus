@@ -54,6 +54,7 @@ from waystone.runs.preflight import (
     SandboxContract,
     VerificationPlan,
     load_dispatch_ready,
+    load_terminal_safe_dispatch_authority,
     load_verification_plan,
 )
 from waystone.runs.spec import BaseSnapshot, RunSpec, load_run_spec, read_base_snapshot
@@ -839,13 +840,14 @@ def fingerprint_worktree(repository: Path) -> WorktreeFingerprint:
     return WorktreeFingerprint(_digest(_canonical_json(payload)))
 
 
-def _authority(
+def _load_authority(
         run_id: str, root: Path,
+        dispatch_loader: Callable[..., DispatchReady],
         ) -> tuple[RunSpec, BaseSnapshot, VerificationPlan, DispatchReady]:
     spec = load_run_spec(run_id, start=root)
     snapshot = read_base_snapshot(run_id, start=root)
     plan = load_verification_plan(run_id, start=root)
-    dispatch = load_dispatch_ready(run_id, start=root)
+    dispatch = dispatch_loader(run_id, start=root)
     if (snapshot.head != spec.base_snapshot.head
             or plan.run_id != spec.run_id or plan.job_id != spec.job_id
             or plan.run_spec_digest != spec.run_spec_digest
@@ -853,6 +855,18 @@ def _authority(
             or dispatch.verification_plan_digest != plan.verification_plan_digest):
         raise EvidenceBindingRefusal("RunSpec, VerificationPlan, and preflight disagree")
     return spec, snapshot, plan, dispatch
+
+
+def _authority(
+        run_id: str, root: Path,
+        ) -> tuple[RunSpec, BaseSnapshot, VerificationPlan, DispatchReady]:
+    return _load_authority(run_id, root, load_dispatch_ready)
+
+
+def _terminal_reload_authority(
+        run_id: str, root: Path,
+        ) -> tuple[RunSpec, BaseSnapshot, VerificationPlan, DispatchReady]:
+    return _load_authority(run_id, root, load_terminal_safe_dispatch_authority)
 
 
 def _verifier_capability(plan: VerificationPlan) -> RoleCapability:
@@ -2468,7 +2482,7 @@ def reload_verifier_evidence(
     root = Path.cwd().resolve() if start is None else Path(start).resolve(strict=True)
     expected_attempt = _nonempty(attempt_id, "attempt_id")
     expected_action = _nonempty(action_id, "action_id")
-    spec, _snapshot, plan, dispatch = _authority(run_id, root)
+    spec, _snapshot, plan, dispatch = _terminal_reload_authority(run_id, root)
     evidence = _load_verifier_evidence(
         root,
         f"verifier-evidence:{expected_action}",
@@ -3145,7 +3159,7 @@ def reload_integration_decision(
     expected_action = _nonempty(action_id, "action_id")
     expected_verifier_action = _nonempty(
         verifier_action_id, "verifier_action_id")
-    spec, _snapshot, plan, dispatch = _authority(run_id, root)
+    spec, _snapshot, plan, dispatch = _terminal_reload_authority(run_id, root)
     try:
         evidence = _load_verifier_evidence(
             root,

@@ -30,11 +30,16 @@ from waystone.jobs import completion, work_brief
 from waystone.jobs.completion import LifecycleStage
 from waystone.jobs.domain import Role
 from waystone.jobs.profile import assemble_run, read_profile
-from waystone.jobs.run_scaffold import RunScaffoldRefusal, scaffold_work_brief
+from waystone.jobs.run_scaffold import (
+    RunScaffoldRefusal,
+    scaffold_outcome_delta,
+    scaffold_work_brief,
+)
 from waystone.project.brief import read_project_frame_at_commit
 from waystone.project.context import resolve_project_context
 from waystone.runs.artifacts import ArtifactStore
 from waystone.runs.engine import EngineBindingRefusal, StagedRunEngine
+from waystone.runs.outcome import read_outcome_ledger
 from waystone.runs.preflight import EnvironmentPreparationUnavailableError
 from waystone.runs.spec import load_run_spec
 from waystone.runs.store import (
@@ -842,6 +847,140 @@ class RunCliTests(unittest.TestCase):
         self.assertEqual(git(self.root, "write-tree").stdout.strip(), public_index)
         self.assertEqual(
             git(self.root, "status", "--porcelain=v1").stdout, public_status)
+
+        outcome_draft = self.base / "promote-outcome-draft.yaml"
+        outcome_draft.write_text(yaml.safe_dump({
+            "kind": "no-objective-delta",
+            "summary": "The approved candidate was published to the private integration ref.",
+            "evidence_refs": [],
+            "finding_refs": [],
+            "rationale": "Public delivery remains outside this bounded promotion run.",
+        }, sort_keys=False), encoding="utf-8")
+        with self.runtime():
+            context = resolve_project_context(Path.cwd())
+            with assemble_run(context) as assembly:
+                completed_outcome = scaffold_outcome_delta(
+                    assembly,
+                    promote_id,
+                    outcome_draft.read_bytes(),
+                )
+        completed_body = yaml.safe_load(completed_outcome)
+        self.assertNotEqual(
+            completed_body["result_digest"],
+            promote_spec.candidate["producer_result_digest"],
+        )
+        completed_outcome_path = self.base / "promote-outcome.yaml"
+        completed_outcome_path.write_bytes(completed_outcome)
+        mismatched = yaml.safe_load(completed_outcome)
+        mismatched["result_digest"] = "sha256:" + "0" * 64
+        mismatched_path = self.base / "promote-outcome-mismatched.yaml"
+        mismatched_path.write_text(
+            yaml.safe_dump(mismatched, sort_keys=False), encoding="utf-8")
+        with self.runtime() as close_output:
+            self.assertNotEqual(run_group.main([
+                "close", promote_id, "--outcome", str(mismatched_path),
+            ]), 0)
+        refusal = json.loads(close_output.getvalue())
+        self.assertIn("approved GitResultTriple", refusal["detail"])
+
+        with self.runtime() as close_output:
+            self.assertEqual(run_group.main([
+                "close", promote_id, "--outcome-draft", str(outcome_draft),
+            ]), 0, close_output.getvalue())
+        with self.runtime() as close_output:
+            self.assertEqual(run_group.main([
+                "close", promote_id, "--outcome", str(completed_outcome_path),
+            ]), 0, close_output.getvalue())
+
+        with mock.patch(
+                "waystone.runs.store._probe_state_filesystem",
+                return_value=FilesystemInfo(
+                    filesystem="apfs", mount_point=Path("/"), writable=True)), \
+                RunStore.open(self.root) as store:
+            self.assertEqual(store.get_run(promote_id).state, "completed")
+        ledger = read_outcome_ledger(self.root)
+        self.assertEqual(len(ledger), 1)
+        self.assertEqual(ledger[0].outcome.run_id, promote_id)
+        completion_refs = {
+            item["reference_id"]: item["digest"]
+            for item in ledger[0].closeout.completion_evidence_refs
+        }
+        self.assertIn(
+            f"verifier-evidence:{promote_id}:typed-independent-verify",
+            completion_refs,
+        )
+        self.assertIn(
+            f"integration-decision:{promote_id}:integration-decision",
+            completion_refs,
+        )
+        self.assertIn(
+            f"review-cycle:{promote_spec.promotion_lineage.id}:1",
+            completion_refs,
+        )
+        apply_action = f"{promote_id}:target-ref-apply"
+        self.assertIn(f"effect-plan:{apply_action}", completion_refs)
+        self.assertEqual(
+            len([
+                reference_id for reference_id in completion_refs
+                if reference_id.startswith(f"effect-observation:{apply_action}:")
+            ]),
+            1,
+        )
+
+        reload_code = """
+import json
+from pathlib import Path
+from unittest import mock
+from waystone.jobs.profile import assemble_run
+from waystone.project.context import resolve_project_context
+from waystone.runs import outcome as outcome_module
+from waystone.runs.outcome import read_outcome_ledger
+from waystone.runs.spec import load_run_spec
+from waystone.runs.store import FilesystemInfo
+
+root = Path.cwd()
+with mock.patch(
+        "waystone.runs.store._probe_state_filesystem",
+        return_value=FilesystemInfo("apfs", Path("/"), writable=True)):
+    context = resolve_project_context(root)
+    with assemble_run(context) as assembly:
+        entry = read_outcome_ledger(root)[-1]
+        spec = load_run_spec(entry.outcome.run_id, start=root)
+        authority = outcome_module._final_result_authority(assembly, spec)
+        print(json.dumps({
+            "result_digest": authority.result_digest,
+            "completion_refs": list(authority.completion_references),
+        }, sort_keys=True))
+"""
+        reloaded = subprocess.run(
+            [sys.executable, "-c", reload_code],
+            cwd=self.root,
+            env={
+                **os.environ,
+                "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+                "WAYSTONE_HOME": str(self.machine),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(reloaded.returncode, 0, reloaded.stderr)
+        fresh = json.loads(reloaded.stdout)
+        self.assertEqual(fresh["result_digest"], ledger[0].outcome.result_digest)
+        self.assertEqual(
+            {
+                item["reference_id"]: item["digest"]
+                for item in fresh["completion_refs"]
+            },
+            completion_refs,
+        )
+        self.assertEqual(
+            git(self.root, "rev-parse", private_ref).stdout.strip(), candidate_oid)
+        self.assertEqual(git(self.root, "symbolic-ref", "HEAD").stdout.strip(), public_ref)
+        self.assertEqual(git(self.root, "rev-parse", "HEAD").stdout.strip(), public_oid)
+        self.assertEqual(git(self.root, "write-tree").stdout.strip(), public_index)
+        self.assertEqual(
+            git(self.root, "status", "--porcelain=v1").stdout, public_status)
         for name in ("evaluate-verdict.txt", "promote-verdict.txt"):
             (self.root / name).write_text("pass\n", encoding="utf-8")
         fail_worktree = self.base / "fail-candidate-worktree"
@@ -929,7 +1068,7 @@ class RunCliTests(unittest.TestCase):
                 return_value=FilesystemInfo(
                     filesystem="apfs", mount_point=Path("/"), writable=True)), \
                 RunStore.open(self.root) as store:
-            self.assertEqual(store.get_run(promote_id).state, "closeout-ready")
+            self.assertEqual(store.get_run(promote_id).state, "completed")
             verifier_ref = store.get_artifact_reference(
                 f"verifier-evidence:{promote_id}:typed-independent-verify")
             launch_ref = store.get_artifact_reference(
