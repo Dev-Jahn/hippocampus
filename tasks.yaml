@@ -363,18 +363,22 @@ tasks:
     severity: "minor"
     origin: "review-2026-07-23-013-provenance-closure"
   - id: fix/promotion-verifier-execution-binding
+    result: "dev 1e9c0ce (원 7518dce): RunnerExecutionDescriptor start-freeze + 3지점 exact-match + launch v3 + VerifierEvidence/reload/decision 결속. 회귀 4건, main 독립 gate 288 OK + base 구조 RED 4/4 재현"
     title: "promotion verifier 실행 environment·executable을 frozen execution descriptor로 preflight·VerifierEvidence·decision·apply 권위 체인에 결속 — start/resume drift·binary 교체 fail-closed (WS-GPT-029)"
-    status: "pending"
+    status: "done"
     severity: "major"
     origin: "review-2026-07-24-013-authority-closure"
   - id: fix/git-ambient-environment-authority
+    result: "dev 5714fae (원 da0359e): 중앙 build_git_environment로 전 production Git subprocess ambient GIT_* strip. 회귀 6건 신규, main 독립 gate 290 OK + base-RED 6/6 재현"
     title: "engine 소유 Git subprocess 전체에 중앙 sanitized environment 계약(ambient GIT_* strip + operation-owned override만) 적용 — repository authority 재지정 차단 (WS-GPT-030)"
-    status: "pending"
+    status: "done"
     severity: "major"
     origin: "review-2026-07-24-013-authority-closure"
   - id: fix/promotion-closeout-result-authority
+    result: "dev 73391ff (원 ed0bde4+490218d): stage-aware _final_result_authority(promote=approved GitResultTriple digest+decision tuple 재검증+apply refs, worker-result 존재 거부) + terminal-safe public reload(preflight 상태정책 분리, operational gate 보존). full-chain E2E 신설. main 독립 gate 298 OK + base-RED 3종 재현"
+    ruling: "R3 수정(자율 확정 2026-07-26): candidate.producer_result_digest≡GitResultTriple.result_digest 등식 요구 철회 — 두 값은 설계상 다른 층위 identity(producer=worker-result artifact, reviewer cycle target 검증용 engine.py:360·365 / triple=git canonical bytes, decision 등식 engine.py:385). promote OutcomeDelta.result_digest=decision이 결속한 approved GitResultTriple digest, candidate 연결은 decision.candidate_digest+apply 관찰 OID로 재검증. 옵션 A(candidate publication 의미 migration)는 파급 범위로 기각. 근거: fix031 1차 기체의 BLOCKED 보고(동적 재현) + main 코드 대조"
     title: "promote closeout result authority를 stage-aware로 분리 — worker-result 무조건 요구 제거, approved GitResultTriple 기반 + full-chain close/ledger E2E (WS-GPT-031)"
-    status: "pending"
+    status: "done"
     severity: "major"
     origin: "review-2026-07-24-013-authority-closure"
   - id: fix/review-programmatic-context-proof
