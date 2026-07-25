@@ -50,6 +50,7 @@ MODULES = (
     "test_policy",
     "test_release",
     "test_hooks",
+    "test_git_ambient_authority",
 )
 
 

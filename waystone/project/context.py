@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from waystone.adapters.git import build_git_environment
 from waystone.core import WorkflowError
 from waystone.project import registry_path
 
@@ -79,9 +79,6 @@ def _git_context(start: Path) -> _GitContext:
         supplied = Path(start).expanduser().resolve(strict=True)
     except OSError as error:
         raise ProjectContextError(f"cannot resolve checkout selector {start}: {error}") from error
-    environment = {
-        name: value for name, value in os.environ.items() if not name.startswith("GIT_")
-    }
     try:
         result = subprocess.run(
             [
@@ -91,7 +88,8 @@ def _git_context(start: Path) -> _GitContext:
             capture_output=True,
             text=True,
             timeout=15,
-            env=environment,
+            env=build_git_environment(
+                overrides={"GIT_OPTIONAL_LOCKS": "0"}),
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
@@ -153,16 +151,14 @@ def _registered_context(entry: dict[str, Any], source: Path) -> tuple[str, _GitC
 
 
 def _registered_worktree_roots(context: _GitContext) -> frozenset[Path]:
-    environment = {
-        name: value for name, value in os.environ.items() if not name.startswith("GIT_")
-    }
     try:
         result = subprocess.run(
             ["git", "--git-dir", str(context.common_dir), "worktree", "list", "--porcelain"],
             capture_output=True,
             text=True,
             timeout=15,
-            env=environment,
+            env=build_git_environment(
+                overrides={"GIT_OPTIONAL_LOCKS": "0"}),
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as error:

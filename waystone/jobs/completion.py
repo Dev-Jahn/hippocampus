@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence, TypeAlias
 
 import yaml
 
+from waystone.adapters.git import build_git_environment
 from waystone.core import WorkflowError
 from waystone.project.brief import read_project_frame_at_commit
 from waystone.runs.artifacts import ArtifactStore, StoredArtifact, validate_sha256_digest
@@ -410,6 +411,8 @@ def _git_bytes(root: Path, commit: str, path: str, field: str) -> bytes:
     try:
         process = subprocess.run(
             ["git", "show", f"{commit}:{path}"], cwd=root, check=False,
+            env=build_git_environment(
+                overrides={"GIT_OPTIONAL_LOCKS": "0"}),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
     except OSError as error:

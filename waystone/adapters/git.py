@@ -6,6 +6,7 @@ import re
 import subprocess
 import uuid
 from pathlib import Path
+from typing import Mapping
 
 
 class GitReadError(RuntimeError):
@@ -26,6 +27,47 @@ class GitReadError(RuntimeError):
 _READ_ONLY_BYTE_COMMANDS = frozenset({
     "cat-file", "diff", "ls-files", "ls-tree", "rev-parse", "show", "status",
 })
+_READ_ONLY_COMMANDS = _READ_ONLY_BYTE_COMMANDS | frozenset({
+    "check-ref-format", "diff-tree", "for-each-ref", "merge-base", "rev-list",
+})
+_GIT_ENVIRONMENT_OVERRIDES = frozenset({
+    "GIT_AUTHOR_DATE",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_AUTHOR_NAME",
+    "GIT_COMMITTER_DATE",
+    "GIT_COMMITTER_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_INDEX_FILE",
+    "GIT_OPTIONAL_LOCKS",
+})
+
+
+def build_git_environment(
+        *, overrides: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Build one engine-owned Git environment without ambient repository selectors."""
+    environment = {
+        name: value for name, value in os.environ.items()
+        if not name.startswith("GIT_")
+    }
+    environment.update({"GIT_PAGER": "cat", "LC_ALL": "C"})
+    operation_values = dict(overrides or {})
+    refused = sorted(set(operation_values).difference(_GIT_ENVIRONMENT_OVERRIDES))
+    if refused:
+        raise ValueError(
+            "Git environment overrides are not allowed: " + ", ".join(refused))
+    environment.update(operation_values)
+    return environment
+
+
+def _git_environment_for(args: tuple[str, ...]) -> dict[str, str]:
+    read_only = bool(args) and (
+        args[0] in _READ_ONLY_COMMANDS
+        or (args[0] == "branch" and "--show-current" in args)
+        or (args[0] == "symbolic-ref" and "--quiet" in args)
+        or (args[0] == "worktree" and len(args) > 1 and args[1] == "list")
+    )
+    return build_git_environment(
+        overrides={"GIT_OPTIONAL_LOCKS": "0"} if read_only else None)
 
 
 def git_read_bytes(root: Path, *args: str, timeout: int = 15) -> bytes:
@@ -37,12 +79,8 @@ def git_read_bytes(root: Path, *args: str, timeout: int = 15) -> bytes:
     if not args or args[0] not in _READ_ONLY_BYTE_COMMANDS:
         command = args[0] if args else "<missing>"
         raise ValueError(f"git_read_bytes does not allow command {command!r}")
-    environment = {
-        **os.environ,
-        "GIT_OPTIONAL_LOCKS": "0",
-        "GIT_PAGER": "cat",
-        "LC_ALL": "C",
-    }
+    environment = build_git_environment(
+        overrides={"GIT_OPTIONAL_LOCKS": "0"})
     try:
         result = subprocess.run(
             ["git", "-C", str(root), *args],
@@ -65,6 +103,7 @@ def git_rc(root: Path, *args: str) -> tuple[int, str, str]:
     try:
         out = subprocess.run(
             ["git", "-C", str(root), *args], capture_output=True, text=True, timeout=15,
+            env=_git_environment_for(args),
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         return (127, "", str(e))
@@ -262,6 +301,7 @@ def git(root: Path, *args: str) -> str:
         out = subprocess.run(
             ["git", "-C", str(root), *args],
             capture_output=True, text=True, timeout=10,
+            env=_git_environment_for(args),
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""

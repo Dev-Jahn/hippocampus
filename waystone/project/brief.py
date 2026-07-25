@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from waystone.adapters.git import build_git_environment
 from waystone.core import WorkflowError, write_bytes_atomic
 from waystone.runs.artifacts import ArtifactStore, StoredArtifact, validate_sha256_digest
 
@@ -441,6 +442,8 @@ def read_project_frame_at_commit(
             ["git", "show", f"{commit}:{relative}"],
             cwd=root,
             check=False,
+            env=build_git_environment(
+                overrides={"GIT_OPTIONAL_LOCKS": "0"}),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -457,6 +460,8 @@ def read_project_frame_at_commit(
             ["git", "merge-base", "--is-ancestor", commit, current_commit],
             cwd=root,
             check=False,
+            env=build_git_environment(
+                overrides={"GIT_OPTIONAL_LOCKS": "0"}),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )

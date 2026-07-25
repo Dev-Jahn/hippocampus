@@ -25,7 +25,6 @@ threshold; the live registry stays small.
 """
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 import sys
@@ -39,6 +38,7 @@ from common import (
     WorkflowError, canonical_scope_prefixes, find_project_root, hold_project_lock, load_tasks,
     migrate_project_state, normalize_scope_prefix, require_initialized_root, write_text_atomic,
 )  # noqa: E402
+from waystone.adapters.git import build_git_environment  # noqa: E402
 
 ARCHIVE_NAME = "tasks.archive.yaml"
 ARCHIVE_THRESHOLD = 100   # only archive once the registry has at least this many tasks
@@ -487,12 +487,13 @@ def _git_checkout_context(root: Path, action: str) -> tuple[Path, Path, Path] | 
     """Return scrubbed Git/private-common/top-level paths, or None for a non-Git project."""
     has_git_marker = any((candidate / ".git").exists() or (candidate / ".git").is_symlink()
                          for candidate in (root, *root.parents))
-    env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
     try:
         probe = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--git-dir", "--git-common-dir",
              "--show-toplevel"],
-            capture_output=True, text=True, timeout=15, env=env,
+            capture_output=True, text=True, timeout=15,
+            env=build_git_environment(
+                overrides={"GIT_OPTIONAL_LOCKS": "0"}),
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         if not has_git_marker:

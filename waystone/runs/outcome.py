@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -12,7 +11,11 @@ from typing import Any, Mapping, Sequence
 
 import yaml
 
-from waystone.adapters.git import git_full_sha, git_read_bytes
+from waystone.adapters.git import (
+    build_git_environment,
+    git_full_sha,
+    git_read_bytes,
+)
 from waystone.core import WorkflowError
 from waystone.features.review_layout import is_uuid7
 from waystone.jobs.completion import parse_objective_ref
@@ -392,9 +395,12 @@ def _canonical_yaml(payload: Mapping[str, Any]) -> bytes:
 
 def _git(root: Path, *args: str, input_bytes: bytes | None = None,
          environment: Mapping[str, str] | None = None) -> bytes:
+    operation_environment = dict(environment or {})
+    if args and args[0] in {"diff-tree", "rev-list"}:
+        operation_environment["GIT_OPTIONAL_LOCKS"] = "0"
     result = subprocess.run(
         ["git", "-C", str(root), *args], input=input_bytes, capture_output=True,
-        env=None if environment is None else {**os.environ, **environment}, timeout=15,
+        env=build_git_environment(overrides=operation_environment), timeout=15,
         check=False,
     )
     if result.returncode != 0:
