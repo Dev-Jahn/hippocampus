@@ -362,3 +362,23 @@ tasks:
     status: "pending"
     severity: "minor"
     origin: "review-2026-07-23-013-provenance-closure"
+  - id: fix/promotion-verifier-execution-binding
+    title: "promotion verifier 실행 environment·executable을 frozen execution descriptor로 preflight·VerifierEvidence·decision·apply 권위 체인에 결속 — start/resume drift·binary 교체 fail-closed (WS-GPT-029)"
+    status: "pending"
+    severity: "major"
+    origin: "review-2026-07-24-013-authority-closure"
+  - id: fix/git-ambient-environment-authority
+    title: "engine 소유 Git subprocess 전체에 중앙 sanitized environment 계약(ambient GIT_* strip + operation-owned override만) 적용 — repository authority 재지정 차단 (WS-GPT-030)"
+    status: "pending"
+    severity: "major"
+    origin: "review-2026-07-24-013-authority-closure"
+  - id: fix/promotion-closeout-result-authority
+    title: "promote closeout result authority를 stage-aware로 분리 — worker-result 무조건 요구 제거, approved GitResultTriple 기반 + full-chain close/ledger E2E (WS-GPT-031)"
+    status: "pending"
+    severity: "major"
+    origin: "review-2026-07-24-013-authority-closure"
+  - id: fix/review-programmatic-context-proof
+    title: "review programmatic 함수 4종(ingest_feedback·validate_file·disposition_file·attach_review)에 ProjectContext proof 요구 — materialize와 front door 계약 통일 (리뷰 open Q3 ruling)"
+    status: "pending"
+    severity: "minor"
+    origin: "review-2026-07-24-013-authority-closure"
