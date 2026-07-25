@@ -2,6 +2,20 @@
 
 round 단위 작업 이력이 이 파일에 축적된다. 활성 task와 의존성은 `tasks.yaml`(CLI: `waystone task`)과 생성 파일 `ROADMAP.md` 참조.
 
+## 2026-07-26-013-binding-closure
+
+- **Goal**: 3차 재리뷰 회신(CHANGES REQUESTED — Critical 0/Major 3, WS-GPT-029·030·031 전량 REAL 확정; 직전 major 3건은 실질 폐쇄 인정) 폐쇄 + open Q3 파생 minor. w0726 wave: finding당 적대 verifier 3기 선행(codex sol xhigh/high/high — 030은 tempdir 동적 재현 포함), 구현 codex 4기(sol xhigh/high/high/medium)·worktree 격리(base 9daaa56), 전 기 main 독립 재검증(전체 게이트 재실행·base-RED 재현·diff 정독).
+- **Shipped**:
+  - fix/promotion-verifier-execution-binding — RunnerExecutionDescriptor(env digest·canonical executable path·bytes sha256·backend/binding digest, raw 값 비영속)를 promote start에서 CAS freeze, resume·stage invocation·spawn 직전 3지점 exact-match typed refusal(재시작 안내), launch schema v3, VerifierEvidence에 descriptor/launch reference 동반 필수, invocation digest 결속, reload 전량 재검증, decision validation이 reference 부재 거부 (done; 1e9c0ce, 원 7518dce)
+  - fix/git-ambient-environment-authority — adapters/git.py에 build_git_environment(ambient GIT_* 전면 strip + override allowlist{INDEX_FILE·OPTIONAL_LOCKS·AUTHOR/COMMITTER}, repository selector 재주입 API 거부) 신설, git_read_bytes/git_rc/git() 3함수·outcome._git·brief.py·completion.py·tasks_cli.py 직호출·context.py 지역 scrub 전부 통일 (done; 5714fae, 원 da0359e)
+  - fix/promotion-closeout-result-authority — stage-aware _final_result_authority(scaffold/publication 공유): promote는 worker-result 존재 거부(위조 차단)+public reload로 decision tuple 전량 재검증 후 approved GitResultTriple digest를 result identity로, apply effect-plan/observation을 completion refs로 결속(schema 무확장); preflight에 _load_dispatch_authority 상태정책 분리 — terminal-safe loader({dispatch-ready,closeout-ready,completed,failed})는 public reload 2곳 전용, operational gate 보존(+보존 회귀); full-chain E2E(explore→evaluate→promote→close→completed→ledger 게시→fresh reload) 신설 (done; 73391ff, 원 ed0bde4+490218d)
+  - fix/review-programmatic-context-proof — review programmatic API 4종+wrapper에 canonical ProjectContext proof(_canonical_review_root: ReviewContextRequired·CanonicalRootIsLinkedWorktree typed refusal), materialize 선례와 계약 통일 (done; 6df3fb2, 원 5b9534c)
+- **Gates**: full suite 284→**303** green(중간 조합 294 @ 1e9c0ce + 최종 조합 OK @ 6df3fb2, 각 worktree 게이트 290·288·298·303 main 재실행). 전 task base-RED main 독립 재현 — 029 구조 RED 4/4·030 6건 전량 FAIL(GIT_WORK_TREE status 오염·effects B-redirect 실연)·031 구조 2/2+e2e6 정확한 거부 문구+terminal reload FAIL·minor 8/9.
+- **Incidents**: fix031 2회 BLOCKED — 둘 다 정당한 정지(임의 우회 없음). ① 브리프 R3의 전제 오류(candidate producer digest≡GitResultTriple digest 등식 — 서로 다른 층위 identity)를 기체가 동적 재현으로 검출 ② 수리에 필요한 verify.py가 병행 fix029에 예약. 각각 ruling 수정·scope 한정 해제로 재발진 회수, 작업 손실 0(worktree WIP 보존 + main이 dev 사전 동기화 머지).
+- **Decisions**(ruling 자율권): ① 031-R3 수정 — 등식 요구 철회, result identity=decision이 결속한 approved GitResultTriple digest(옵션 A candidate publication migration은 파급 범위로 기각) ② verify.py terminal-safe reload 허용 — public reload 2곳만, load_dispatch_ready 전면 terminal-open 기각 ③ Q1=start-time freeze+resume exact-match(raw env 비영속 — secret 회피) ④ Q2=GitResultTriple digest ⑤ Q3=ProjectContext proof 요구(privatize 기각) ⑥ Q4=HOME 내 tool config bytes는 solo-local trust boundary(보증 문구 수준 확정) ⑦ executable TOCTOU 위협모델=세션 간 drift 검출까지(재관측→exec 동시 교체 창은 known boundary).
+- **Review**: 리뷰어가 남긴 세 부등식(preflighted verifier env/tool ≠ 실행 env/tool, canonical ProjectContext ≠ ambient-Git-selected repository, successful promotion ≠ durably closeable run) 전량 폐쇄 — 재리뷰 요청 이 round에서 게시(이번 회신이 release 재판정).
+- **Next**: 재리뷰 회신 대기 → 실 release(owner; 잔여 판단 2건은 chore/013-release-prep notes) → feat/lifecycle-maintenance-path(major) → fix/runtime-publication-race(minor) → GC 계열(candidate-contexts + private integration ref durable 누적).
+
 ## 2026-07-24-013-authority-closure
 
 - **Goal**: 재리뷰 회신(CHANGES REQUESTED — Critical 0/Major 3, WS-GPT-026·027·028 전량 REAL 확정) 폐쇄. w0724 wave: codex 3기(sol xhigh/high/high) 병렬·worktree 격리(base 1ded7e7), 전 기 main 독립 재검증(전체 게이트 재실행·base-RED 재현·diff 정독).
