@@ -84,6 +84,8 @@ class RunCliTests(unittest.TestCase):
             "name": "demo",
             "path": str(self.root.resolve()),
         }]}), encoding="utf-8")
+        self.context = resolve_project_context(
+            self.root, registry=self.machine / "projects.json")
         self.brief_path = self.base / "work-brief.json"
         self.brief_path.write_bytes(completion.canonical_json(
             payload(self.head, self.frame, new_run_id())))
@@ -809,10 +811,10 @@ class RunCliTests(unittest.TestCase):
                 "findings": [],
             }, sort_keys=False), encoding="utf-8")
             review_group.ingest_feedback(
-                self.root, review_run_id, feedback_path,
+                self.context, review_run_id, feedback_path,
                 binding_digest=reviewer_binding,
             )
-            review_group.attach_review(self.root, promote_id, review_run_id)
+            review_group.attach_review(self.context, promote_id, review_run_id)
             git(self.root, "add", "docs/reviews")
             self.assertEqual(git(
                 self.root, "commit", "-qm", "promotion review fixture").returncode, 0)

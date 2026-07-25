@@ -189,18 +189,18 @@ class FindingChainTests(unittest.TestCase):
                           "claim": "A confirmed failure mechanism", "evidence": ["reproduction"],
                           "impact": "major"}],
         }).encode())
-        claim = review_group.ingest_feedback(self.root, self.run_id, source)[0]
+        claim = review_group.ingest_feedback(self.context, self.run_id, source)[0]
         self.finding_id = claim.payload["finding_id"]
         validation_file = self.root / "validation.yaml"
         validation_file.write_bytes(findings.canonical_bytes(self.validation_payload(claim.digest)))
         validation = review_group.validate_file(
-            self.root, self.run_id, claim.payload["finding_id"], validation_file)
+            self.context, self.run_id, claim.payload["finding_id"], validation_file)
         disposition_file = self.root / "disposition.yaml"
         disposition_file.write_bytes(findings.canonical_bytes(
             self.disposition_payload(claim.digest, validation.digest,
                                      disposition="fix-before-promotion", relevance="promotion-bound")))
         review_group.disposition_file(
-            self.root, self.run_id, claim.payload["finding_id"], disposition_file)
+            self.context, self.run_id, claim.payload["finding_id"], disposition_file)
         task_id = review_group.materialize(
             self.context, self.run_id, claim.payload["finding_id"])
         registry = yaml.safe_load((self.root / "tasks.yaml").read_text())

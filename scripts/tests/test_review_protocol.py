@@ -29,11 +29,13 @@ class ReviewProtocolTests(unittest.TestCase):
     def test_p5_review_attach_is_a_public_minimal_promotion_lineage_bridge(self):
         promotion_run_id = new_run_id()
         review_run_id = new_run_id()
+        context = SimpleNamespace()
+        context.canonical_root = Path("/unused")
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(
                     review_group,
                     "_review_context",
-                    return_value=SimpleNamespace(canonical_root=Path(directory)),
+                    return_value=context,
                 ), \
                 mock.patch.object(
                     review_group, "attach_review",
@@ -44,7 +46,7 @@ class ReviewProtocolTests(unittest.TestCase):
             ])
         self.assertEqual(result, 0)
         attach.assert_called_once_with(
-            Path(directory), promotion_run_id, review_run_id)
+            context, promotion_run_id, review_run_id)
 
 
 if __name__ == "__main__":

@@ -7,13 +7,20 @@ from support import *  # noqa: F401,F403
 import contextlib
 import io
 import json
+from types import SimpleNamespace
 from unittest import mock
 
 from test_work_brief import init_project
 from waystone.cli import review_group
 from waystone.features import review_layout
 from waystone.project import tasks_cli
+from waystone.project.brief import read_project_frame_at_commit
+from waystone.project.context import (
+    CanonicalRootIsLinkedWorktree,
+    resolve_project_context,
+)
 from waystone.reviews import findings
+from waystone.runs.artifacts import ArtifactStore
 
 
 class ReviewCanonicalRootTests(unittest.TestCase):
@@ -77,6 +84,9 @@ class ReviewCanonicalRootTests(unittest.TestCase):
             "name": "demo",
             "path": str(self.root.resolve()),
         }]}), encoding="utf-8")
+        self.registry = self.machine / "projects.json"
+        self.context = resolve_project_context(self.root, registry=self.registry)
+        self.linked_context = resolve_project_context(self.linked, registry=self.registry)
         self.next_disposition = self.base / "next-disposition.yaml"
         self.next_disposition.write_bytes(findings.canonical_bytes(self._disposition_payload(
             claim.digest,
@@ -260,6 +270,135 @@ class ReviewCanonicalRootTests(unittest.TestCase):
             review_group.materialize(self.linked, self.run_id, self.finding_id)
         cmd_add.assert_not_called()
         self.assertEqual(self._tracked_review_bytes(self.linked), before)
+
+    def test_p5_ingest_programmatic_api_requires_canonical_context(self):
+        run_id = review_layout.new_run_id()
+        source = self.base / "programmatic-feedback.yaml"
+        source.write_text(json.dumps({
+            "target": {
+                "run_spec_digest": self._digest(11),
+                "result_digest": self._digest(12),
+            },
+            "binding_digest": self._digest(13),
+            "findings": [{
+                "source_finding_id": "WS-GPT-032",
+                "claim": "Programmatic review mutation requires canonical proof.",
+                "evidence": ["linked worktree context"],
+                "impact": "minor",
+            }],
+        }), encoding="utf-8")
+
+        with self.assertRaises(CanonicalRootIsLinkedWorktree):
+            review_group.ingest_feedback(self.linked_context, run_id, source)
+        claims = review_group.ingest_feedback(self.context, run_id, source)
+        self.assertEqual(len(claims), 1)
+
+    def test_p5_validate_programmatic_api_requires_canonical_context(self):
+        payload = self._validation_payload(
+            findings.read_claim(self.reviews, self.run_id, self.finding_id).digest)
+        payload.update({
+            "revision": 2,
+            "supersedes_digest": findings.validation_head(
+                self.reviews, self.run_id, self.finding_id).digest,
+            "failure_mechanism": "Canonical ProjectContext proof closes the programmatic path.",
+        })
+        source = self.base / "programmatic-validation.yaml"
+        source.write_bytes(findings.canonical_bytes(payload))
+
+        with self.assertRaises(CanonicalRootIsLinkedWorktree):
+            review_group.validate_file(
+                self.linked_context, self.run_id, self.finding_id, source)
+        validation = review_group.validate_file(
+            self.context, self.run_id, self.finding_id, source)
+        self.assertEqual(validation.payload["revision"], 2)
+
+    def test_p5_disposition_programmatic_api_requires_canonical_context(self):
+        current_head = git(self.root, "rev-parse", "HEAD").stdout.strip()
+        current_frame = read_project_frame_at_commit(self.root, current_head)
+        payload = findings.parse_artifact(
+            self.next_disposition.read_bytes(), findings.DISPOSITION_SCHEMA)
+        payload["objective_ref"] = current_frame.fact_ref("commitment/outcome").to_dict()
+        source = self.base / "programmatic-disposition.yaml"
+        source.write_bytes(findings.canonical_bytes(payload))
+
+        with self.assertRaises(CanonicalRootIsLinkedWorktree):
+            review_group.disposition_file(
+                self.linked_context, self.run_id, self.finding_id, source)
+        disposition = review_group.disposition_file(
+            self.context, self.run_id, self.finding_id, source)
+        self.assertEqual(disposition.payload["revision"], 2)
+
+    def test_p5_attach_programmatic_api_requires_canonical_context(self):
+        review_run_id = review_layout.new_run_id()
+        promotion_run_id = review_layout.new_run_id()
+        binding_digest = self._digest(21)
+        run_spec_digest = self._digest(22)
+        result_digest = self._digest(23)
+        candidate_digest = self._digest(24)
+        review_layout.publish_markdown(
+            self.reviews,
+            review_run_id,
+            review_layout.FEEDBACK,
+            json.dumps({
+                "target": {
+                    "run_spec_digest": run_spec_digest,
+                    "result_digest": result_digest,
+                },
+                "binding_digest": binding_digest,
+                "reported_by": {
+                    "role": "reviewer",
+                    "binding_digest": binding_digest,
+                    "principal": None,
+                },
+                "findings": [],
+            }).encode("utf-8"),
+        )
+        spec = SimpleNamespace(
+            lifecycle_stage=SimpleNamespace(value="promote"),
+            promotion_lineage=SimpleNamespace(id=self.lineage_id),
+            candidate={
+                "digest": candidate_digest,
+                "producer_result_digest": result_digest,
+            },
+            run_spec_digest=run_spec_digest,
+        )
+        profile = mock.Mock()
+        profile.binding_for.return_value = SimpleNamespace(binding_digest=binding_digest)
+        assembly = SimpleNamespace(
+            context=self.context,
+            profile=profile,
+            artifact_store=ArtifactStore(self.root),
+        )
+
+        with self.assertRaises(CanonicalRootIsLinkedWorktree):
+            review_group.attach_review(
+                self.linked_context, promotion_run_id, review_run_id)
+        with mock.patch(
+                "waystone.jobs.profile.assemble_run",
+                return_value=contextlib.nullcontext(assembly)), \
+                mock.patch("waystone.runs.spec.load_run_spec", return_value=spec), \
+                mock.patch("waystone.runs.engine.StagedRunEngine") as engine:
+            expected = object()
+            engine.return_value.append_review_cycle.return_value = expected
+            result = review_group.attach_review(
+                self.context, promotion_run_id, review_run_id)
+        self.assertIs(result, expected)
+
+    def test_p6_programmatic_apis_refuse_raw_path_without_project_context_proof(self):
+        calls = (
+            lambda: review_group.ingest_feedback(
+                self.root, self.run_id, self.next_disposition),
+            lambda: review_group.validate_file(
+                self.root, self.run_id, self.finding_id, self.next_disposition),
+            lambda: review_group.disposition_file(
+                self.root, self.run_id, self.finding_id, self.next_disposition),
+            lambda: review_group.attach_review(
+                self.root, self.run_id, review_layout.new_run_id()),
+        )
+        for call in calls:
+            with self.subTest(api=call), \
+                    self.assertRaises(review_group.ReviewContextRequired):
+                call()
 
 
 if __name__ == "__main__":

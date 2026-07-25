@@ -36,6 +36,20 @@ class MaterializationRefused(ReviewGroupError):
     code = "finding-materialization-refused"
 
 
+class ReviewContextRequired(ReviewGroupError):
+    code = "review-context-required"
+
+
+def _canonical_review_root(context: ProjectContext) -> Path:
+    if not isinstance(context, ProjectContext):
+        raise ReviewContextRequired(
+            "review mutation requires canonical ProjectContext proof")
+    if not context.is_canonical_checkout:
+        raise CanonicalRootIsLinkedWorktree(
+            "review mutation cannot use a linked worktree as project authority")
+    return context.canonical_root
+
+
 def _reviews_dir(root: Path) -> Path:
     config = load_config(root)
     configured = Path(config.get("reviews_dir", "docs/reviews"))
@@ -102,13 +116,13 @@ def _target(target: Mapping[str, Any] | None, feedback_digest: str) -> dict[str,
 
 
 def ingest_feedback(
-        root: Path, run_id: str, feedback_file: Path, *,
+        context: ProjectContext, run_id: str, feedback_file: Path, *,
         target: Mapping[str, Any] | None = None,
         binding_digest: str | None = None,
         principal: str | None = None,
 ) -> tuple[findings.Artifact, ...]:
     """Preserve feedback and create one immutable claim for each structured finding."""
-    root = Path(root).resolve()
+    root = _canonical_review_root(context)
     require_initialized_root(root)
     run_id = review_layout.require_uuid7(run_id)
     source = Path(feedback_file)
@@ -169,12 +183,22 @@ def ingest_feedback(
     return tuple(published)
 
 
-def ingest(root: Path, run_id: str, feedback_file: Path, **kwargs) -> tuple[findings.Artifact, ...]:
-    return ingest_feedback(root, run_id, feedback_file, **kwargs)
+def ingest(
+        context: ProjectContext,
+        run_id: str,
+        feedback_file: Path,
+        **kwargs,
+) -> tuple[findings.Artifact, ...]:
+    return ingest_feedback(context, run_id, feedback_file, **kwargs)
 
 
-def validate_file(root: Path, run_id: str, finding_id: str, source_file: Path) -> findings.Artifact:
-    root = Path(root).resolve()
+def validate_file(
+        context: ProjectContext,
+        run_id: str,
+        finding_id: str,
+        source_file: Path,
+) -> findings.Artifact:
+    root = _canonical_review_root(context)
     require_initialized_root(root)
     raw = Path(source_file).read_bytes()
     payload = findings.parse_artifact(raw, findings.VALIDATION_SCHEMA)
@@ -182,8 +206,13 @@ def validate_file(root: Path, run_id: str, finding_id: str, source_file: Path) -
         _reviews_dir(root), run_id, finding_id, payload, root=root)
 
 
-def disposition_file(root: Path, run_id: str, finding_id: str, source_file: Path) -> findings.Artifact:
-    root = Path(root).resolve()
+def disposition_file(
+        context: ProjectContext,
+        run_id: str,
+        finding_id: str,
+        source_file: Path,
+) -> findings.Artifact:
+    root = _canonical_review_root(context)
     require_initialized_root(root)
     raw = Path(source_file).read_bytes()
     payload = findings.parse_artifact(raw, findings.DISPOSITION_SCHEMA)
@@ -299,15 +328,15 @@ def main(argv: list[str] | None = None) -> int:
         root = context.canonical_root
         if args.command == "ingest":
             result = ingest_feedback(
-                root, args.run_id, args.file, binding_digest=args.binding_digest)
+                context, args.run_id, args.file, binding_digest=args.binding_digest)
             print(f"review ingest: preserved feedback and recorded {len(result)} claim(s)")
         elif args.command == "validate":
             run_id = args.run_id or resolve_finding_run(root, args.finding_id)
-            result = validate_file(root, run_id, args.finding_id, args.file)
+            result = validate_file(context, run_id, args.finding_id, args.file)
             print(f"review validate: recorded {result.payload['revision']:04d}.yaml")
         elif args.command == "disposition":
             run_id = args.run_id or resolve_finding_run(root, args.finding_id)
-            result = disposition_file(root, run_id, args.finding_id, args.file)
+            result = disposition_file(context, run_id, args.finding_id, args.file)
             print(f"review disposition: recorded {result.payload['revision']:04d}.yaml")
         else:
             run_id = args.run_id or resolve_finding_run(root, args.finding_id)
@@ -323,7 +352,11 @@ def main(argv: list[str] | None = None) -> int:
 FindingError = findings.FindingError
 
 
-def attach_review(root: Path, promotion_run_id: str, review_run_id: str):
+def attach_review(
+        context: ProjectContext,
+        promotion_run_id: str,
+        review_run_id: str,
+):
     """Attach one ingested reviewer result to its exact frozen promotion lineage."""
     from waystone.jobs.domain import Role
     from waystone.jobs.profile import assemble_run
@@ -331,7 +364,7 @@ def attach_review(root: Path, promotion_run_id: str, review_run_id: str):
     from waystone.runs.engine import StagedRunEngine
     from waystone.runs.spec import load_run_spec
 
-    root = Path(root).resolve()
+    root = _canonical_review_root(context)
     require_initialized_root(root)
     reviews_dir = _reviews_dir(root)
     feedback = review_layout.read_canonical_artifact(
@@ -345,7 +378,6 @@ def attach_review(root: Path, promotion_run_id: str, review_run_id: str):
     if metadata is None:
         raise ReviewGroupError(
             "review attach requires structured ingested feedback metadata")
-    context = resolve_project_context(root)
     with assemble_run(context) as assembly:
         spec = load_run_spec(promotion_run_id, start=assembly.context.canonical_root)
         if (spec.lifecycle_stage.value != "promote"
@@ -425,8 +457,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         context = _review_context(args.root)
-        root = context.canonical_root
-        cycle = attach_review(root, args.promotion_run_id, args.review_run_id)
+        cycle = attach_review(context, args.promotion_run_id, args.review_run_id)
         print(f"review attach: recorded promotion cycle {cycle.cycle}")
         return 0
     except (FindingError, ReviewGroupError, WorkflowError, OSError, yaml.YAMLError) as error:
