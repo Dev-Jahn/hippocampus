@@ -68,6 +68,18 @@ class PromoteEvidenceContractTests(unittest.TestCase):
             "engine-check-evidence:promote", ArtifactReferenceKind.EVIDENCE,
             self.d(11), 1,
         )
+        descriptor_ref = ArtifactReference(
+            f"promotion-execution-descriptor:{run_id}",
+            ArtifactReferenceKind.EVIDENCE,
+            self.d(33),
+            1,
+        )
+        launch_ref = ArtifactReference(
+            "verifier-launch:promote",
+            ArtifactReferenceKind.EVIDENCE,
+            self.d(34),
+            1,
+        )
         return VerifierEvidence(
             run_id=run_id,
             job_id=f"{run_id}:job",
@@ -90,6 +102,8 @@ class PromoteEvidenceContractTests(unittest.TestCase):
             blockers=(),
             summary="verified exact promotion candidate",
             artifact_reference=verifier_ref,
+            execution_descriptor_reference=descriptor_ref,
+            verifier_launch_reference=launch_ref,
         )
 
     def review(

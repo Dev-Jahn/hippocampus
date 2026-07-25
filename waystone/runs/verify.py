@@ -41,6 +41,11 @@ from waystone.runs.effects import (
     RunnerExecutionEffect,
     publish_runner_completion,
 )
+from waystone.runs.environment import (
+    RunnerExecutionDescriptor,
+    RunnerExecutionDescriptorRefusal,
+    parse_runner_execution_descriptor,
+)
 from waystone.runs.lease import LeaseManager
 from waystone.runs.preflight import (
     DispatchReady,
@@ -340,6 +345,8 @@ class VerifierEvidence:
     blockers: tuple[VerifierBlocker, ...]
     summary: str
     artifact_reference: ArtifactReference
+    execution_descriptor_reference: ArtifactReference | None = None
+    verifier_launch_reference: ArtifactReference | None = None
 
 
 class DecisionOutcome(str, Enum):
@@ -919,8 +926,9 @@ def _engine_action_payload(action: EngineCheckAction) -> dict[str, object]:
 def _verification_invocation_digest(
         *, spec: RunSpec, plan: VerificationPlan, dispatch: DispatchReady,
         actor: ActorIdentity, worker_actor_id: str, result: GitResultTriple,
-        verifier_capability: RoleCapability) -> str:
-    return _digest(_canonical_json({
+        verifier_capability: RoleCapability,
+        execution_descriptor_digest: str | None = None) -> str:
+    authority = {
         "actor": _actor_payload(actor),
         "base_snapshot_digest": spec.base_snapshot.digest,
         "engine_actions": [
@@ -936,7 +944,11 @@ def _verification_invocation_digest(
         "verifier_sandbox": _sandbox_payload(verifier_capability.sandbox),
         "verification_plan_digest": plan.verification_plan_digest,
         "worker_actor_id": worker_actor_id,
-    }))
+    }
+    if execution_descriptor_digest is not None:
+        authority["execution_descriptor_digest"] = validate_sha256_digest(
+            execution_descriptor_digest)
+    return _digest(_canonical_json(authority))
 
 
 def _engine_result_payload(result: EngineCheckResult) -> dict[str, object]:
@@ -1101,8 +1113,15 @@ def _evidence_payload(
         engine_checks: EngineCheckEvidence,
         verifier_capability: RoleCapability,
         runner_observation_digest: str, runner_stdout_digest: str,
-        runner_stderr_digest: str) -> dict[str, object]:
-    return {
+        runner_stderr_digest: str,
+        execution_descriptor_reference: ArtifactReference | None = None,
+        verifier_launch_reference: ArtifactReference | None = None,
+        ) -> dict[str, object]:
+    if (execution_descriptor_reference is None) != (
+            verifier_launch_reference is None):
+        raise ValueError(
+            "verifier evidence requires descriptor and launch authority together")
+    payload = {
         "action_id": action_id,
         "actor": _actor_payload(output.actor),
         "attempt_id": attempt_id,
@@ -1127,6 +1146,16 @@ def _evidence_payload(
         "verification_plan_digest": plan.verification_plan_digest,
         "worker_actor_id": worker_actor_id,
     }
+    if execution_descriptor_reference is not None:
+        assert verifier_launch_reference is not None
+        payload.update({
+            "execution_descriptor_digest": execution_descriptor_reference.digest,
+            "execution_descriptor_reference_id": (
+                execution_descriptor_reference.reference_id),
+            "verifier_launch_artifact_digest": verifier_launch_reference.digest,
+            "verifier_launch_reference_id": verifier_launch_reference.reference_id,
+        })
+    return payload
 
 
 def _record_attempt_reference(
@@ -1251,7 +1280,10 @@ def execute_verifier(
         retry_of: str | None = None,
         start: Path | None = None,
         assurance_plan: AssurancePlan | None = None,
-        require_registered_result_worktree: bool = True) -> VerifierEvidence:
+        require_registered_result_worktree: bool = True,
+        execution_descriptor_reference_id: str | None = None,
+        verifier_launch_reference_id: str | None = None,
+        ) -> VerifierEvidence:
     """Serialize one verifier lineage through terminal evidence publication."""
     if assurance_plan is not None:
         if not isinstance(assurance_plan, AssurancePlan):
@@ -1261,6 +1293,15 @@ def execute_verifier(
                 "frozen stage assurance does not authorize independent verification")
     if not isinstance(require_registered_result_worktree, bool):
         raise TypeError("require_registered_result_worktree must be boolean")
+    if (execution_descriptor_reference_id is None) != (
+            verifier_launch_reference_id is None):
+        raise ValueError(
+            "execution descriptor and verifier launch references are required together")
+    if execution_descriptor_reference_id is not None:
+        _nonempty(
+            execution_descriptor_reference_id,
+            "execution descriptor reference_id")
+        _nonempty(verifier_launch_reference_id, "verifier launch reference_id")
     root = Path(repository).resolve(strict=True)
     authority_root = root if start is None else Path(start).resolve(strict=True)
     if authority_root != root:
@@ -1280,6 +1321,8 @@ def execute_verifier(
             retry_of=retry_of,
             start=root,
             require_registered_result_worktree=require_registered_result_worktree,
+            execution_descriptor_reference_id=execution_descriptor_reference_id,
+            verifier_launch_reference_id=verifier_launch_reference_id,
         )
 
 
@@ -1289,7 +1332,10 @@ def _execute_verifier_locked(
         check_executor: EngineCheckExecutor, verifier_adapter: VerifierAdapter, *,
         retry_of: str | None,
         start: Path,
-        require_registered_result_worktree: bool) -> VerifierEvidence:
+        require_registered_result_worktree: bool,
+        execution_descriptor_reference_id: str | None,
+        verifier_launch_reference_id: str | None,
+        ) -> VerifierEvidence:
     """Run frozen engine checks and publish evidence while holding the project lock."""
     root = Path(repository).resolve(strict=True)
     authority_root = Path(start).resolve(strict=True)
@@ -1306,6 +1352,11 @@ def _execute_verifier_locked(
         raise TypeError("verifier_adapter must be a VerifierAdapter")
 
     spec, snapshot, plan, dispatch = _authority(run_id, root)
+    if (spec.lifecycle_stage.value == "promote"
+            and execution_descriptor_reference_id is None):
+        raise EvidenceBindingRefusal(
+            "promotion verification requires frozen execution descriptor "
+            "and launch authority")
     verifier_capability = _verifier_capability(plan)
     if (verifier_adapter.binding != verifier_capability.binding
             or verifier_adapter.sandbox != verifier_capability.sandbox):
@@ -1313,6 +1364,16 @@ def _execute_verifier_locked(
             "fixture verifier adapter differs from the frozen preflight binding or sandbox")
     result = derive_git_result(root, spec.base_snapshot.head, result_ref)
     before = fingerprint_worktree(root)
+    execution_descriptor = None
+    execution_descriptor_reference = None
+    if execution_descriptor_reference_id is not None:
+        execution_descriptor, execution_descriptor_reference = (
+            _load_execution_descriptor(
+                root,
+                execution_descriptor_reference_id,
+                spec=spec,
+                plan=plan,
+            ))
     invocation_digest = _verification_invocation_digest(
         spec=spec,
         plan=plan,
@@ -1321,6 +1382,8 @@ def _execute_verifier_locked(
         worker_actor_id=worker_identity,
         result=result,
         verifier_capability=verifier_capability,
+        execution_descriptor_digest=(
+            None if execution_descriptor is None else execution_descriptor.digest),
     )
     _refuse_successful_verifier_retry(
         root,
@@ -1523,6 +1586,21 @@ def _execute_verifier_locked(
     if len(captured_checks) != len(dispatch.engine_actions):
         raise EngineCheckExecutionFailed(
             "engine checks did not produce the exact frozen action set")
+    verifier_launch_reference = None
+    if verifier_launch_reference_id is not None:
+        if execution_descriptor is None or execution_descriptor_reference is None:
+            raise EvidenceBindingRefusal(
+                "verifier launch authority lacks its execution descriptor")
+        verifier_launch_reference = _load_verifier_launch(
+            root,
+            verifier_launch_reference_id,
+            spec=spec,
+            attempt_id=attempt_id,
+            action_id=action_id,
+            result=result,
+            descriptor=execution_descriptor,
+            descriptor_reference=execution_descriptor_reference,
+        )
 
     check_payload = _canonical_json(_engine_check_evidence_payload(
         spec=spec,
@@ -1595,6 +1673,8 @@ def _execute_verifier_locked(
         runner_observation_digest=effect_result.observed_digest,
         runner_stdout_digest=captured_stdout_digests[0],
         runner_stderr_digest=captured_stderr_digests[0],
+        execution_descriptor_reference=execution_descriptor_reference,
+        verifier_launch_reference=verifier_launch_reference,
     ))
     stored = ArtifactStore(root).write(payload)
     reference = ArtifactReference(
@@ -1633,6 +1713,8 @@ def _execute_verifier_locked(
         blockers=output.blockers,
         summary=output.summary,
         artifact_reference=reference,
+        execution_descriptor_reference=execution_descriptor_reference,
+        verifier_launch_reference=verifier_launch_reference,
     )
 
 
@@ -1730,6 +1812,128 @@ def _parse_sandbox(value: object) -> SandboxContract:
         )
     except (TypeError, ValueError) as error:
         raise EvidenceBindingRefusal(str(error)) from error
+
+
+def _load_attributed_evidence(
+        root: Path, reference_id: str, *, run_id: str,
+        entity_kind: EntityKind, entity_id: str,
+        expected_digest: str | None = None,
+        ) -> tuple[ArtifactReference, bytes]:
+    try:
+        identity = _nonempty(reference_id, "artifact reference_id")
+        with RunStore.open(root) as store:
+            reference = store.get_artifact_reference(identity)
+            with store._connection_lock:  # noqa: SLF001 - package provenance query
+                row = store._connection.execute(  # noqa: SLF001
+                    "SELECT run_id, entity_kind, entity_id, reference_kind, digest, size "
+                    "FROM artifacts WHERE reference_id = ?",
+                    (identity,),
+                ).fetchone()
+        payload = ArtifactStore(root).read_reference(reference)
+        expected = (
+            reference.digest if expected_digest is None
+            else validate_sha256_digest(expected_digest)
+        )
+    except (TypeError, ValueError, WorkflowError) as error:
+        raise EvidenceBindingRefusal(
+            f"cannot load execution authority {reference_id!r}: {error}") from error
+    if (row is None
+            or reference.kind is not ArtifactReferenceKind.EVIDENCE
+            or reference.digest != expected
+            or row["run_id"] != run_id
+            or row["entity_kind"] != entity_kind.value
+            or row["entity_id"] != entity_id
+            or row["reference_kind"] != ArtifactReferenceKind.EVIDENCE.value
+            or row["digest"] != reference.digest
+            or row["size"] != reference.size):
+        raise EvidenceBindingRefusal(
+            f"execution authority {reference_id!r} lacks expected attribution")
+    return reference, payload
+
+
+def _load_execution_descriptor(
+        root: Path, reference_id: str, *, spec: RunSpec,
+        plan: VerificationPlan, expected_digest: str | None = None,
+        ) -> tuple[RunnerExecutionDescriptor, ArtifactReference]:
+    expected_reference_id = f"promotion-execution-descriptor:{spec.run_id}"
+    if reference_id != expected_reference_id:
+        raise EvidenceBindingRefusal(
+            "execution descriptor reference is not the run's start-time authority")
+    reference, payload = _load_attributed_evidence(
+        root,
+        reference_id,
+        run_id=spec.run_id,
+        entity_kind=EntityKind.RUN,
+        entity_id=spec.run_id,
+        expected_digest=expected_digest,
+    )
+    try:
+        descriptor = parse_runner_execution_descriptor(
+            payload, expected_digest=reference.digest)
+    except RunnerExecutionDescriptorRefusal as error:
+        raise EvidenceBindingRefusal(str(error)) from error
+    binding = plan.binding_for(Role.VERIFIER).binding
+    binding_digest = _digest(_canonical_json(_binding_payload(binding)))
+    if (descriptor.verifier_backend != binding.backend
+            or descriptor.verifier_binding_digest != binding_digest):
+        raise EvidenceBindingRefusal(
+            "execution descriptor differs from the frozen verifier binding")
+    return descriptor, reference
+
+
+def _load_verifier_launch(
+        root: Path, reference_id: str, *, spec: RunSpec,
+        attempt_id: str, action_id: str, result: GitResultTriple,
+        descriptor: RunnerExecutionDescriptor,
+        descriptor_reference: ArtifactReference,
+        expected_digest: str | None = None,
+        ) -> ArtifactReference:
+    reference, payload = _load_attributed_evidence(
+        root,
+        reference_id,
+        run_id=spec.run_id,
+        entity_kind=EntityKind.ATTEMPT,
+        entity_id=attempt_id,
+        expected_digest=expected_digest,
+    )
+    try:
+        decoded = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise EvidenceBindingRefusal(
+            f"promotion verifier launch is not JSON: {error}") from error
+    row = _exact_keys(decoded, {
+        "action_id", "attempt_id", "candidate_oid", "cwd",
+        "environment_digest", "executable_content_digest",
+        "execution_descriptor_digest", "execution_descriptor_reference_id",
+        "invocation_digest", "job_id", "resolved_executable",
+        "root_fingerprint", "run_id", "run_spec_digest", "schema",
+    }, "promotion verifier launch")
+    try:
+        validate_sha256_digest(row["invocation_digest"])  # type: ignore[arg-type]
+        validate_sha256_digest(row["root_fingerprint"])  # type: ignore[arg-type]
+    except ValueError as error:
+        raise EvidenceBindingRefusal(str(error)) from error
+    cwd = row["cwd"]
+    if (reference.reference_id != f"verifier-launch:{action_id}"
+            or row["schema"] != "waystone-promotion-verifier-launch-3"
+            or row["run_id"] != spec.run_id
+            or row["job_id"] != spec.job_id
+            or row["attempt_id"] != attempt_id
+            or row["action_id"] != action_id
+            or row["candidate_oid"] != result.result_oid
+            or row["run_spec_digest"] != spec.run_spec_digest
+            or not isinstance(cwd, str) or not Path(cwd).is_absolute()
+            or row["execution_descriptor_reference_id"]
+            != descriptor_reference.reference_id
+            or row["execution_descriptor_digest"] != descriptor.digest
+            or row["environment_digest"] != descriptor.environment_digest
+            or row["resolved_executable"] != descriptor.resolved_executable
+            or row["executable_content_digest"]
+            != descriptor.executable_content_digest
+            or payload != _canonical_json(row)):
+        raise EvidenceBindingRefusal(
+            "promotion verifier launch differs from execution descriptor authority")
+    return reference
 
 
 def _require_runner_observation(
@@ -2059,7 +2263,7 @@ def _load_verifier_evidence(
         decoded = json.loads(payload.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as error:
         raise EvidenceBindingRefusal(f"verifier evidence is not JSON: {error}") from error
-    row = _exact_keys(decoded, {
+    evidence_fields = {
         "action_id", "actor", "attempt_id", "base_snapshot_digest", "blockers",
         "criterion_results", "engine_check_artifact_digest",
         "engine_check_reference_id", "job_id", "preflight_evidence_digest",
@@ -2067,7 +2271,14 @@ def _load_verifier_evidence(
         "runner_stderr_digest", "runner_stdout_digest", "schema", "summary",
         "verification_plan_digest", "verifier_binding",
         "verifier_capability_digest", "verifier_sandbox", "worker_actor_id",
-    }, "verifier evidence")
+    }
+    execution_fields = {
+        "execution_descriptor_digest", "execution_descriptor_reference_id",
+        "verifier_launch_artifact_digest", "verifier_launch_reference_id",
+    }
+    if isinstance(decoded, dict) and set(decoded) & execution_fields:
+        evidence_fields |= execution_fields
+    row = _exact_keys(decoded, evidence_fields, "verifier evidence")
     if row["schema"] != _EVIDENCE_SCHEMA or row["run_id"] != spec.run_id:
         raise EvidenceBindingRefusal("verifier evidence schema or run identity is invalid")
     raw_criteria = row["criterion_results"]
@@ -2091,6 +2302,50 @@ def _load_verifier_evidence(
     check_reference_id = _nonempty(
         row["engine_check_reference_id"], "engine check reference_id")
     worker_actor_id = _nonempty(row["worker_actor_id"], "worker_actor_id")
+    attempt_id = _nonempty(row["attempt_id"], "verifier attempt_id")
+    action_id = _nonempty(row["action_id"], "verifier action_id")
+    execution_descriptor_reference = None
+    verifier_launch_reference = None
+    execution_descriptor = None
+    raw_execution_authority = (
+        row.get("execution_descriptor_reference_id"),
+        row.get("execution_descriptor_digest"),
+        row.get("verifier_launch_reference_id"),
+        row.get("verifier_launch_artifact_digest"),
+    )
+    if (spec.lifecycle_stage.value == "promote"
+            and not any(item is not None for item in raw_execution_authority)):
+        raise EvidenceBindingRefusal(
+            "promotion verifier evidence lacks mandatory execution authority")
+    if any(item is not None for item in raw_execution_authority):
+        if not all(isinstance(item, str) and item for item in raw_execution_authority):
+            raise EvidenceBindingRefusal(
+                "verifier evidence execution authority is incomplete")
+        try:
+            descriptor_digest = validate_sha256_digest(
+                raw_execution_authority[1])
+            launch_digest = validate_sha256_digest(raw_execution_authority[3])
+        except ValueError as error:
+            raise EvidenceBindingRefusal(str(error)) from error
+        execution_descriptor, execution_descriptor_reference = (
+            _load_execution_descriptor(
+                root,
+                raw_execution_authority[0],
+                spec=spec,
+                plan=plan,
+                expected_digest=descriptor_digest,
+            ))
+        verifier_launch_reference = _load_verifier_launch(
+            root,
+            raw_execution_authority[2],
+            spec=spec,
+            attempt_id=attempt_id,
+            action_id=action_id,
+            result=result,
+            descriptor=execution_descriptor,
+            descriptor_reference=execution_descriptor_reference,
+            expected_digest=launch_digest,
+        )
     invocation_digest = _verification_invocation_digest(
         spec=spec,
         plan=plan,
@@ -2099,6 +2354,8 @@ def _load_verifier_evidence(
         worker_actor_id=worker_actor_id,
         result=result,
         verifier_capability=capability,
+        execution_descriptor_digest=(
+            None if execution_descriptor is None else execution_descriptor.digest),
     )
     engine_checks = _load_engine_check_evidence(
         root,
@@ -2111,8 +2368,6 @@ def _load_verifier_evidence(
     )
     criteria = tuple(_parse_criterion(item) for item in raw_criteria)
     blockers = tuple(_parse_blocker(item) for item in raw_blockers)
-    attempt_id = _nonempty(row["attempt_id"], "verifier attempt_id")
-    action_id = _nonempty(row["action_id"], "verifier action_id")
     if (reference.reference_id != f"verifier-evidence:{action_id}"
             or actor.role is not Role.VERIFIER or actor.actor_id == worker_actor_id
             or row["job_id"] != spec.job_id
@@ -2148,6 +2403,8 @@ def _load_verifier_evidence(
         runner_observation_digest=runner_observation_digest,
         runner_stdout_digest=runner_stdout_digest,
         runner_stderr_digest=runner_stderr_digest,
+        execution_descriptor_reference=execution_descriptor_reference,
+        verifier_launch_reference=verifier_launch_reference,
     )
     if payload != _canonical_json(normalized):
         raise EvidenceBindingRefusal("verifier evidence bytes are not canonical")
@@ -2199,6 +2456,8 @@ def _load_verifier_evidence(
         blockers=blockers,
         summary=row["summary"],
         artifact_reference=reference,
+        execution_descriptor_reference=execution_descriptor_reference,
+        verifier_launch_reference=verifier_launch_reference,
     )
 
 
@@ -2887,13 +3146,17 @@ def reload_integration_decision(
     expected_verifier_action = _nonempty(
         verifier_action_id, "verifier_action_id")
     spec, _snapshot, plan, dispatch = _authority(run_id, root)
-    evidence = _load_verifier_evidence(
-        root,
-        f"verifier-evidence:{expected_verifier_action}",
-        spec=spec,
-        plan=plan,
-        dispatch=dispatch,
-    )
+    try:
+        evidence = _load_verifier_evidence(
+            root,
+            f"verifier-evidence:{expected_verifier_action}",
+            spec=spec,
+            plan=plan,
+            dispatch=dispatch,
+        )
+    except EvidenceBindingRefusal as error:
+        raise ApplyBindingRefusal(
+            f"verifier evidence authority is invalid: {error}") from error
     if (evidence.attempt_id != expected_attempt
             or evidence.action_id != expected_verifier_action):
         raise ApplyBindingRefusal(

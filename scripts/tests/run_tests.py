@@ -51,6 +51,7 @@ MODULES = (
     "test_release",
     "test_hooks",
     "test_git_ambient_authority",
+    "test_promotion_verifier_execution_binding",
 )
 
 

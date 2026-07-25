@@ -57,6 +57,15 @@ from waystone.runs.effects import (
     GitRefEffect,
     RunnerExecutionEffect,
 )
+from waystone.runs.environment import (
+    RunnerEnvironment,
+    RunnerExecutionDescriptor,
+    RunnerExecutionDescriptorRefusal,
+    build_runner_environment,
+    freeze_runner_execution_descriptor,
+    parse_runner_execution_descriptor,
+    require_runner_execution_match,
+)
 from waystone.runs.lease import LeaseManager
 from waystone.runs.observe import (
     RunSnapshot,
@@ -175,6 +184,7 @@ class _PromotionRejected(Exception):
 
 
 _PROMOTION_COMPOSITION = object()
+_PROMOTION_EXECUTION_DESCRIPTOR_PREFIX = "promotion-execution-descriptor:"
 
 
 class ReadOnlyStoreUnavailable(EngineAssemblyError):
@@ -343,9 +353,12 @@ def _validate_promotion_decision(
             or verifier.run_spec_digest != expected_run_spec_digest
             or verifier.actor.role is not Role.VERIFIER
             or verifier.verifier_sandbox.filesystem != "read-only"
-            or verifier.result.result_oid != expected_candidate_oid):
+            or verifier.result.result_oid != expected_candidate_oid
+            or verifier.execution_descriptor_reference is None
+            or verifier.verifier_launch_reference is None):
         raise EngineBindingRefusal(
-            "VerifierEvidence is not bound to the exact read-only promotion candidate")
+            "VerifierEvidence is not bound to the exact promotion candidate "
+            "and verifier execution authority")
 
     reviewer_digest = None
     reviewer_actor_id = None
@@ -490,7 +503,20 @@ class StagedRunEngine:
         )
         plan = freeze_verification_plan(spec.run_id, definition, start=self.root)
         worker = self.assembly.profile.binding_for(Role.WORKER).binding
-        verifier = self.assembly.profile.binding_for(Role.VERIFIER).binding
+        verifier_profile = self.assembly.profile.binding_for(Role.VERIFIER)
+        verifier = verifier_profile.binding
+        environment = build_runner_environment()
+        try:
+            descriptor = freeze_runner_execution_descriptor(
+                environment,
+                executable="codex",
+                cwd=self.root,
+                verifier_backend=verifier.backend,
+                verifier_binding_digest=verifier_profile.binding_digest,
+            )
+        except RunnerExecutionDescriptorRefusal as error:
+            raise EngineBindingRefusal(
+                f"promotion verifier execution descriptor cannot be frozen: {error}") from error
         runner = RunnerCapabilities(
             execution_categories=tuple(sorted(
                 {worker.execution_category, verifier.execution_category},
@@ -508,12 +534,7 @@ class StagedRunEngine:
             (),
         )
         capabilities = CapabilitySet(runner, (preparation,), (), ())
-        executable = shutil.which("codex")
-        if executable is None:
-            raise EngineBindingRefusal(
-                "codex executable is unavailable for the frozen verifier binding")
         try:
-            executable_bytes = Path(executable).read_bytes()
             project_bytes = (self.root / ".waystone.yml").read_bytes()
             profile_bytes = (self.root / ".waystone" / "profile.yml").read_bytes()
         except OSError as error:
@@ -531,13 +552,13 @@ class StagedRunEngine:
                 ObservationStatus.NOT_OBSERVED, None),
             RuntimeObservation(
                 "runner-binary", "runner-adapter:binary", ObservationStatus.OBSERVED,
-                self._observed_digest(executable_bytes)),
+                descriptor.executable_content_digest),
             RuntimeObservation(
                 "runner-config-content", "runner-adapter:config",
                 ObservationStatus.NOT_OBSERVED, None),
             RuntimeObservation(
                 "runner-version", "runner-adapter:version", ObservationStatus.OBSERVED,
-                self._observed_digest(executable_bytes)),
+                descriptor.executable_content_digest),
             RuntimeObservation(
                 "sandbox-contract", "engine:sandbox-contract", ObservationStatus.OBSERVED,
                 self._observed_digest(repr(sandbox).encode())),
@@ -560,6 +581,69 @@ class StagedRunEngine:
             reusable_runner_proof=record_runner_proof(context, runner),
             start=self.root,
         )
+        self._record_promotion_execution_descriptor(spec, descriptor)
+
+    @staticmethod
+    def _promotion_execution_descriptor_reference_id(run_id: str) -> str:
+        return f"{_PROMOTION_EXECUTION_DESCRIPTOR_PREFIX}{run_id}"
+
+    def _record_promotion_execution_descriptor(
+            self, spec: RunSpec,
+            descriptor: RunnerExecutionDescriptor) -> ArtifactReference:
+        stored = self.assembly.artifact_store.write(descriptor.canonical_bytes())
+        if stored.digest != descriptor.digest:
+            raise EngineBindingRefusal(
+                "promotion verifier execution descriptor changed during CAS publication")
+        reference = ArtifactReference(
+            self._promotion_execution_descriptor_reference_id(spec.run_id),
+            ArtifactReferenceKind.EVIDENCE,
+            stored.digest,
+            stored.size,
+        )
+        run = self.assembly.store.get_run(spec.run_id)
+        if run.state != "dispatch-ready":
+            raise EngineBindingRefusal(
+                "promotion execution descriptor requires dispatch-ready preflight authority")
+        self.assembly.store.record_transition(
+            EntityKind.RUN,
+            spec.run_id,
+            expected_version=run.version,
+            next_state=run.state,
+            reason=TransitionReason.PLANNED,
+            evidence_digest=reference.digest,
+            artifact_references=(reference,),
+        )
+        return reference
+
+    def _load_promotion_execution_descriptor(
+            self, spec: RunSpec,
+            ) -> tuple[RunnerExecutionDescriptor, ArtifactReference, RunnerEnvironment]:
+        reference_id = self._promotion_execution_descriptor_reference_id(spec.run_id)
+        try:
+            reference = self.assembly.store.get_artifact_reference(reference_id)
+            if (reference.kind is not ArtifactReferenceKind.EVIDENCE
+                    or reference.reference_id != reference_id):
+                raise ValueError(
+                    "promotion execution descriptor reference is not canonical evidence")
+            descriptor = parse_runner_execution_descriptor(
+                self.assembly.artifact_store.read_reference(reference),
+                expected_digest=reference.digest,
+            )
+            environment = build_runner_environment()
+            verifier = self.assembly.profile.binding_for(Role.VERIFIER)
+            require_runner_execution_match(
+                descriptor,
+                environment,
+                executable="codex",
+                cwd=self.root,
+                verifier_backend=verifier.binding.backend,
+                verifier_binding_digest=verifier.binding_digest,
+            )
+        except (ValueError, WorkflowError) as error:
+            raise EngineBindingRefusal(
+                "promotion verifier execution authority differs from start-time "
+                f"preflight ({error}); run `waystone run start` again") from error
+        return descriptor, reference, environment
 
     def start(
         self,
@@ -632,8 +716,10 @@ class StagedRunEngine:
         return StagedStartResult(spec, attempt_id)
 
     @staticmethod
-    def _invocation_digest(invocation: RunnerInvocation) -> str:
-        payload = assurance_json({
+    def _invocation_digest(
+            invocation: RunnerInvocation,
+            execution_descriptor_digest: str | None = None) -> str:
+        authority = {
             "argv": list(invocation.argv),
             "cwd": str(invocation.cwd),
             "candidate_context": (
@@ -641,7 +727,11 @@ class StagedRunEngine:
                 else invocation.candidate_context.to_payload()
             ),
             "environment_digest": invocation.environment.digest,
-        })
+        }
+        if execution_descriptor_digest is not None:
+            authority["execution_descriptor_digest"] = validate_sha256_digest(
+                execution_descriptor_digest)
+        payload = assurance_json(authority)
         return "sha256:" + hashlib.sha256(payload).hexdigest()
 
     def _candidate_stage_root(
@@ -754,7 +844,10 @@ class StagedRunEngine:
             candidate_root: Path | None = None,
             candidate_context: RunnerCandidateContext | None = None,
             output_schema: StoredArtifact | None = None,
-            output_path: Path | None = None) -> RunnerInvocation:
+            output_path: Path | None = None,
+            environment: RunnerEnvironment | None = None,
+            execution_descriptor: RunnerExecutionDescriptor | None = None,
+            ) -> RunnerInvocation:
         adapter = self.assembly.role_adapters[role]
         if adapter.execution_category is not ExecutionCategory.EXTERNAL:
             raise EngineBindingRefusal(
@@ -763,9 +856,28 @@ class StagedRunEngine:
         if transport != "codex" or not separator or not model:
             raise EngineBindingRefusal(
                 f"{role.value} backend {adapter.backend!r} is not an executable codex binding")
-        executable = shutil.which("codex")
-        if executable is None:
-            raise EngineBindingRefusal("codex executable is unavailable for the frozen binding")
+        if spec.lifecycle_stage.value == "promote":
+            if execution_descriptor is None or environment is None:
+                raise EngineBindingRefusal(
+                    "promotion verifier invocation requires frozen execution authority")
+            try:
+                require_runner_execution_match(
+                    execution_descriptor,
+                    environment,
+                    executable="codex",
+                    cwd=self.root,
+                    verifier_backend=adapter.backend,
+                    verifier_binding_digest=adapter.binding_digest,
+                )
+            except RunnerExecutionDescriptorRefusal as error:
+                raise EngineBindingRefusal(
+                    f"promotion verifier execution authority mismatch: {error}") from error
+            executable = execution_descriptor.resolved_executable
+        else:
+            executable = shutil.which("codex")
+            if executable is None:
+                raise EngineBindingRefusal(
+                    "codex executable is unavailable for the frozen binding")
         contract = completion.parse_completion_contract_bytes(
             self.input_root,
             self.assembly.artifact_store.read(
@@ -812,7 +924,7 @@ class StagedRunEngine:
                     raise EngineBindingRefusal(
                         "candidate launch root fingerprint differs from the frozen context")
         result_path = output_path or (cwd / RESULT_CONTROL_FILE)
-        return RunnerInvocation((
+        argv = (
             executable,
             "exec",
             "-m",
@@ -825,7 +937,10 @@ class StagedRunEngine:
             "-o",
             str(result_path),
             work_brief.render_semantic_prompt(brief, contract),
-        ), cwd, selected_context)
+        )
+        if environment is None:
+            return RunnerInvocation(argv, cwd, selected_context)
+        return RunnerInvocation(argv, cwd, selected_context, environment)
 
     def _runner_action_id(self, attempt_id: str, stage: str) -> str:
         action = {
@@ -1415,13 +1530,21 @@ class StagedRunEngine:
 
     def _record_promotion_verifier_launch(
             self, spec: RunSpec, attempt_id: str, action_id: str,
-            invocation: RunnerInvocation) -> None:
+            invocation: RunnerInvocation,
+            execution_descriptor: RunnerExecutionDescriptor,
+            execution_descriptor_reference: ArtifactReference,
+            ) -> ArtifactReference:
         context = invocation.candidate_context
         if context is None:
             raise EngineBindingRefusal(
                 "promotion verifier launch lacks candidate context")
+        if (invocation.environment.digest != execution_descriptor.environment_digest
+                or invocation.argv[0] != execution_descriptor.resolved_executable
+                or execution_descriptor_reference.digest != execution_descriptor.digest):
+            raise EngineBindingRefusal(
+                "promotion verifier launch differs from frozen execution authority")
         payload = assurance_json({
-            "schema": "waystone-promotion-verifier-launch-2",
+            "schema": "waystone-promotion-verifier-launch-3",
             "run_id": spec.run_id,
             "job_id": spec.job_id,
             "attempt_id": attempt_id,
@@ -1430,8 +1553,15 @@ class StagedRunEngine:
             "candidate_oid": context.candidate_oid,
             "root_fingerprint": context.root_fingerprint,
             "run_spec_digest": context.run_spec_digest,
-            "invocation_digest": self._invocation_digest(invocation),
+            "invocation_digest": self._invocation_digest(
+                invocation, execution_descriptor.digest),
             "environment_digest": invocation.environment.digest,
+            "execution_descriptor_reference_id": (
+                execution_descriptor_reference.reference_id),
+            "execution_descriptor_digest": execution_descriptor.digest,
+            "resolved_executable": execution_descriptor.resolved_executable,
+            "executable_content_digest": (
+                execution_descriptor.executable_content_digest),
         })
         artifact = self.assembly.artifact_store.write(payload)
         reference = ArtifactReference(
@@ -1457,6 +1587,7 @@ class StagedRunEngine:
             if existing != reference:
                 raise EngineBindingRefusal(
                     "promotion verifier launch record is divergent")
+        return reference
 
     def _parse_promotion_verifier_result(
             self, content: bytes, *, spec: RunSpec, attempt_id: str,
@@ -1510,6 +1641,8 @@ class StagedRunEngine:
         attempt_id: str,
         plan: AssurancePlan,
     ) -> VerifierEvidence:
+        execution_descriptor, descriptor_reference, environment = (
+            self._load_promotion_execution_descriptor(spec))
         actor = ActorIdentity(
             self.assembly.profile.binding_for(Role.VERIFIER).binding_digest,
             Role.VERIFIER,
@@ -1548,13 +1681,35 @@ class StagedRunEngine:
                     candidate_context=context,
                     output_schema=schema,
                     output_path=output_path,
+                    environment=environment,
+                    execution_descriptor=execution_descriptor,
                 )
                 if (invocation.cwd != request.review_root.resolve(strict=True)
                         or invocation.candidate_context != context):
                     raise EngineBindingRefusal(
                         "promotion verifier invocation differs from its review root")
                 self._record_promotion_verifier_launch(
-                    spec, attempt_id, action_id, invocation)
+                    spec,
+                    attempt_id,
+                    action_id,
+                    invocation,
+                    execution_descriptor,
+                    descriptor_reference,
+                )
+                verifier_binding = self.assembly.profile.binding_for(Role.VERIFIER)
+                try:
+                    require_runner_execution_match(
+                        execution_descriptor,
+                        invocation.environment,
+                        executable=invocation.argv[0],
+                        cwd=invocation.cwd,
+                        verifier_backend=verifier_binding.binding.backend,
+                        verifier_binding_digest=verifier_binding.binding_digest,
+                    )
+                except RunnerExecutionDescriptorRefusal as error:
+                    raise EngineBindingRefusal(
+                        "promotion verifier executable changed before spawn: "
+                        f"{error}") from error
                 try:
                     completed = subprocess.run(
                         invocation.argv,
@@ -1623,6 +1778,8 @@ class StagedRunEngine:
             start=self.root,
             assurance_plan=plan,
             require_registered_result_worktree=False,
+            execution_descriptor_reference_id=descriptor_reference.reference_id,
+            verifier_launch_reference_id=f"verifier-launch:{action_id}",
         )
 
     def _promotion_review(

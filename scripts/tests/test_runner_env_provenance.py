@@ -10,9 +10,17 @@ from types import SimpleNamespace
 from unittest import mock
 
 from waystone.jobs.domain import ExecutionCategory, Role, RoleBinding
-from waystone.runs.artifacts import ArtifactStore
+from waystone.runs.artifacts import (
+    ArtifactReference,
+    ArtifactReferenceKind,
+    ArtifactStore,
+)
 from waystone.runs.engine import StagedRunEngine
-from waystone.runs.environment import build_runner_environment
+from waystone.runs.environment import (
+    RunnerExecutionDescriptor,
+    build_runner_environment,
+    freeze_runner_execution_descriptor,
+)
 from waystone.runs.effects import RunnerLaunchIntent
 from waystone.runs.preflight import SandboxContract
 from waystone.runs.store import RecordNotFoundError
@@ -190,24 +198,47 @@ class RunnerEnvironmentProvenanceTests(unittest.TestCase):
             store=store,
         )
         spec = SimpleNamespace(run_id="run", job_id="job")
+        descriptor = RunnerExecutionDescriptor(
+            environment.digest,
+            invocation.argv[0],
+            "sha256:" + "e" * 64,
+            "codex:verifier",
+            "sha256:" + "f" * 64,
+        )
+        descriptor_reference = ArtifactReference(
+            "promotion-execution-descriptor:run",
+            ArtifactReferenceKind.EVIDENCE,
+            descriptor.digest,
+            len(descriptor.canonical_bytes()),
+        )
 
         engine._record_promotion_verifier_launch(  # noqa: SLF001
             spec,
             "run:attempt:1",
             "run:typed-independent-verify",
             invocation,
+            descriptor,
+            descriptor_reference,
         )
 
         self.assertEqual(len(captured), 1)
         payload = json.loads(captured[0])
         self.assertEqual(payload["environment_digest"], environment.digest)
+        self.assertEqual(payload["execution_descriptor_digest"], descriptor.digest)
+        self.assertEqual(
+            payload["executable_content_digest"],
+            descriptor.executable_content_digest)
 
     def test_p3_promote_verifier_receives_the_frozen_builder_environment(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         review_root = Path(temporary.name).resolve()
+        executable = review_root / "bin" / "codex"
+        executable.parent.mkdir()
+        executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+        executable.chmod(0o700)
         environment = build_runner_environment({
-            "PATH": "/runner/bin",
+            "PATH": str(executable.parent),
             "HOME": "/home/runner",
             "LANG": "C.UTF-8",
             "GIT_DIR": "/integration/.git",
@@ -220,7 +251,7 @@ class RunnerEnvironmentProvenanceTests(unittest.TestCase):
             "sha256:" + "c" * 64,
         )
         invocation = RunnerInvocation(
-            ("/runner/bin/codex", "exec"),
+            (str(executable), "exec"),
             review_root,
             context,
             environment,
@@ -240,13 +271,27 @@ class RunnerEnvironmentProvenanceTests(unittest.TestCase):
             )
             return SimpleNamespace(
                 binding=binding,
-                binding_digest="sha256:" + role.value[0] * 64,
+                binding_digest="sha256:" + (
+                    "a" if role is Role.VERIFIER else "b") * 64,
             )
 
         engine = object.__new__(StagedRunEngine)
         engine.root = review_root
         engine.assembly = SimpleNamespace(
             profile=SimpleNamespace(binding_for=binding_for),
+        )
+        descriptor = freeze_runner_execution_descriptor(
+            environment,
+            executable="codex",
+            cwd=review_root,
+            verifier_backend=verifier_binding.backend,
+            verifier_binding_digest="sha256:" + "a" * 64,
+        )
+        descriptor_reference = ArtifactReference(
+            "promotion-execution-descriptor:run",
+            ArtifactReferenceKind.EVIDENCE,
+            descriptor.digest,
+            len(descriptor.canonical_bytes()),
         )
         spec = SimpleNamespace(
             run_id="run",
@@ -268,6 +313,10 @@ class RunnerEnvironmentProvenanceTests(unittest.TestCase):
 
         completed = SimpleNamespace(returncode=7, stderr=b"fixture failure")
         with mock.patch.object(
+                engine, "_load_promotion_execution_descriptor",
+                return_value=(
+                    descriptor, descriptor_reference, environment)), \
+                mock.patch.object(
                 engine, "_promotion_verifier_result_schema",
                 return_value=SimpleNamespace()), \
                 mock.patch.object(
