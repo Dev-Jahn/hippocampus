@@ -1,1 +1,0 @@
-{"at": "2026-07-16T08:12:13.100374+00:00", "base_sha": null, "canonical_store": "local-packet", "mode": "packet", "reviewers": ["chatgpt:gpt-5.6-sol"], "round_id": "2026-07-16-adopt-dogfooding", "schema": "waystone-round-request-binding-1", "target_sha": "c8ec816c6745e67efd73b05b56c711238b7cc550"}

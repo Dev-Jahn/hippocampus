@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# Version-stable front door. Claude Code puts <current-install>/bin on the Bash PATH,
-# so `waystone` always resolves to the installed plugin's current version.
-here="$(cd "$(dirname "$0")" && pwd)"
-exec uv run "$here/../scripts/waystone.py" "$@"
