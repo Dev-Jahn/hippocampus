@@ -47,14 +47,20 @@ waystone task set <id> <field> <value>
 waystone task done <id> [--note N]
 waystone task list [--status s1,s2] [--all] [--json]
 waystone task show <id> | task drop <id>
-waystone log <ev> [typed flags…]        # dispatch|outcome|review|review-status|directive
+waystone log <ev> [typed flags…]        # dispatch|outcome|review|review-status
 waystone log raw '<json>'
-waystone retract <directive-id>
+waystone log tail [-n N] [--ev TYPE]
 waystone directive list [--active] [--json]
-waystone ledger tail [-n N] [--ev TYPE]
+waystone directive add [typed flags…]
+waystone directive retract <directive-id>
 waystone prior show
-waystone distill [--days N]
+waystone prior distill [--days N]
 ```
+
+Mental model: facts go in through one door (`log <event>`); bare `waystone log`
+shows recent entries; `directive` and `prior` are views re-derived from the
+ledger every time. Bare nouns default to a read: `task`→list, `log`→tail,
+`directive`→list, `prior`→show.
 
 Every subcommand supports `-h/--help`; errors print usage to stderr.
 

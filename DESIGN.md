@@ -118,16 +118,23 @@ waystone task add <id> --title T [--status pending] [--notes N] [--deps a,b]
 waystone task set <id> <field> <value>
 waystone task done <id> [--note N]
 waystone task list [--status s1,s2] [--all] [--json]   # 콤마 다중 필터 (0.x 요구 수리)
-waystone task show <id> | task drop <id>
-waystone log <ev> [typed flags…]               # dispatch|outcome|review|review-status|directive
+waystone task show <id> [--json] | task drop <id>
+waystone log <ev> [typed flags…]               # dispatch|outcome|review|review-status
 waystone log raw '<json>'                      # 검증 후 append
-waystone retract <directive-id>
+waystone log tail [-n N] [--ev TYPE]           # 최근 기록 조회
 waystone directive list [--active] [--json]
-waystone ledger tail [-n N] [--ev TYPE]
+waystone directive add [typed flags…]          # --id 생략 시 text에서 auto-id
+waystone directive retract <directive-id>
 waystone prior show
-waystone distill [--days N]                    # distiller clerk 실행 → PRIORS.md 재생성
+waystone prior distill [--days N]              # distiller clerk 실행 → PRIORS.md 재생성
 waystone scribe --transcript P --session S     # Stop 훅이 detached로 부르는 내부 표면
 ```
+
+- **bare-noun 기본**: `task|log|directive|prior`에서 서브커맨드를 생략하면 각각
+  `list|tail|list|show`로 동작한다(`waystone task -h`는 task 자체의 help).
+- 멘탈 모델(최상위 `--help`에도 한 줄로): 기록은 `log <이벤트>` 한 문으로 들어가고,
+  맨몸 `waystone log`는 최근 기록 조회, `directive`·`prior`는 원장에서 매번 재계산되는
+  파생 뷰다.
 
 - task 상태: `pending|active|done|dropped`. tasks.yaml은 사람이 직접 편집해도 되고
   CLI는 항상 재파싱한다. 주석 보존 같은 곡예는 하지 않는다(0.x 교훈).
@@ -172,11 +179,14 @@ stdout 첫 줄에 찍은 뒤 `codex exec … < /dev/null`을 그대로 실행한
 
 ### 3.7 Skills (2개)
 
-- **`waystone:checkup`** — `/doctor`형 프로젝트 진단. ledger·PRIORS·failures·커서 공백·
+> 표기 주의: plugin name은 `ws`라 slash 접두는 `/ws:checkup`·`/ws:dispatch`이지만,
+> CLI 명령(`waystone`)·`.waystone/`·`WAYSTONE_*` 환경변수·repo 이름은 전부 그대로다.
+
+- **`ws:checkup`** — `/doctor`형 프로젝트 진단. ledger·PRIORS·failures·커서 공백·
   최근 transcript·CLAUDE.md/메모리를 읽고: 낭비 패턴(재시도 루프·limit 정지·고아 dispatch),
   지시 위생(stale/모순 directive vs 문서), clerk 건강(공백·실패·오버헤드)을 보고.
   제안은 recommend-first, AskUserQuestion 최대 2회, 가역성 명시. 자동 적용 없음.
-- **`waystone:dispatch`** — fleet-dispatch 개정판. 핵심 개정(전부 감사·가이드 근거):
+- **`ws:dispatch`** — fleet-dispatch 개정판. 핵심 개정(전부 감사·가이드 근거):
   검증자는 **전부 보고, 필터는 main**(문자적 순종 모델에서 severity 상한은 발견을
   실제로 감춘다); 검증 예산은 고정 의례가 아니라 **PRIORS의 반증률에 비례**; 자기 작업
   재검증 금지(경계 검증만); GPU·메모리 안전성 서술은 중립 어휘(콘텐츠 필터 오탐 10건

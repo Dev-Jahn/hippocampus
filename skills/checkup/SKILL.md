@@ -1,6 +1,6 @@
 ---
 name: checkup
-description: waystone 프로젝트 건강 진단 — ledger·clerk·지시 위생·낭비 패턴을 점검하고 정리를 제안한다. 사용자가 "/waystone:checkup", "프로젝트 점검", "낭비 점검", "지시 정리", "clerk 상태 확인"을 요청하면 사용.
+description: waystone 프로젝트 건강 진단 — ledger·clerk·지시 위생·낭비 패턴을 점검하고 정리를 제안한다. 사용자가 "/ws:checkup", "프로젝트 점검", "낭비 점검", "지시 정리", "clerk 상태 확인"을 요청하면 사용.
 ---
 
 # waystone: checkup
@@ -43,7 +43,7 @@ description: waystone 프로젝트 건강 진단 — ledger·clerk·지시 위�
   executor 교체로 풀 일이 아님을 명시.
 - 최근 transcript 표본(최신 2-3개, digest_lite로 압축해서)에서: 같은 오류 3회+ 반복,
   포그라운드 sleep 폴링, "File has not been read yet" 다발 — 각 건수와 대표 사례만.
-- PRIORS.md가 7일 이상 낡았으면 `waystone distill` 실행을 제안(정리 묶음에 포함).
+- PRIORS.md가 7일 이상 낡았으면 `waystone prior distill` 실행을 제안(정리 묶음에 포함).
 
 ## Check 4 — 데이터 위생
 

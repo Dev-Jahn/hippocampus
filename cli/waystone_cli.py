@@ -295,7 +295,7 @@ def extract_json(text):
 # --- 명령 --------------------------------------------------------------------
 
 
-def cmd_init(args):
+def cmd_init(_args):
     ws = Path.cwd() / ".waystone"
     if ws.is_dir():
         print(f"이미 있습니다: {ws}")
@@ -505,7 +505,7 @@ def cmd_log_raw(args):
     log_and_print(args.ws, e)
 
 
-def cmd_retract(args):
+def cmd_directive_retract(args):
     d = directives(args.ws).get(args.id)
     if not d:
         die(f"없는 directive id: {args.id}")
@@ -525,14 +525,16 @@ def cmd_directive_list(args):
         )
 
 
-def cmd_ledger_tail(args):
+def cmd_log_tail(args):
+    # 주의: `log` 서브파서의 dest가 ev라서 args.ev == "tail"이다 — 필터 플래그
+    # `--ev`는 dest=ev_filter로 비켜서 받는다 (표면은 구 `ledger tail`과 동일).
     p = args.ws / "ledger.jsonl"
     lines = p.read_text(encoding="utf-8").splitlines() if p.exists() else []
-    if args.ev:
+    if args.ev_filter:
         keep = []
         for ln in lines:
             try:
-                if json.loads(ln).get("ev") == args.ev:
+                if json.loads(ln).get("ev") == args.ev_filter:
                     keep.append(ln)
             except json.JSONDecodeError:
                 pass
@@ -546,7 +548,7 @@ def cmd_prior_show(args):
     print(
         p.read_text(encoding="utf-8").rstrip()
         if p.exists()
-        else "아직 없음 — waystone distill"
+        else "아직 없음 — waystone prior distill"
     )
 
 
@@ -746,7 +748,13 @@ def cmd_scribe(args):
 
 def build_parser():
     p = argparse.ArgumentParser(
-        prog="waystone", description="waystone — 관측·기억 배경 기관"
+        prog="waystone",
+        description=(
+            "waystone — 관측·기억 배경 기관. "
+            "기록은 `log <이벤트>` 한 문으로 들어가고, 맨몸 `waystone log`는 "
+            "최근 기록 조회, `directive`·`prior`는 원장에서 매번 재계산되는 "
+            "파생 뷰다."
+        ),
     )
     sub = p.add_subparsers(dest="cmd")
 
@@ -818,38 +826,36 @@ def build_parser():
     a.add_argument("--addressed", required=True, help="예: full|partial|none")
     a.add_argument("--at", help="반영 커밋 sha")
     a.set_defaults(fn=cmd_log)
-    a = lsub.add_parser("directive", help="운영 지시")
+    a = lsub.add_parser("raw", help="JSON 한 줄을 검증 후 append")
+    a.add_argument("json")
+    a.set_defaults(fn=cmd_log_raw)
+    a = lsub.add_parser("tail", help="마지막 N행 (맨몸 `waystone log`의 기본)")
+    a.add_argument("-n", type=int, default=20)
+    a.add_argument("--ev", dest="ev_filter", help="ev 타입 필터")
+    a.set_defaults(fn=cmd_log_tail)
+
+    d = sub.add_parser("directive", help="운영 지시 (원장 파생 뷰)").add_subparsers(
+        dest="sub"
+    )
+    a = d.add_parser("add", help="지시 기록 (ev=directive)")
     a.add_argument("--id", help="생략 시 --text에서 자동 생성 (DESIGN §3.3 auto id)")
     a.add_argument("--text")
     a.add_argument("--scope", choices=sorted(ENUMS[("directive", "scope")]))
     a.add_argument(
         "--state", default="active", choices=sorted(ENUMS[("directive", "state")])
     )
-    a.set_defaults(fn=cmd_log)
-    a = lsub.add_parser("raw", help="JSON 한 줄을 검증 후 append")
-    a.add_argument("json")
-    a.set_defaults(fn=cmd_log_raw)
-
-    a = sub.add_parser("retract", help="directive 철회")
-    a.add_argument("id")
-    a.set_defaults(fn=cmd_retract)
-
-    d = sub.add_parser("directive", help="지시 조회").add_subparsers(dest="sub")
+    a.set_defaults(fn=cmd_log, ev="directive")
     a = d.add_parser("list", help="목록 (ledger에서 유도)")
     a.add_argument("--active", action="store_true")
     a.add_argument("--json", action="store_true")
     a.set_defaults(fn=cmd_directive_list)
-
-    lt = sub.add_parser("ledger", help="원장 조회").add_subparsers(dest="sub")
-    a = lt.add_parser("tail", help="마지막 N행")
-    a.add_argument("-n", type=int, default=20)
-    a.add_argument("--ev", help="ev 타입 필터")
-    a.set_defaults(fn=cmd_ledger_tail)
+    a = d.add_parser("retract", help="directive 철회")
+    a.add_argument("id")
+    a.set_defaults(fn=cmd_directive_retract)
 
     pr = sub.add_parser("prior", help="증류 표면").add_subparsers(dest="sub")
     pr.add_parser("show", help="PRIORS.md 출력").set_defaults(fn=cmd_prior_show)
-
-    a = sub.add_parser("distill", help="distiller clerk 실행 → PRIORS.md 재생성")
+    a = pr.add_parser("distill", help="distiller clerk 실행 → PRIORS.md 재생성")
     a.add_argument("--days", type=int, default=14)
     a.set_defaults(fn=cmd_distill)
 
@@ -872,13 +878,30 @@ def tag_parsers(p):
                 tag_parsers(sp)
 
 
-def parse_args_quietly(parser):
+BARE_DEFAULT = {"task": "list", "log": "tail", "directive": "list", "prior": "show"}
+
+
+def insert_default_sub(argv):
+    """bare-noun 기본: noun만 맨몸으로 부르면 기본 조회 sub를 삽입한다
+    (task→list, log→tail, directive→list, prior→show).
+
+    삽입 조건: argv[0]가 noun이고, 다음 토큰이 없거나 '-'로 시작하되
+    -h/--help가 아닐 때. `waystone task -h`는 noun 자신의 help가 떠야 하고,
+    `waystone log raw '{…}'`처럼 '-'로 시작하지 않는 인자는 건드리지 않는다."""
+    if argv and argv[0] in BARE_DEFAULT:
+        nxt = argv[1] if len(argv) > 1 else None
+        if nxt is None or (nxt.startswith("-") and nxt not in ("-h", "--help")):
+            return [argv[0], BARE_DEFAULT[argv[0]], *argv[1:]]
+    return argv
+
+
+def parse_args_quietly(parser, argv):
     """.waystone 밖에서는 argparse의 usage+rc2도 새어나오면 안 된다(§3.1 완전 무음).
     -h/--help(정상 종료 rc 0)는 어디서든 그대로 출력한다(§3.3)."""
     out, err = io.StringIO(), io.StringIO()
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            args = parser.parse_args()
+            args = parser.parse_args(argv)
     except SystemExit as ex:
         code = ex.code if isinstance(ex.code, int) else 1
         if code != 0 and find_ws() is None:
@@ -894,7 +917,7 @@ def parse_args_quietly(parser):
 def main():
     global ACTIVE_PARSER
     parser = build_parser()
-    args = parse_args_quietly(parser)
+    args = parse_args_quietly(parser, insert_default_sub(sys.argv[1:]))
     ACTIVE_PARSER = getattr(args, "_parser", parser)
     if not hasattr(args, "fn"):
         if find_ws() is None:

@@ -191,12 +191,12 @@ def test_log_review_status_valid_appends(tmp_project, run_waystone):
     assert entry["addressed"] == "partial"
 
 
-def test_log_directive_valid_appends(tmp_project, run_waystone):
+def test_directive_add_valid_appends(tmp_project, run_waystone):
     before = read_ledger(tmp_project)
     proc = run_waystone(
         [
-            "log",
             "directive",
+            "add",
             "--id",
             "gpu-01",
             "--text",
@@ -314,15 +314,15 @@ def test_log_outcome_invalid_result_enum_fails_closed(tmp_project, run_waystone)
     assert lp.read_bytes() == before_bytes
 
 
-def test_log_directive_invalid_scope_enum_fails_closed(tmp_project, run_waystone):
+def test_directive_add_invalid_scope_enum_fails_closed(tmp_project, run_waystone):
     _seed_one_valid_line(tmp_project, run_waystone)
     lp = ledger_path(tmp_project)
     before_bytes = lp.read_bytes()
 
     proc = run_waystone(
         [
-            "log",
             "directive",
+            "add",
             "--id",
             "bad-scope",
             "--text",
@@ -339,15 +339,15 @@ def test_log_directive_invalid_scope_enum_fails_closed(tmp_project, run_waystone
     assert lp.read_bytes() == before_bytes
 
 
-def test_log_directive_invalid_state_enum_fails_closed(tmp_project, run_waystone):
+def test_directive_add_invalid_state_enum_fails_closed(tmp_project, run_waystone):
     _seed_one_valid_line(tmp_project, run_waystone)
     lp = ledger_path(tmp_project)
     before_bytes = lp.read_bytes()
 
     proc = run_waystone(
         [
-            "log",
             "directive",
+            "add",
             "--id",
             "bad-state",
             "--text",

@@ -2,7 +2,8 @@
 `directive list --active`.
 
 DESIGN.md §3.2: "같은 id의 마지막 이벤트가 현재 상태다(파생 뷰는 저장하지
-않는다 — 원칙 4·5)." and §3.3: `waystone retract <directive-id>`,
+않는다 — 원칙 4·5)." 1.0 surface: `waystone directive add [flags]`,
+`waystone directive retract <directive-id>`,
 `waystone directive list [--active] [--json]`.
 """
 import json
@@ -13,8 +14,8 @@ def test_directive_active_then_retract_disappears_from_active_list(
 ):
     log_proc = run_waystone(
         [
-            "log",
             "directive",
+            "add",
             "--id",
             "gpu-01",
             "--text",
@@ -33,7 +34,7 @@ def test_directive_active_then_retract_disappears_from_active_list(
     ids = {d["id"] for d in json.loads(active.stdout)}
     assert "gpu-01" in ids
 
-    retract = run_waystone(["retract", "gpu-01"], cwd=tmp_project)
+    retract = run_waystone(["directive", "retract", "gpu-01"], cwd=tmp_project)
     assert retract.returncode == 0, retract.stderr
 
     after = run_waystone(["directive", "list", "--active", "--json"], cwd=tmp_project)
@@ -49,8 +50,8 @@ def test_directive_state_resolution_uses_last_event_not_history(
     active (last event wins; no derived/cached view)."""
     run_waystone(
         [
-            "log",
             "directive",
+            "add",
             "--id",
             "dur-01",
             "--text",
@@ -62,7 +63,7 @@ def test_directive_state_resolution_uses_last_event_not_history(
         ],
         cwd=tmp_project,
     )
-    retract = run_waystone(["retract", "dur-01"], cwd=tmp_project)
+    retract = run_waystone(["directive", "retract", "dur-01"], cwd=tmp_project)
     assert retract.returncode == 0, retract.stderr
 
     mid = run_waystone(["directive", "list", "--active", "--json"], cwd=tmp_project)
@@ -71,8 +72,8 @@ def test_directive_state_resolution_uses_last_event_not_history(
 
     reactivate = run_waystone(
         [
-            "log",
             "directive",
+            "add",
             "--id",
             "dur-01",
             "--text",
