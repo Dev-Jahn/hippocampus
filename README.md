@@ -61,5 +61,6 @@ Every subcommand supports `-h/--help`; errors print usage to stderr.
 ## Design
 
 Full rationale, ledger schema, clerk guardrails, and the explicit NOT-list
-live in [`DESIGN.md`](./DESIGN.md). Read it before changing behavior here —
+live in [`DESIGN.md`](https://github.com/Dev-Jahn/waystone/blob/rebirth/DESIGN.md)
+(development branch — not shipped with the plugin). Read it before changing behavior here —
 this README only describes what the code already does.
