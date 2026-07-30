@@ -12,7 +12,7 @@ main agent가 위임 라우팅(모델·effort 선택)과 검증 예산을 정할
 
 ## 구성 (이 순서로)
 
-1. 헤더: 생성 시각, 집계 창(며칠·이벤트 수). `> 생성 문서 — 직접 편집 금지, waystone distill로 재생성`.
+1. 헤더: 생성 시각, 집계 창(며칠·이벤트 수). `> 생성 문서 — 직접 편집 금지, waystone prior distill로 재생성`.
 2. **라우팅 프라이어**: (kind × exec)별 위임 성적표. 1차 수용률 = accepted/(전체−lost−no-go),
    revised는 rework 횟수와 함께. 표본 n을 반드시 병기하고 n<4인 칸은 "표본 부족"으로만.
    ledger의 dispatch–outcome을 ref로 조인해서 계산하라.
