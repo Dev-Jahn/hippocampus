@@ -128,8 +128,10 @@ case "$BACKEND" in
     #   --strict-mcp-config   with no --mcp-config given, this loads no MCP servers.
     #   --setting-sources ""  load no user/project/local settings → no hooks,
     #                         no plugins of the host project inside the clerk.
+    # 모델 기본은 sonnet — haiku는 A/B 실측(2026-07-31)에서 수용 보류 상태의
+    # lane에 outcome:accepted를 발명해 강등됨 (스키마는 통과하는 의미 오류).
     with_timeout "$TIMEOUT" claude -p \
-      --model haiku \
+      --model "${WAYSTONE_CLAUDE_CLERK_MODEL:-sonnet}" \
       --tools "" \
       --strict-mcp-config \
       --setting-sources "" \

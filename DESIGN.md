@@ -40,7 +40,7 @@
 | 층 | 무엇 | 비용 |
 |---|---|---|
 | deterministic script | 훅·CLI. 빠르고 멍청한 것 | 0 |
-| **clerk** | 훅/cron이 저가 모델(luna·haiku급)을 headless 호출. 판단이 필요하지만 main의 맥락은 불필요한 일 | 토큰만, main 컨텍스트 0 |
+| **clerk** | 훅/cron이 저가 모델(luna·sonnet급)을 headless 호출. 판단이 필요하지만 main의 맥락은 불필요한 일 | 토큰만, main 컨텍스트 0 |
 | skill | main의 맥락이 필요하거나 main이 결과에 따라 행동해야 하는 일 | main 컨텍스트 |
 | main | 라우팅·수용·사용자 대화 | — |
 
@@ -152,7 +152,7 @@ waystone scribe --transcript P --session S     # Stop 훅이 detached로 부르�
 3. **결정적 프리필터**: 다이제스트에 TOOL/USER 라인이 없으면 커서만 갱신하고 종료
    (모델 호출 0).
 4. backend 해석: `config.yaml > $WAYSTONE_CLERK_BACKEND > 자동(codex 있으면
-   codex/gpt-5.6-luna/low, 아니면 claude -p haiku) > mock`(테스트용). 120s 타임아웃.
+   codex/gpt-5.6-luna/low, 아니면 claude -p sonnet) > mock`(테스트용). 120s 타임아웃.
 5. 프롬프트 = `clerks/turn-scribe.md` + 다이제스트. 기대 출력 = 엄격 JSON:
    `{"worklog": "…", "events": [ …t 없는 ledger 이벤트… ]}`.
 6. 검증: 이벤트를 `waystone log`와 동일 규칙으로 검사(ev별 허용 키 whitelist — 미지 키
