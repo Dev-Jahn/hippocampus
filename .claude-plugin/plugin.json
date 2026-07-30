@@ -1,6 +1,6 @@
 {
   "name": "waystone",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A quiet project organ: task registry, outcome ledger, and background clerks that give agents perception and memory — evidence over enforcement.",
   "author": {"name": "Jahn", "email": "ajh508@naver.com"},
   "repository": "https://github.com/Dev-Jahn/waystone",
