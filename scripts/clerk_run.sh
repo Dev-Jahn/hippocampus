@@ -110,6 +110,7 @@ case "$BACKEND" in
     with_timeout "$TIMEOUT" codex exec \
       -m "$MODEL" \
       -c model_reasoning_effort="low" \
+      -c service_tier="fast" \
       -s read-only \
       --skip-git-repo-check \
       --color never \
