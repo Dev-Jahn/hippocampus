@@ -1,0 +1,28 @@
+{
+  "description": "waystone: inject status capsule at session start (incl. post-compact re-entry); detached scribe on Stop.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/stop.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

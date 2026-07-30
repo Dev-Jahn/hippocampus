@@ -98,7 +98,8 @@ clerk 가드레일(불변):
   StructuredOutput 증발은 harness였다).
 - `directive.scope ∈ {turn, phase, durable}`, `state ∈ {active, retracted, expired}`.
   같은 `id`의 마지막 이벤트가 현재 상태다(파생 뷰는 저장하지 않는다 — 원칙 4·5).
-- `review.base`는 리뷰 대상 커밋 — **이것이 SHA pinning의 전부다**(원칙 3).
+- `review.base`는 리뷰 대상 커밋(`^[0-9a-f]{7,40}$`) — **이것이 SHA pinning의 전부다**
+  (원칙 3). sha를 모르면 review 이벤트를 기록하지 않는다.
 - 검증: `waystone log`는 ev별 필수 필드를 fail-closed로 검사한다. 미지의 `ev`는 거부.
 - 소요 시간은 필드가 아니다: dispatch/outcome 타임스탬프 차로 유도(원칙 4).
 - 규모 근거: research-cc 한 달 = 위임 806건 → 약 1,600행 ≈ 300KB. grep으로 충분.
@@ -154,8 +155,11 @@ waystone scribe --transcript P --session S     # Stop 훅이 detached로 부르�
    codex/gpt-5.6-luna/low, 아니면 claude -p haiku) > mock`(테스트용). 120s 타임아웃.
 5. 프롬프트 = `clerks/turn-scribe.md` + 다이제스트. 기대 출력 = 엄격 JSON:
    `{"worklog": "…", "events": [ …t 없는 ledger 이벤트… ]}`.
-6. 검증: 이벤트를 `waystone log`와 동일 규칙으로 검사. 실패 → `failures/`에 원문 덤프
-   + `ev:clerk ok:false` 기록, ledger는 오염시키지 않는다. **지어내서 메꾸지 않는다.**
+6. 검증: 이벤트를 `waystone log`와 동일 규칙으로 검사(ev별 허용 키 whitelist — 미지 키
+   거부; `t`/`src`는 호출자가 공급할 수 없고 기록기가 무조건 스탬프한다). 실패 →
+   `failures/`에 원문 덤프 + `ev:clerk ok:false` 기록, ledger는 오염시키지 않으며,
+   **커서는 실패 시에도 전진한다**(덤프가 기록이다 — 같은 입력에 무한 재과금 금지).
+   **지어내서 메꾸지 않는다.**
 7. 성공 → 이벤트 append(`src:scribe`), worklog.md의 오늘 날짜 섹션에 한 줄 append,
    커서 갱신, `ev:clerk` 자기 계량 append.
 
