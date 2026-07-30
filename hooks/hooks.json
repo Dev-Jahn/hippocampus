@@ -1,62 +1,14 @@
 {
-  "description": "waystone: inject project digest+active tasks+next-actionable at session start/compaction; snapshot a re-entry pointer before compaction/session end; validate tasks.yaml and regenerate ROADMAP.md on edit; run consent-enabled non-blocking boundary checks at Stop. All hooks no-op in independent verifier sessions and no-op fast in projects without .waystone.yml; Stop also requires the project enable marker.",
+  "description": "waystone: inject status capsule at session start (incl. post-compact re-entry); detached scribe on Stop.",
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Read",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/tasks_read_nudge.sh\"",
-            "timeout": 15
-          }
-        ]
-      }
-    ],
     "SessionStart": [
       {
         "matcher": "startup|resume|clear|compact",
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/session_context.sh\"",
-            "timeout": 20
-          }
-        ]
-      }
-    ],
-    "PreCompact": [
-      {
-        "matcher": "manual|auto",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/resume_snapshot.sh\"",
-            "timeout": 15
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "matcher": "clear|resume|logout|prompt_input_exit|bypass_permissions_disabled|other",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/resume_snapshot.sh\"",
-            "timeout": 15
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/tasks_guard.sh\"",
-            "timeout": 30
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.sh\"",
+            "timeout": 10
           }
         ]
       }
@@ -66,8 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/boundary_check.sh\"",
-            "timeout": 30
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/stop.sh\"",
+            "timeout": 5
           }
         ]
       }

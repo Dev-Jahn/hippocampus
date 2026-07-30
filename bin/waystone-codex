@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-# Codex does not add a plugin's bin/ directory to PATH. Skills invoke this launcher by absolute,
-# plugin-relative path so host selection and the Codex-local data root are explicit.
-here="$(cd "$(dirname "$0")" && pwd)"
-export WAYSTONE_HOST=codex
-exec uv run "$here/../scripts/waystone.py" "$@"
