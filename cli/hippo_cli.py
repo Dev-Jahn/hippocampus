@@ -303,6 +303,9 @@ def cmd_init(_args):
         return
     hp.mkdir(parents=True)
     (hp / "failures").mkdir()
+    # prompts/ is never read by hippo — created so the brief convention (§3.1) is discoverable
+    # instead of every wave reinventing an absolute scratchpad path.
+    (hp / "prompts").mkdir()
     (hp / "ledger.jsonl").touch()
     tasks_save(hp, {"tasks": []})
     print(f"created: {hp}")

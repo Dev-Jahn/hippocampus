@@ -31,6 +31,9 @@ records, `hippo directive` = the live instructions, `hippo prior` = the routing 
 - Before deciding delegation routing: `hippo prior` — which model and effort measured better
 - To see where things stand: `hippo status`
 
+Delegation briefs live in `.hippo/prompts/` — a project-relative path that survives sessions,
+so nothing has to retype an absolute scratchpad prefix. `/hippo:dispatch` has the full contract.
+
 ## What you don't have to do
 
 Every turn, a background clerk reads the transcript and infers most of the events above on its
