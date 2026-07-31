@@ -30,13 +30,28 @@ everywhere — zero bytes on stdout/stderr, exit 0.
 
 ## Install & init
 
-Install via the Claude Code plugin marketplace, then in a project:
+hippo is one plugin for two hosts.
+
+**Claude Code** — install from the marketplace, then in a project:
 
 ```
 hippo init
 ```
 
-This creates `.hippo/` and nothing else.
+**Codex CLI** — install from the Codex marketplace, then in a project:
+
+```
+codex plugin marketplace add Dev-Jahn/jahns-codex-marketplace
+codex plugin add hippo@jahns-codex-marketplace
+```
+
+Codex requires you to **review and trust hooks once** before they run: open `/hooks`
+in the CLI and trust hippo's `SessionStart`/`Stop` entries. Until you do, they are
+skipped silently — if the session-start capsule never appears, look there first.
+Codex also does not put a plugin's `bin/` on `PATH`; the skills resolve `bin/hippo`
+relative to themselves, and you can add your own alias if you want to type `hippo`.
+
+Either way `hippo init` creates `.hippo/` and nothing else.
 
 ## CLI cheat sheet
 

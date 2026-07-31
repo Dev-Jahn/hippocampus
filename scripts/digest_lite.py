@@ -70,7 +70,102 @@ def fmt_tool_use(name, inp):
         return f"{name}: <unparseable input>"
 
 
+def detect_format(path):
+    """codex rollout인지 Claude transcript인지 첫 줄들로 판별한다.
+
+    두 포맷 다 JSONL이지만 레코드 모양이 다르다: codex는 `payload`를 가진
+    session_meta/response_item/event_msg, Claude는 `message`를 가진 user/assistant."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for _, raw in zip(range(20), f):
+            try:
+                rec = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if rec.get("type") in ("session_meta", "response_item", "event_msg", "turn_context"):
+                return "codex"
+            if rec.get("type") in ("user", "assistant", "summary"):
+                return "claude"
+    return "claude"
+
+
+def _codex_text(v):
+    """codex의 content는 문자열이거나 {type: input_text|output_text, text} 목록이다."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, list):
+        return " ".join(
+            b.get("text", "") for b in v if isinstance(b, dict) and b.get("text")
+        )
+    return ""
+
+
+def digest_codex(path, since_line, until_line=0):
+    """codex rollout JSONL → Claude 다이제스트와 동일한 줄 어휘.
+
+    clerk 프롬프트가 호스트를 몰라도 되도록 출력 형식을 공유한다. reasoning은
+    Claude의 thinking과 같은 이유로 제외한다."""
+    out = []
+    has_content = False
+
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for i, raw in enumerate(f, 1):
+            if i <= since_line:
+                continue
+            if until_line and i > until_line:
+                break
+            try:
+                rec = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            pl = rec.get("payload")
+            if not isinstance(pl, dict):
+                continue
+            kind = pl.get("type")
+            p = f"[{i}]"
+
+            if kind == "user_message":
+                txt = _codex_text(pl.get("message"))
+                if txt and not USER_META_PAT.search(txt):
+                    out.append(f"{p} USER: {one_line(trunc(txt, 2500))}")
+                    has_content = True
+            elif kind == "agent_message":
+                out.append(f"{p} ASSIST: {one_line(trunc(_codex_text(pl.get('message')), 1500))}")
+            elif kind in ("custom_tool_call", "function_call", "local_shell_call"):
+                name = pl.get("name") or kind
+                raw_in = pl.get("input") or pl.get("arguments") or pl.get("action") or ""
+                if isinstance(raw_in, (dict, list)):
+                    raw_in = json.dumps(raw_in, ensure_ascii=False)
+                out.append(f"{p} TOOL {name}: {one_line(trunc(raw_in, 400))}")
+                has_content = True
+            elif kind in ("custom_tool_call_output", "function_call_output"):
+                body = _codex_text(pl.get("output"))
+                # codex는 실패를 별도 타입으로 두지 않는다 — 명시적 성공 필드만 신뢰한다.
+                err = pl.get("success") is False
+                out.append(
+                    f"{p} {'RES-ERR' if err else 'RES'}: {one_line(trunc(body, 1200 if err else 350))}"
+                )
+            elif kind == "patch_apply_end":
+                files = ", ".join((pl.get("changes") or {}).keys())
+                ok = pl.get("success") is not False
+                out.append(f"{p} {'RES' if ok else 'RES-ERR'}: patch {files or '(no files)'}")
+                has_content = True
+            elif kind == "web_search_end":
+                out.append(f"{p} TOOL WebSearch: {one_line(trunc(pl.get('query', ''), 300))}")
+                has_content = True
+            elif kind in ("compaction", "context_compaction", "compaction_trigger"):
+                out.append(f"{p} COMPACTION: {one_line(trunc(_codex_text(pl.get('content')), 800))}")
+            # reasoning·token_count·task_started 등은 여섯 줄 형식이 아니다: 버린다.
+
+    return out, has_content
+
+
 def digest(path, since_line, until_line=0):
+    if detect_format(path) == "codex":
+        return digest_codex(path, since_line, until_line)
     out = []
     has_content = False
 

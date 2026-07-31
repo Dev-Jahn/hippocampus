@@ -39,8 +39,9 @@ hippo dispatch --kind kernel-impl --scope "pass2 tensorize" --task feat/x \
   "$(cat prompts/COMMON.md prompts/<task>.md)"
 ```
 
-- 래퍼가 `ev:dispatch`를 자동 기록하고 dispatch id를 첫 줄에 찍는다. `hippo`는 플러그인
-  `bin/`이라 PATH에 이미 있다 — 경로를 박은 shim이 필요 없다.
+- 래퍼가 `ev:dispatch`를 자동 기록하고 dispatch id를 첫 줄에 찍는다.
+- Claude Code에서는 `hippo`가 PATH에 있다. **Codex에서는 플러그인 `bin/`이 PATH에 들어가지
+  않는다** — 이 SKILL.md 위치에서 `../../bin/hippo`를 절대경로로 해소해 부른다.
 - **cwd는 `.hippo/`를 위로 찾을 수 있는 곳**(보통 repo root), worktree는 `-C <worktree>`로
   지정한다. worktree cwd에서 실행하면 기록이 유실된다(그 경우 경고가 나온다).
 - 래퍼가 `codex exec … < /dev/null`을 내장한다(stdin 미폐쇄 hang 방지). 명령 자체는

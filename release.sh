@@ -15,7 +15,9 @@ tests/run.sh
 # 플러그인 설치본에 필요한 것만 (개발 전용 제외: tests/ DESIGN.md CLAUDE.md .claude/ ci.yml)
 SHIP=(
   .claude-plugin
+  .codex-plugin
   .github/workflows/sync-marketplace.yml
+  .github/workflows/sync-codex-marketplace.yml
   .gitignore
   LICENSE
   README.md

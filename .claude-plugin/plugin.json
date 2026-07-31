@@ -1,6 +1,6 @@
 {
   "name": "hippo",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "hippo — your project's hippocampus: task registry, outcome ledger, and background clerks that give agents perception and memory — evidence over enforcement.",
   "author": {
     "name": "Jahn",

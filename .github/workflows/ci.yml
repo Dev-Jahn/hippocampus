@@ -23,6 +23,15 @@ jobs:
               "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"
             ))
           ' .claude-plugin/plugin.json >/dev/null
+          jq -e '
+            .name == "hippo" and
+            .skills == "./skills/" and
+            .hooks == "./hooks/hooks.json"
+          ' .codex-plugin/plugin.json >/dev/null
+          # 두 호스트의 매니페스트가 서로 다른 버전을 주장하면 릴리스가 갈라진다.
+          a=$(jq -r .version .claude-plugin/plugin.json)
+          b=$(jq -r .version .codex-plugin/plugin.json)
+          test "$a" = "$b" || { echo "version drift: claude=$a codex=$b"; exit 1; }
 
   smoke:
     runs-on: ubuntu-latest

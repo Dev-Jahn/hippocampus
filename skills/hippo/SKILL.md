@@ -8,6 +8,11 @@ description: This is your hippocampus. Always use it.
 hippo는 너를 통제하지 않는다. 기억을 대신 맡아줄 뿐이다: 무엇을 위임했고, 무엇이
 수용·반증됐고, 사용자가 어떤 지시를 살려뒀는지. 판단은 언제나 너의 몫이다.
 
+## 부르는 법
+
+Claude Code에서는 `hippo`가 PATH에 있다. **Codex에서는 없다** — 이 SKILL.md 위치에서
+`../../bin/hippo`를 절대경로로 해소해 그것을 부른다.
+
 ## 문법 한 줄
 
 기록은 `hippo log <이벤트>` 한 문으로 들어가고, 명사는 그걸 읽는 창이다.

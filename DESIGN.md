@@ -206,6 +206,27 @@ Bash 호출에서 비어 있다. `scripts/`에 두면 소비 프로젝트마다 
   실측); 장시간 실행은 background+Monitor(포그라운드 sleep 폴링 금지); 브리프 합성 시
   공용/개별 조항 모순 사전 grep; 게이트 확인과 push는 반드시 별도 호출.
 
+### 3.8 호스트 (Claude Code · Codex CLI)
+
+같은 repo가 두 호스트의 플러그인이다. 층 4개 중 셋(CLI·clerk·skill)은 원래 호스트 무관이었고,
+훅만 호스트 종속이었다 — codex가 hook 엔진을 갖추면서 그 벽이 사라졌다(0.144.6 실측).
+
+| | Claude Code | Codex CLI |
+|---|---|---|
+| 매니페스트 | `.claude-plugin/plugin.json` | `.codex-plugin/plugin.json` (`skills`·`hooks` 경로를 명시) |
+| 훅 | `hooks/hooks.json` | **같은 파일** — 이벤트 키(PascalCase)·matcher·stdin 페이로드 필드·SessionStart stdout 주입이 전부 동일 |
+| 플러그인 `bin/` | PATH에 자동 편입 | **편입되지 않는다** → skill은 SKILL.md 위치 기준 상대경로로 `bin/hippo`를 해소한다 |
+| transcript | Claude JSONL | codex rollout JSONL — `digest_lite.py`가 첫 줄들로 판별해 같은 줄 어휘로 환원한다 |
+
+codex 고유 제약 (0.144.6):
+
+- **훅은 신뢰 승인 전까지 조용히 건너뛴다.** `/hooks`에서 한 번 검토·신뢰하거나
+  `--dangerously-bypass-hook-trust`로 우회한다. 설치했는데 캡슐이 안 보이면 먼저 여기를 본다.
+- 프로젝트 `.codex/` 계층은 **신뢰된 프로젝트에서만** 로드된다(플러그인 훅은 무관).
+- `"async": true`는 파싱은 되지만 **건너뛴다** — Stop의 비차단은 훅 자신이 detach해서 얻는다
+  (우리 `stop.sh`는 이미 setsid + 삼중 스트림 차단으로 그렇게 한다).
+- 두 매니페스트의 `version`은 반드시 같다(테스트가 강제한다).
+
 ## 4. 존재하지 않는 것 (NOT-list — 재도입하려면 이 문서를 개정하라)
 
 | 없음 | 이유 (실측) |
@@ -218,7 +239,6 @@ Bash 호출에서 비어 있다. `scripts/`에 두면 소비 프로젝트마다 
 | OPERATING CONTRACT류 상주 주입 | 8–14KB 재주입 실측. 상주는 §6의 한 덩어리뿐 |
 | 손으로 쓰는 PROGRESS.md | 낡는다. worklog(생성) + ledger(사실) + PRIORS(증류)로 대체 |
 | typed refusal 게이트·frozen sidecar·remote verify | 기록하되 강제하지 않는다(원칙 3) |
-| codex 호스트 플러그인(hippo-codex) | MVP 범위 밖. CLI는 어차피 호스트 무관 |
 | 자동 cron 설치 | 사용자가 원하면 직접 건다. 플러그인은 스케줄을 소유하지 않는다 |
 
 ## 5. MVP 이후 (기록만, 지금 만들지 않는다)
