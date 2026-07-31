@@ -317,3 +317,21 @@ def test_inject_keeps_durable_text_readable(tmp_project, run_hippo):
     body = body.split(": ", 1)[1]
     assert len(body) > 80 and len(body) <= 200
     assert "tail clause" in body
+
+
+# --------------------------------------------------------------------------
+# .hippo/prompts/ — the brief convention (DESIGN §3.1)
+# --------------------------------------------------------------------------
+
+def test_init_creates_the_prompts_directory(tmp_project):
+    """A convention nobody can find is not a convention: init makes the directory so a brief has
+    a project-relative home instead of a per-session absolute scratchpad path."""
+    assert (tmp_project / ".hippo" / "prompts").is_dir()
+
+
+def test_prompts_directory_is_never_read_by_hippo(tmp_project, run_hippo):
+    """hippo does not parse briefs — a malformed file there must not disturb any surface."""
+    (tmp_project / ".hippo" / "prompts" / "junk.md").write_text("{ not json", encoding="utf-8")
+    for argv in (["status"], ["status", "--inject"], ["task"], ["log"], ["directive"]):
+        proc = run_hippo(argv, cwd=tmp_project)
+        assert proc.returncode == 0, (argv, proc.stderr)

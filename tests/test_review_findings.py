@@ -910,6 +910,7 @@ DOCUMENTED_WS_ENTRIES = {  # DESIGN §3.1 + §3.5.1 (scribe.lock)
     "PRIORS.md",
     "cursors.json",
     "failures",
+    "prompts",
     "config.yaml",
     "scribe.lock",
 }

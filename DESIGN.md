@@ -87,11 +87,19 @@ enforcement:      none
   PRIORS.md         # generated: the distilled surface the distiller regenerates
   cursors.json      # the scribe's per-session transcript cursors
   failures/         # dumps of clerk output that failed validation (checkup reports them)
+  prompts/          # delegation briefs (COMMON.md + one file per task) — see below
   config.yaml       # optional: overrides such as the clerk backend (everything works without it)
 ```
 
 In a directory with no `.hippo/`, every hook and every CLI command is a **completely silent no-op**
 (zero contamination of other projects).
+
+`prompts/` is the one directory hippo does not read. It exists because delegation briefs had no
+home: the host hands each session a different absolute scratchpad path, so every wave retyped a
+40-character prefix, and a consuming project eventually invented its own fixed path anyway
+(measured). A brief belongs next to the state it describes, at a **project-relative, session-stable**
+path — `.hippo/prompts/<task>.md` — reachable from the same cwd `hippo dispatch` already requires.
+It is a convention, not a requirement: a path anywhere else still launches.
 
 ### 3.2 Ledger schema (a contract — exactly this)
 

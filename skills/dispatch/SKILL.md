@@ -36,9 +36,26 @@ measurement against the Opus 5 guide.
 ```bash
 hippo dispatch --kind kernel-impl --scope "pass2 tensorize" --task feat/x \
   -m gpt-5.6-sol -c model_reasoning_effort=high \
-  -C <worktree> --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
-  "$(cat prompts/COMMON.md prompts/<task>.md)"
+  -C .claude/worktrees/pass2 --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
+  "$(cat .hippo/prompts/COMMON.md .hippo/prompts/pass2.md)"
 ```
+
+Filling the three groups of arguments:
+
+- **Labels** — `--kind` is the aggregation axis of PRIORS (`kind × exec`), so **reuse a tag rather
+  than inventing one per wave**; scattered tags mean the priors never accumulate a sample. Standard
+  vocabulary: `kernel-impl` (implementation), `verify` (boundary verification), `design`,
+  `research`, `docs`, `infra`, `fix`, `perf`, `chore`. Add one only when nothing fits.
+  `--scope` is one line a human can read a month later. `--task` links a registry id when there is one.
+- **Routing** — `-m <model>` and `-c model_reasoning_effort=<low|medium|high|xhigh>`. Read
+  `hippo prior` first; with no evidence yet, start from difficulty: an atomized fragment goes cheap
+  (low/medium), a design or a whole-file rewrite goes high/xhigh. Do not burn the top tier on
+  everything — fragmentation exists precisely so the tier can drop.
+- **Sandbox** — `--dangerously-bypass-approvals-and-sandbox` (the lane runs unattended and cannot
+  answer an approval prompt; the worktree is what makes that safe) and `--skip-git-repo-check`
+  (the worktree is a git dir the check does not recognize). Drop both only for a read-only lane.
+
+Mechanics:
 
 - The wrapper records `ev:dispatch` automatically and prints the dispatch id on the first line.
 - In Claude Code `hippo` is on PATH. **In Codex the plugin's `bin/` is not on PATH** — resolve
@@ -50,8 +67,10 @@ hippo dispatch --kind kernel-impl --scope "pass2 tensorize" --task feat/x \
   command itself through the harness's `run_in_background` — no nohup/disown or other detach
   outside the harness (that produced orphans).
 - When a codex argument collides with a wrapper flag (`--kind`, `--scope`), put it after `--`.
-- Keep prompts in scratchpad files (COMMON concatenated with the individual brief). Launch several
-  lanes in parallel from a single message.
+- Keep briefs in `.hippo/prompts/` (COMMON.md concatenated with the individual brief). It is a
+  project-relative, session-stable path reachable from the cwd this command already requires —
+  no absolute scratchpad prefix to retype or mistype. Launch several lanes in parallel from a
+  single message.
 - **Neutral vocabulary**: phrasing about GPU memory overlap, contamination or injection tripped the
   executor's content filter as a cybersecurity false positive ten times — write safety statements
   in neutral academic terms.
@@ -91,8 +110,21 @@ contamination).
 
 ## 5. Isolation, collection, merge
 
-- Every editing lane gets `{PROJECT_ROOT}/.claude/worktrees/<name>` and its own branch. Do not pin
-  a base SHA in the brief; say "the starting HEAD of your worktree is the base".
+- Every editing lane gets `{PROJECT_ROOT}/.claude/worktrees/<name>` and its own branch, created by
+  main **before** launching and removed by main **after** the merge:
+
+  ```bash
+  git worktree add .claude/worktrees/<name> -b task/<wave>-<name> HEAD   # before
+  git worktree remove .claude/worktrees/<name> && git branch -d task/<wave>-<name>   # after
+  ```
+
+  `.claude/` is gitignored, so the worktrees never dirty the main tree and one directory holds them
+  all. Untracked build artifacts (compiled extensions and friends) do not come along with a
+  checkout — copy them in, preserving relative paths, when the lane needs them. Do not pin a base
+  SHA in the brief; say "the starting HEAD of your worktree is the base".
+- A killed lane's worktree is **not** reset or cleaned before inspection: check `git log`/`status`,
+  push a branch if anything is worth keeping, and only then remove it (untracked artifacts were
+  lost this way once).
 - File ownership alone is not enough to call parallel lanes disjoint — **extract the symbols a lane
   deletes or renames and grep for consumers in the other lanes and in dev** (symbol coupling once
   broke all of dev).
