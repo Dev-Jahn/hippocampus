@@ -16,7 +16,7 @@ substantive work happened, use the empty string "".
 
 events: only the four kinds below are allowed, with exactly these field names.
 
-1. `{"ev":"dispatch","id":"<new id, 8 chars or fewer>","kind":"<work-type tag>","exec":"<vehicle/model/effort>","scope":"<one line>"}`
+1. `{"ev":"dispatch","id":"<new id, 8 chars or fewer>","kind":"<work-type tag>","exec":"<executor/model/effort>","scope":"<one line>"}`
    — a delegation that was *launched* in this window: a codex exec run (read the model from -m
    and the effort from the Bash command), an Agent/Task tool call (from its model and
    description), a Workflow launch. A dispatch the wrapper already recorded (you can see
@@ -42,12 +42,23 @@ events: only the four kinds below are allowed, with exactly these field names.
    aggregate on (kind × exec), so `bwd-kfuse` or `audit-nvfp4` splits the sample into columns of
    one. Those are scope, not kind.
 
-   `exec` is exactly three parts, `vehicle/model/effort`, with no spaces. vehicle is one of
-   `codex`, `claude`, `fork`, `workflow`, `background`. Read the model from `-m` and the effort
-   from `-c model_reasoning_effort=`. A wrapper's own path (`tools/dispatch`, `hippo dispatch`)
-   is **not** a vehicle — the vehicle is what actually ran the work. If a part is genuinely
-   absent from the digest write `unknown` for that part alone; never emit prose or the literal
-   placeholder `vehicle/model/effort` as a value.
+   `exec` is exactly three parts, `executor/model/effort`, with no spaces. The **executor is the
+   agent that did the work** — never how it was launched:
+
+   | executor | what it is |
+   |---|---|
+   | `codex` | an external `codex exec` process, no inherited context |
+   | `claude` | a headless `claude -p` process |
+   | `fork` | a subagent that inherits this session's context (effort is `inherit`) |
+   | `subagent` | an anonymous subagent, no inherited context |
+   | `workflow` | a subagent orchestrated by the Workflow tool |
+
+   `background`, `bash`, `tools/dispatch`, `hippo dispatch` are launch mechanisms, not executors:
+   a codex run started in the background is still `codex`, and splitting it by how it was
+   launched scatters the sample. Read the model from `-m` and the effort from
+   `-c model_reasoning_effort=`. If a part is genuinely absent from the digest write `unknown`
+   for that part alone; never emit prose or a placeholder word as a value. Work with no agent at
+   all (a command the main session simply ran) is not a delegation — do not record a dispatch.
 2. `{"ev":"outcome","ref":"<dispatch id>","result":"accepted|revised|refuted|no-go|lost","attr":"work|brief|harness","rework":<integer>,"note":"<one line>"}`
    — a delegation that reached a *verdict* in this window: merged/accepted (accepted), accepted
    after repair (revised, with the number of round trips in rework), refuted by verification
@@ -63,10 +74,10 @@ events: only the four kinds below are allowed, with exactly these field names.
    wrong? → `work`. **If the digest does not say which, omit `attr` entirely** — an absent
    attribution is a gap, but a reflexive `work` is a lie that blames the executor for the brief's
    defect, and every routing decision built on it inherits that lie.
-3. `{"ev":"directive","id":"<short kebab id>","text":"<the gist of what was said>","scope":"turn|phase|durable","state":"active"}`
+3. `{"ev":"directive","id":"<short kebab id>","text":"<the gist of what was said>","lifetime":"turn|phase|durable","state":"active"}`
    or `{"ev":"directive","id":"<existing id>","state":"retracted"}`
    — **only operating constraints or instructions spoken by the user (USER: lines)**. Choosing
-   scope: an instruction that applies to this turn only = turn (do not record it — omit), one
+   the lifetime: an instruction that applies to this turn only = turn (do not record it — omit), one
    that holds for the current phase of work = "phase" (e.g. "use GPUs 0 and 1 only", "hold off on
    speed claims for now"), one that holds for the whole project = "durable" (e.g. "keep review
    replies in context, never save them to a file"). When the user withdraws an existing

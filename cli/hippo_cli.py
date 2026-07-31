@@ -51,7 +51,7 @@ ALLOWED = {
     "outcome": ("ref", "result", "attr", "rework", "by", "note"),
     "review": ("id", "base", "source", "findings"),
     "review-status": ("ref", "addressed", "at"),
-    "directive": ("id", "text", "scope", "state"),
+    "directive": ("id", "text", "lifetime", "state"),
     "clerk": ("name", "ok", "ms", "tokens"),
 }
 # Fields only the writer stamps. Rejected if a caller (clerk output, log raw, environment)
@@ -61,17 +61,18 @@ WRITER_ONLY = ("t", "src")
 SRC_VALUES = ("scribe", "cli", "wrapper")  # DESIGN §3.2
 SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 # exec is the second axis PRIORS aggregates on, so its shape is a contract, not a hint:
-# exactly vehicle/model/effort, no whitespace. Measured on a real ledger, a free-form field
-# produced 24 spellings for 4 vehicles ("fork agent", "background/sol xhigh", the shim path
-# as the vehicle, even the literal placeholder) — every variant its own useless column.
+# exactly executor/model/effort, no whitespace. Measured on a real ledger, a free-form field
+# produced 24 spellings for 3 real executors. Of the 11 distinct first slots, 8 were category
+# errors — mostly a launch mechanism ("background", "bash", the wrapper's own path) rather than
+# the agent that did the work, which is what the old name "vehicle" invited.
 EXEC_RE = re.compile(r"^[^/\s]+/[^/\s]+/[^/\s]+$")
 # The placeholder words themselves showed up as values ("vehicle/gpt-5.6-sol/high"): the
 # shape was right, so only naming them catches it.
-EXEC_PLACEHOLDERS = {"vehicle", "model", "effort"}
+EXEC_PLACEHOLDERS = {"executor", "vehicle", "model", "effort"}
 ENUMS = {
     ("outcome", "result"): {"accepted", "revised", "refuted", "no-go", "lost"},
     ("outcome", "attr"): {"work", "brief", "harness"},
-    ("directive", "scope"): {"turn", "phase", "durable"},
+    ("directive", "lifetime"): {"turn", "phase", "durable"},
     ("directive", "state"): {"active", "retracted", "expired"},
 }
 INT_FIELDS = ("findings", "rework", "ms", "tokens")
@@ -97,7 +98,7 @@ def validate_event(e):
         if e.get(f) is None or (isinstance(e[f], str) and not e[f].strip()):
             return f"ev={ev}: required field missing: {f}"
     if ev == "directive" and e["state"] == "active":
-        for f in ("text", "scope"):
+        for f in ("text", "lifetime"):
             if not e.get(f):
                 return f"ev=directive state=active: required field missing: {f}"
     for (evn, field), allowed in ENUMS.items():
@@ -112,8 +113,9 @@ def validate_event(e):
         ex = str(e["exec"])
         if not EXEC_RE.match(ex) or EXEC_PLACEHOLDERS & set(ex.split("/")):
             return (
-                f"ev=dispatch: exec must be vehicle/model/effort with no spaces: {ex!r} "
-                "(e.g. codex/gpt-5.6-sol/high, fork/fable/inherit)"
+                f"ev=dispatch: exec must be executor/model/effort with no spaces: {ex!r} "
+                "(executor is the agent that did the work — codex|claude|fork|subagent|workflow "
+                "— not how it was launched)"
             )
     # review.base is the whole of SHA pinning (§3.2) — refuse placeholders like "unknown".
     if ev == "review" and not SHA_RE.match(str(e["base"])):
@@ -195,6 +197,13 @@ def read_ledger(hp):
             except json.JSONDecodeError:
                 pass
     return out
+
+
+def directive_lifetime(d):
+    """`lifetime` names how long a directive lives. It used to be called `scope`, which already
+    meant "what a delegation covers" on a dispatch — one key, two unrelated meanings. Ledgers
+    written before the rename still say scope, and they stay readable."""
+    return d.get("lifetime") or d.get("scope")
 
 
 def directives(hp):
@@ -318,12 +327,16 @@ def cmd_init(_args):
         return
     hp.mkdir(parents=True)
     (hp / "failures").mkdir()
-    # prompts/ is never read by hippo — created so the brief convention (§3.1) is discoverable
+    # briefs/ is never read by hippo — created so the brief convention (§3.1) is discoverable
     # instead of every wave reinventing an absolute scratchpad path.
-    (hp / "prompts").mkdir()
+    (hp / "briefs").mkdir()
     (hp / "ledger.jsonl").touch()
     tasks_save(hp, {"tasks": []})
     print(f"created: {hp}")
+    print(
+        "next: `hippo directive add --text \"…\" --lifetime durable` for a standing instruction, "
+        "`hippo task add <type>/<slug> --title …` for work, `hippo status` to see both.",
+    )
 
 
 DIRECTIVE_BUDGET = 1600  # character budget for the directive block of the injected surface (DESIGN §6)
@@ -353,13 +366,13 @@ def status_lines(hp):
     # that is invisible at session start is effectively not there (principle 9, read backwards).
     # The cap is a character budget rather than a line count — there is no reason a long and a
     # short directive should cost the same.
-    ordered = [d for d in live if d.get("scope") == "durable"] + [
-        d for d in live if d.get("scope") != "durable"
+    ordered = [d for d in live if directive_lifetime(d) == "durable"] + [
+        d for d in live if directive_lifetime(d) != "durable"
     ]
     used, shown = 0, 0
     for d in ordered:
-        durable = d.get("scope") == "durable"
-        line = f"· live({d.get('scope', '?')}): {one_line(d.get('text', ''), 200 if durable else 80)}"
+        lt = directive_lifetime(d)
+        line = f"· live({lt or '?'}): {one_line(d.get('text', ''), 200 if lt == 'durable' else 80)}"
         if shown and used + len(line) > DIRECTIVE_BUDGET:
             break
         lines.append(line)
@@ -554,8 +567,13 @@ def cmd_log(args):
         e.update(id=did, state=args.state)
         if args.text:
             e["text"] = args.text
-        if args.scope:
-            e["scope"] = args.scope
+        # --scope stays accepted for one release: it is what this flag was called when the key
+        # collided with dispatch.scope, and consuming projects have it in their muscle memory.
+        lifetime = args.lifetime or args.scope
+        if args.scope and not args.lifetime:
+            print("hippo: --scope is now --lifetime on a directive (accepted for now)", file=sys.stderr)
+        if lifetime:
+            e["lifetime"] = lifetime
     log_and_print(args.hp, e)
 
 
@@ -639,16 +657,22 @@ def cmd_distill(args):
         + priors
         + "\n"
     )
+    if not kept:
+        # Same deterministic prefilter as the scribe (§3.5.3): there is nothing to distill from
+        # an empty window, so do not spend a model call proving it.
+        print(f"no ledger events in the last {args.days} days — nothing to distill")
+        return
     out, err, rc, ms, tokens = run_clerk(
         hp, CLERKS / "distiller.md", payload, DISTILL_TIMEOUT
     )
     meter = {"ev": "clerk", "name": "distiller", "ms": ms, "tokens": tokens}
     if rc != 0 or not out.strip():
+        reason = f"rc={rc}" if rc != 0 else "the clerk returned nothing"
         p = dump_failure(
             hp, "distill", f"rc={rc}\n--- stderr ---\n{err}\n--- stdout ---\n{out}"
         )
         append_event(hp, {**meter, "ok": False})
-        die(f"distill failed (rc={rc}) — dump: {p}")
+        die(f"distill failed ({reason}) — dump: {p}")
     tmp = hp / "PRIORS.md.tmp"
     tmp.write_text(out.strip() + "\n", encoding="utf-8")
     os.replace(tmp, hp / "PRIORS.md")
@@ -921,16 +945,16 @@ def build_parser():
     a.add_argument("--status", default="pending", help="|".join(TASK_STATUSES))
     a.add_argument("--notes")
     a.add_argument("--deps", help="comma separated")
-    a.set_defaults(fn=cmd_task_add)
+    a.set_defaults(fn=cmd_task_add, writes=True)
     a = t.add_parser("set", help="change a field (title|status|notes|deps)")
     a.add_argument("id")
     a.add_argument("field")
     a.add_argument("value")
-    a.set_defaults(fn=cmd_task_set)
+    a.set_defaults(fn=cmd_task_set, writes=True)
     a = t.add_parser("done", help="mark as done")
     a.add_argument("id")
     a.add_argument("--note", help="append to notes")
-    a.set_defaults(fn=cmd_task_done)
+    a.set_defaults(fn=cmd_task_done, writes=True)
     a = t.add_parser("list", help="list (default: pending+active)")
     a.add_argument("--status", help="comma separated multi-filter")
     a.add_argument("--all", action="store_true")
@@ -942,17 +966,17 @@ def build_parser():
     a.set_defaults(fn=cmd_task_show)
     a = t.add_parser("drop", help="status=dropped")
     a.add_argument("id")
-    a.set_defaults(fn=cmd_task_drop)
+    a.set_defaults(fn=cmd_task_drop, writes=True)
 
     lg = sub.add_parser("log", help="record a ledger event (fail-closed validation)")
     lsub = lg.add_subparsers(dest="ev")
     a = lsub.add_parser("dispatch", help="launch a delegation")
     a.add_argument("--id", required=True)
     a.add_argument("--kind", required=True)
-    a.add_argument("--exec", required=True, help="vehicle/model/effort")
+    a.add_argument("--exec", required=True, help="executor/model/effort (executor = the agent that did the work)")
     a.add_argument("--scope", required=True)
     a.add_argument("--task")
-    a.set_defaults(fn=cmd_log)
+    a.set_defaults(fn=cmd_log, writes=True)
     a = lsub.add_parser("outcome", help="verdict on a delegation")
     a.add_argument("--ref", required=True)
     a.add_argument(
@@ -962,21 +986,21 @@ def build_parser():
     a.add_argument("--rework", type=int)
     a.add_argument("--by")
     a.add_argument("--note")
-    a.set_defaults(fn=cmd_log)
+    a.set_defaults(fn=cmd_log, writes=True)
     a = lsub.add_parser("review", help="an external review reply")
     a.add_argument("--id", required=True)
     a.add_argument("--base", required=True, help="sha of the reviewed commit")
     a.add_argument("--source", required=True)
     a.add_argument("--findings", required=True, type=int)
-    a.set_defaults(fn=cmd_log)
+    a.set_defaults(fn=cmd_log, writes=True)
     a = lsub.add_parser("review-status", help="how far the findings were addressed")
     a.add_argument("--ref", required=True)
     a.add_argument("--addressed", required=True, help="e.g. full|partial|none")
     a.add_argument("--at", help="sha of the commit that addressed it")
-    a.set_defaults(fn=cmd_log)
+    a.set_defaults(fn=cmd_log, writes=True)
     a = lsub.add_parser("raw", help="validate one JSON line, then append")
     a.add_argument("json")
-    a.set_defaults(fn=cmd_log_raw)
+    a.set_defaults(fn=cmd_log_raw, writes=True)
     a = lsub.add_parser("tail", help="last N lines (the default for bare `hippo log`)")
     a.add_argument("-n", type=int, default=20)
     a.add_argument("--ev", dest="ev_filter", help="filter by ev type")
@@ -988,24 +1012,29 @@ def build_parser():
     a = d.add_parser("add", help="record a directive (ev=directive)")
     a.add_argument("--id", help="derived from --text when omitted (DESIGN §3.3 auto id)")
     a.add_argument("--text")
-    a.add_argument("--scope", choices=sorted(ENUMS[("directive", "scope")]))
+    a.add_argument(
+        "--lifetime",
+        choices=sorted(ENUMS[("directive", "lifetime")]),
+        help="how long the directive lives",
+    )
+    a.add_argument("--scope", choices=sorted(ENUMS[("directive", "lifetime")]), help=argparse.SUPPRESS)
     a.add_argument(
         "--state", default="active", choices=sorted(ENUMS[("directive", "state")])
     )
-    a.set_defaults(fn=cmd_log, ev="directive")
+    a.set_defaults(fn=cmd_log, ev="directive", writes=True)
     a = d.add_parser("list", help="list (derived from the ledger)")
     a.add_argument("--active", action="store_true")
     a.add_argument("--json", action="store_true")
     a.set_defaults(fn=cmd_directive_list)
     a = d.add_parser("retract", help="retract a directive")
     a.add_argument("id")
-    a.set_defaults(fn=cmd_directive_retract)
+    a.set_defaults(fn=cmd_directive_retract, writes=True)
 
     pr = sub.add_parser("prior", help="the distilled surface").add_subparsers(dest="sub")
     pr.add_parser("show", help="print PRIORS.md").set_defaults(fn=cmd_prior_show)
     a = pr.add_parser("distill", help="run the distiller clerk → regenerate PRIORS.md")
     a.add_argument("--days", type=int, default=14)
-    a.set_defaults(fn=cmd_distill)
+    a.set_defaults(fn=cmd_distill, writes=True)
 
     # main() intercepts dispatch before argparse (the remaining arguments are codex's grammar
     # and this parser must not read them). Registering it here is only for listing and --help.
@@ -1093,6 +1122,15 @@ def main():
     if args.fn is not cmd_init:
         hp = find_hippo()
         if hp is None:
+            # Reads stay completely silent outside a project (§3.1). A *write* does not: the
+            # caller typed it expecting a record, and silence reads as success. The usual cause
+            # is cwd — a worktree holds a .git file, so the walk-up stops before the project.
+            if getattr(args, "writes", False):
+                print(
+                    "hippo: no .hippo/ found from here — nothing was recorded. "
+                    "Run `hippo init`, or check your cwd (a worktree is not the project root).",
+                    file=sys.stderr,
+                )
             sys.exit(0)
         args.hp = hp
     args.fn(args)

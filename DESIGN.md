@@ -73,7 +73,7 @@ Clerk guardrails (invariant):
 ```
 runtime (thin):   bin/hippo (shim) + cli/hippo_cli.py + 2 hooks + scripts/{clerk_run,digest_lite,dispatch}
 cognition (text): clerks/{turn-scribe,distiller}.md + skills/{hippo,checkup,dispatch}
-resident (small): one block injected at SessionStart (§6 below)
+resident (small): the capsule injected at SessionStart (§6 below)
 enforcement:      none
 ```
 
@@ -87,18 +87,20 @@ enforcement:      none
   PRIORS.md         # generated: the distilled surface the distiller regenerates
   cursors.json      # the scribe's per-session transcript cursors
   failures/         # dumps of clerk output that failed validation (checkup reports them)
-  prompts/          # delegation briefs (COMMON.md + one file per task) — see below
+  briefs/           # delegation briefs (COMMON.md + one file per task) — see below
   config.yaml       # optional: overrides such as the clerk backend (everything works without it)
 ```
 
 In a directory with no `.hippo/`, every hook and every CLI command is a **completely silent no-op**
 (zero contamination of other projects).
 
-`prompts/` is the one directory hippo does not read. It exists because delegation briefs had no
+`briefs/` is the one directory hippo does not read. It exists because delegation briefs had no
 home: the host hands each session a different absolute scratchpad path, so every wave retyped a
 40-character prefix, and a consuming project eventually invented its own fixed path anyway
 (measured). A brief belongs next to the state it describes, at a **project-relative, session-stable**
-path — `.hippo/prompts/<task>.md` — reachable from the same cwd `hippo dispatch` already requires.
+path — `.hippo/briefs/<task>.md` — reachable from the same cwd `hippo dispatch` already requires.
+It is called briefs because that is what the rest of the system calls the document, including the
+ledger's own `attr: brief`.
 It is a convention, not a requirement: a path anywhere else still launches.
 
 ### 3.2 Ledger schema (a contract — exactly this)
@@ -111,7 +113,7 @@ optional `src` (`scribe|cli|wrapper`).
 {"t":"…","ev":"outcome","ref":"d041","result":"refuted","attr":"work","rework":2,"by":"verify/opus","note":"circular oracle reference"}
 {"t":"…","ev":"review","id":"r007","base":"abc123f","source":"chatgpt-web","findings":4}
 {"t":"…","ev":"review-status","ref":"r007","addressed":"partial","at":"def4567"}
-{"t":"…","ev":"directive","id":"gpu-01","text":"use GPUs 0 and 1 only","scope":"phase","state":"active"}
+{"t":"…","ev":"directive","id":"gpu-01","text":"use GPUs 0 and 1 only","lifetime":"phase","state":"active"}
 {"t":"…","ev":"directive","id":"gpu-01","state":"retracted"}
 {"t":"…","ev":"clerk","name":"turn-scribe","ms":8100,"ok":true,"tokens":1400}
 ```
@@ -120,15 +122,24 @@ optional `src` (`scribe|cli|wrapper`).
   (recommended whenever the result is not accepted — a failure count with no attribution produces a
   lying prior. Measured: the run of REFUTEDs was work, the NO-GO from contradictory GPU clauses was
   brief, and the vanished StructuredOutput was harness).
-- `directive.scope ∈ {turn, phase, durable}`, `state ∈ {active, retracted, expired}`. The last event
-  for an `id` is its current state (a derived view is never stored — principles 4 and 5).
-- `dispatch.exec` is exactly `vehicle/model/effort`, no whitespace, and `outcome.ref` /
+- `directive.lifetime ∈ {turn, phase, durable}`, `state ∈ {active, retracted, expired}`. The last
+  event for an `id` is its current state (a derived view is never stored — principles 4 and 5).
+  It is `lifetime` rather than `scope` because `dispatch.scope` already means *what a delegation
+  covers* — one key with two unrelated meanings is how a schema teaches the wrong thing. Ledgers
+  written before the rename still say `scope` and stay readable.
+- `dispatch.exec` is exactly `executor/model/effort`, no whitespace, and `outcome.ref` /
   `review-status.ref` must name an event that exists in this ledger — both fail-closed. These two
   fields are the axes PRIORS aggregates on, so a free-form value is not a small mess, it is a
   column of one. Measured on a real ledger: 26 kinds across 108 dispatches with 19 used exactly
-  once, 24 spellings of exec for 4 vehicles (including the wrapper's own path and the literal
-  placeholder), and **54% of outcomes joining to no dispatch at all** — half from a caller passing
-  a task id, half from ids the scribe invented in the right shape. All of it looked like data.
+  once, and 24 spellings of exec for 3 real executors — of 11 distinct first slots, 8 were
+  category errors, mostly a *launch mechanism* (`background`, `bash`, the wrapper's own path)
+  where the agent belonged. And **54% of outcomes joined to no dispatch at all** — half from a
+  caller passing a task id, half from ids the scribe invented in the right shape. All of it
+  looked like data.
+- The **executor** is the agent that did the work (`codex`, `claude`, `fork`, `subagent`,
+  `workflow`), not how it was launched: a codex run started in the background is still `codex`,
+  and splitting it by launch mechanism scatters the sample the priors depend on. Work with no
+  agent — a command main simply ran — is not a delegation and gets no dispatch event.
 - `review.base` is the reviewed commit (`^[0-9a-f]{7,40}$`) — **this is the whole of SHA pinning**
   (principle 3). Without a known sha, do not record the review event at all.
 - Validation: `hippo log` checks the required fields per ev, fail-closed. An unknown `ev` is rejected.
@@ -170,6 +181,13 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
   views recomputed from the ledger every time.
 - Task states: `pending|active|done|dropped`. tasks.yaml may be edited by hand and the CLI always
   re-parses it. No acrobatics such as comment preservation (a lesson from 0.x).
+- **Identifiers** (conventions, not enforced — recording beats refusing):
+  a task id reads `<type>/<kebab-slug>` (`feat/stream-carry`, `fix/cursor-gap`) so it is
+  self-explanatory in a commit, a branch name and a ledger line at once. A task type is *not* a
+  dispatch `kind`: a task is a unit of work, a kind is what one delegation did, and a single task
+  normally produces dispatches of several kinds (`impl`, then `verify`). A dispatch id only has
+  to be unique and greppable — `hippo dispatch` mints one, the scribe writes a short one, and a
+  hand-written one just needs to be something an `outcome` can name later.
 
 ### 3.4 Hooks (exactly two — adding a third is forbidden)
 
@@ -295,7 +313,7 @@ Constraints specific to codex (0.144.6):
 - Fold a read-oriented exposure of the distilled result (the habit of running `prior show` right
   before delegating) into the dispatch skill.
 
-## 6. The resident surface (in full — anything larger is a regression)
+## 6. The capsule (in full — anything larger is a regression)
 
 ```
 [hippo] tasks 3 open · directives 2 live · priors 07-31 · worklog 07-31

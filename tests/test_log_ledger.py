@@ -201,7 +201,7 @@ def test_directive_add_valid_appends(tmp_project, run_hippo):
             "gpu-01",
             "--text",
             "Use GPUs 0 and 1 only",
-            "--scope",
+            "--lifetime",
             "phase",
             "--state",
             "active",
@@ -215,7 +215,7 @@ def test_directive_add_valid_appends(tmp_project, run_hippo):
     entry = after[-1]
     assert entry["ev"] == "directive"
     assert entry["id"] == "gpu-01"
-    assert entry["scope"] == "phase"
+    assert entry["lifetime"] == "phase"
     assert entry["state"] == "active"
 
 
@@ -327,7 +327,7 @@ def test_directive_add_invalid_scope_enum_fails_closed(tmp_project, run_hippo):
             "bad-scope",
             "--text",
             "x",
-            "--scope",
+            "--lifetime",
             "eternal",
             "--state",
             "active",
@@ -352,7 +352,7 @@ def test_directive_add_invalid_state_enum_fails_closed(tmp_project, run_hippo):
             "bad-state",
             "--text",
             "x",
-            "--scope",
+            "--lifetime",
             "phase",
             "--state",
             "sleeping",
@@ -393,7 +393,7 @@ def test_log_raw_valid_json_appends(tmp_project, run_hippo):
             "ev": "directive",
             "id": "raw-01",
             "text": "check the raw path",
-            "scope": "phase",
+            "lifetime": "phase",
             "state": "active",
         },
         ensure_ascii=False,

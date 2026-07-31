@@ -58,7 +58,7 @@ confirmation. With no `.hippo/`, answer in one line — "hippo is not initialize
 ## Check 4 — data hygiene
 
 - Ledger size (lines, KB) and the number of malformed lines. worklog.md size. Accumulated failures/.
-- `prompts/`: briefs whose task is done or dropped are dead weight — list them with their age and
+- `briefs/`: briefs whose task is done or dropped are dead weight — list them with their age and
   propose deletion (git never held them, so removal is the only cleanup).
 - If old done tasks are more than half of tasks.yaml, propose moving them to a separate file.
 

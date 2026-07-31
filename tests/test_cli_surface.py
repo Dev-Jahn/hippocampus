@@ -21,7 +21,7 @@ REMOVED_SURFACES = (
     ["retract", "gpu-01"],
     ["ledger", "tail"],
     ["distill"],
-    ["log", "directive", "--id", "x", "--text", "t", "--scope", "phase"],
+    ["log", "directive", "--id", "x", "--text", "t", "--lifetime", "phase"],
 )
 
 
@@ -46,7 +46,7 @@ def _seed_dispatch(tmp_project, run_hippo, did="d001"):
 
 def _seed_directive(tmp_project, run_hippo, did="gpu-01"):
     proc = run_hippo(
-        ["directive", "add", "--id", did, "--text", "Use GPUs 0 and 1 only", "--scope", "phase"],
+        ["directive", "add", "--id", did, "--text", "Use GPUs 0 and 1 only", "--lifetime", "phase"],
         cwd=tmp_project,
     )
     assert proc.returncode == 0, proc.stderr
@@ -115,7 +115,7 @@ def test_bare_noun_with_flag_gets_default_sub(tmp_project, run_hippo):
 
 def test_directive_add_autoid_roundtrip(tmp_project, run_hippo):
     add = run_hippo(
-        ["directive", "add", "--text", "Use GPUs 0 and 1 only", "--scope", "phase"],
+        ["directive", "add", "--text", "Use GPUs 0 and 1 only", "--lifetime", "phase"],
         cwd=tmp_project,
     )
     assert add.returncode == 0, add.stderr
@@ -142,17 +142,17 @@ def test_directive_add_autoid_is_deterministic_for_same_text(
 ):
     text = "keep review replies in context"
     first = run_hippo(
-        ["directive", "add", "--text", text, "--scope", "durable"], cwd=tmp_project
+        ["directive", "add", "--text", text, "--lifetime", "durable"], cwd=tmp_project
     )
     second = run_hippo(
-        ["directive", "add", "--text", text, "--scope", "durable"], cwd=tmp_project
+        ["directive", "add", "--text", text, "--lifetime", "durable"], cwd=tmp_project
     )
     assert first.returncode == 0 and second.returncode == 0
     assert json.loads(first.stdout)["id"] == json.loads(second.stdout)["id"]
 
 
 def test_directive_add_without_text_and_id_rejected(tmp_project, run_hippo):
-    proc = run_hippo(["directive", "add", "--scope", "phase"], cwd=tmp_project)
+    proc = run_hippo(["directive", "add", "--lifetime", "phase"], cwd=tmp_project)
     assert proc.returncode != 0
     assert proc.stderr.strip() != ""
 
@@ -279,9 +279,9 @@ def test_prior_distill_regenerates_priors_md(tmp_project, run_hippo, tmp_path):
 # Injected surface: durable directives are never folded away (§6)
 # --------------------------------------------------------------------------
 
-def _add_directive(run_hippo, cwd, did, text, scope):
+def _add_directive(run_hippo, cwd, did, text, lifetime):
     proc = run_hippo(
-        ["directive", "add", "--id", did, "--text", text, "--scope", scope], cwd=cwd
+        ["directive", "add", "--id", did, "--text", text, "--lifetime", lifetime], cwd=cwd
     )
     assert proc.returncode == 0, proc.stderr
 
@@ -320,18 +320,18 @@ def test_inject_keeps_durable_text_readable(tmp_project, run_hippo):
 
 
 # --------------------------------------------------------------------------
-# .hippo/prompts/ — the brief convention (DESIGN §3.1)
+# .hippo/briefs/ — the brief convention (DESIGN §3.1)
 # --------------------------------------------------------------------------
 
-def test_init_creates_the_prompts_directory(tmp_project):
+def test_init_creates_the_briefs_directory(tmp_project):
     """A convention nobody can find is not a convention: init makes the directory so a brief has
     a project-relative home instead of a per-session absolute scratchpad path."""
-    assert (tmp_project / ".hippo" / "prompts").is_dir()
+    assert (tmp_project / ".hippo" / "briefs").is_dir()
 
 
-def test_prompts_directory_is_never_read_by_hippo(tmp_project, run_hippo):
+def test_briefs_directory_is_never_read_by_hippo(tmp_project, run_hippo):
     """hippo does not parse briefs — a malformed file there must not disturb any surface."""
-    (tmp_project / ".hippo" / "prompts" / "junk.md").write_text("{ not json", encoding="utf-8")
+    (tmp_project / ".hippo" / "briefs" / "junk.md").write_text("{ not json", encoding="utf-8")
     for argv in (["status"], ["status", "--inject"], ["task"], ["log"], ["directive"]):
         proc = run_hippo(argv, cwd=tmp_project)
         assert proc.returncode == 0, (argv, proc.stderr)
@@ -378,20 +378,20 @@ def test_review_status_ref_must_name_a_real_review(tmp_project, run_hippo):
     assert "not a known review id" in proc.stderr
 
 
-def test_exec_must_be_vehicle_model_effort(tmp_project, run_hippo):
-    """A free-form exec produced 24 spellings for 4 vehicles — including the wrapper's own path
-    as the vehicle and the literal placeholder text."""
+def test_exec_must_be_executor_model_effort(tmp_project, run_hippo):
+    """A free-form exec produced 24 spellings for 3 real executors: 8 of the 11 distinct first
+    slots were category errors, mostly a launch mechanism where the agent belonged."""
     for bad in (
-        "gpt-5.6-sol/high",                    # vehicle missing
-        "tools/dispatch/gpt-5.6-sol/xhigh",    # the shim path taken as the vehicle
+        "gpt-5.6-sol/high",                    # executor missing
+        "tools/dispatch/gpt-5.6-sol/xhigh",    # the shim path taken as the executor
         "background/sol xhigh",                # whitespace
         "fork agent",                          # prose
-        "vehicle/model/effort unknown",        # the placeholder itself
-        "vehicle/gpt-5.6-sol/high",            # right shape, placeholder word as the value
+        "executor/model/effort unknown",       # the placeholder itself
+        "executor/gpt-5.6-sol/high",           # right shape, placeholder word as the value
     ):
         proc = _dispatch(run_hippo, tmp_project, did=f"d-{abs(hash(bad))%9999}", exec_=bad)
         assert proc.returncode != 0, bad
-        assert "vehicle/model/effort" in proc.stderr
+        assert "executor/model/effort" in proc.stderr
 
     for good in ("codex/gpt-5.6-sol/high", "fork/fable/inherit", "workflow/fable/xhigh"):
         proc = _dispatch(run_hippo, tmp_project, did=f"ok-{abs(hash(good))%9999}", exec_=good)
