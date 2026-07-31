@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [rebirth]
+    branches: [dev]
   pull_request:
 
 permissions:
