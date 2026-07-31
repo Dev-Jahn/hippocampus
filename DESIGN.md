@@ -125,8 +125,7 @@ optional `src` (`scribe|cli|wrapper`).
 - `directive.lifetime ∈ {turn, phase, durable}`, `state ∈ {active, retracted, expired}`. The last
   event for an `id` is its current state (a derived view is never stored — principles 4 and 5).
   It is `lifetime` rather than `scope` because `dispatch.scope` already means *what a delegation
-  covers* — one key with two unrelated meanings is how a schema teaches the wrong thing. Ledgers
-  written before the rename still say `scope` and stay readable.
+  covers* — one key with two unrelated meanings is how a schema teaches the wrong thing.
 - `dispatch.exec` is exactly `executor/model/effort`, no whitespace, and `outcome.ref` /
   `review-status.ref` must name an event that exists in this ledger — both fail-closed. These two
   fields are the axes PRIORS aggregates on, so a free-form value is not a small mess, it is a
