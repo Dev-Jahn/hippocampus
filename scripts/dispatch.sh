@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # dispatch.sh — codex exec wrapper that auto-records ev:dispatch (DESIGN §3.6).
 #
-# Usage: dispatch.sh --kind <kind> --scope <scope> [--task <task-id>] <codex exec args...>
+# Usage: dispatch.sh --kind <kind> --scope <scope> [--task <task-id>] [--] <codex exec args...>
 #
 # --kind/--scope/--task are dispatch.sh's own flags and are stripped. Every
-# other argument is forwarded to `codex exec` byte-for-byte. -m <model> and
+# argument after --, and every other argument without --, is forwarded to
+# `codex exec` byte-for-byte. -m <model> and
 # a -c model_reasoning_effort=<effort> found among those remaining args are
 # read (not removed) to build the ledger's exec field "codex/<model>/<effort>".
 set -u
 
 usage() {
-  echo "Usage: dispatch.sh --kind <kind> --scope <scope> [--task <task-id>] <codex exec args...>" >&2
+  echo "Usage: dispatch.sh --kind <kind> --scope <scope> [--task <task-id>] [--] <codex exec args...>" >&2
+  echo "       -- 이후 인자는 wrapper flag와 같은 형태여도 모두 codex exec로 전달됩니다" >&2
 }
 
 kind=""
@@ -37,6 +39,14 @@ while [ "$#" -gt 0 ]; do
     --scope=*) scope=${1#--scope=}; shift ;;
     --task) need_value --task "$#"; task=$2; shift 2 ;;
     --task=*) task=${1#--task=}; shift ;;
+    --)
+      shift
+      while [ "$#" -gt 0 ]; do
+        rest+=("$1")
+        shift
+      done
+      break
+      ;;
     *) rest+=("$1"); shift ;;
   esac
 done
