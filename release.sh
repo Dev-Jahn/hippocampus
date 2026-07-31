@@ -12,7 +12,8 @@ ver=$(jq -r .version .claude-plugin/plugin.json)
 echo "== gate: tests =="
 tests/run.sh
 
-# 플러그인 설치본에 필요한 것만 (개발 전용 제외: tests/ DESIGN.md CLAUDE.md .claude/ ci.yml)
+# 플러그인 설치본에 필요한 것만 (개발 전용 제외: tests/ DESIGN.md CLAUDE.md .claude/ ci.yml).
+# README 로고는 .github/assets/ 에 산다 — 여기 없으므로 배포판에 실리지 않는다.
 SHIP=(
   .claude-plugin
   .codex-plugin
@@ -21,7 +22,6 @@ SHIP=(
   .gitignore
   LICENSE
   README.md
-  assets
   bin
   cli
   clerks
