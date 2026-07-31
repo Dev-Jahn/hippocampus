@@ -42,10 +42,11 @@ everywhere — zero bytes on stdout/stderr, exit 0.
 
 hippo is one plugin for two hosts.
 
-**Claude Code** — install from the marketplace, then in a project:
+**Claude Code** — install from the marketplace:
 
 ```
-hippo init
+/plugin marketplace add Dev-Jahn/jahns-cc-marketplace
+/plugin install hippo@jahns-cc-marketplace
 ```
 
 **Codex CLI** — install from the Codex marketplace, then in a project:
@@ -61,7 +62,13 @@ skipped silently — if the session-start capsule never appears, look there firs
 Codex also does not put a plugin's `bin/` on `PATH`; the skills resolve `bin/hippo`
 relative to themselves, and you can add your own alias if you want to type `hippo`.
 
-Either way `hippo init` creates `.hippo/` and nothing else.
+Either way, in a project:
+
+```
+hippo init
+```
+
+That creates `.hippo/` and nothing else.
 
 ## CLI cheat sheet
 
@@ -76,7 +83,7 @@ hippo log <ev> [typed flags…]        # dispatch|outcome|review|review-status
 hippo log raw '<json>'
 hippo log tail [-n N] [--ev TYPE]
 hippo directive list [--active] [--json]
-hippo directive add [typed flags…]
+hippo directive add [typed flags…]        # --lifetime turn|phase|durable
 hippo directive retract <directive-id>
 hippo prior show
 hippo prior distill [--days N]

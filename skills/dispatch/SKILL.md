@@ -37,7 +37,7 @@ measurement against the Opus 5 guide.
 hippo dispatch --kind kernel-impl --scope "pass2 tensorize" --task feat/x \
   -m gpt-5.6-sol -c model_reasoning_effort=high \
   -C .claude/worktrees/pass2 --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
-  "$(cat .hippo/prompts/COMMON.md .hippo/prompts/pass2.md)"
+  "$(cat .hippo/briefs/COMMON.md .hippo/briefs/pass2.md)"
 ```
 
 Filling the three groups of arguments:
@@ -48,7 +48,10 @@ Filling the three groups of arguments:
   The vocabulary, shared with the scribe: `impl` `fix` `perf` `verify` `audit` `design`
   `research` `spike` `docs` `infra` `chore`. kind is the **category**; the subject goes in
   `--scope`, one line a human can read a month later. `--task` links a registry id.
-- **Routing** — `-m <model>` and `-c model_reasoning_effort=<low|medium|high|xhigh>`. Read
+- **Routing** — `-m <model>` and `-c model_reasoning_effort=<low|medium|high|xhigh>`; together
+  with the executor these form `exec = executor/model/effort`, the second PRIORS axis. The
+  executor is the agent that did the work (`codex` `claude` `fork` `subagent` `workflow`),
+  never how it was launched — a codex run started in the background is still `codex`. Read
   `hippo prior` first; with no evidence yet, start from difficulty: an atomized fragment goes cheap
   (low/medium), a design or a whole-file rewrite goes high/xhigh. Do not burn the top tier on
   everything — fragmentation exists precisely so the tier can drop.
@@ -68,7 +71,7 @@ Mechanics:
   command itself through the harness's `run_in_background` — no nohup/disown or other detach
   outside the harness (that produced orphans).
 - When a codex argument collides with a wrapper flag (`--kind`, `--scope`), put it after `--`.
-- Keep briefs in `.hippo/prompts/` (COMMON.md concatenated with the individual brief). It is a
+- Keep briefs in `.hippo/briefs/` (COMMON.md concatenated with the individual brief). It is a
   project-relative, session-stable path reachable from the cwd this command already requires —
   no absolute scratchpad prefix to retype or mistype. Launch several lanes in parallel from a
   single message.

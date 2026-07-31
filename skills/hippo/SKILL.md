@@ -22,16 +22,16 @@ records, `hippo directive` = the live instructions, `hippo prior` = the routing 
 
 ## When to reach for what
 
-- While delegating: `hippo log dispatch --id <new id> --kind <tag> --exec <vehicle/model/effort> --scope "<one line>"`
+- While delegating: `hippo log dispatch --id <new id> --kind <tag> --exec <executor/model/effort> --scope "<one line>"`
   (a codex exec launched as `hippo dispatch --kind … --scope … -- <codex args>` records itself)
 - When a delegation gets a verdict: `hippo log outcome --ref <id> --result accepted|revised|refuted|no-go|lost --attr work|brief|harness`
-- When the user gives a standing instruction: `hippo directive add --text "…" --scope turn|phase|durable`,
+- When the user gives a standing instruction: `hippo directive add --text "…" --lifetime turn|phase|durable`,
   and when it is over, `hippo directive retract <id>`
 - When an external review reply arrives: `hippo log review --id <new id> --base <sha> --source <where> --findings <n>`
 - Before deciding delegation routing: `hippo prior` — which model and effort measured better
 - To see where things stand: `hippo status`
 
-Delegation briefs live in `.hippo/prompts/` — a project-relative path that survives sessions,
+Delegation briefs live in `.hippo/briefs/` — a project-relative path that survives sessions,
 so nothing has to retype an absolute scratchpad prefix. `/hippo:dispatch` has the full contract.
 
 ## What you don't have to do
