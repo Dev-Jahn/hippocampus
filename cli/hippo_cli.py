@@ -199,13 +199,6 @@ def read_ledger(hp):
     return out
 
 
-def directive_lifetime(d):
-    """`lifetime` names how long a directive lives. It used to be called `scope`, which already
-    meant "what a delegation covers" on a dispatch — one key, two unrelated meanings. Ledgers
-    written before the rename still say scope, and they stay readable."""
-    return d.get("lifetime") or d.get("scope")
-
-
 def directives(hp):
     """id → current state (the last event for an id is the truth — no derived file)."""
     cur = {}
@@ -366,12 +359,12 @@ def status_lines(hp):
     # that is invisible at session start is effectively not there (principle 9, read backwards).
     # The cap is a character budget rather than a line count — there is no reason a long and a
     # short directive should cost the same.
-    ordered = [d for d in live if directive_lifetime(d) == "durable"] + [
-        d for d in live if directive_lifetime(d) != "durable"
+    ordered = [d for d in live if d.get("lifetime") == "durable"] + [
+        d for d in live if d.get("lifetime") != "durable"
     ]
     used, shown = 0, 0
     for d in ordered:
-        lt = directive_lifetime(d)
+        lt = d.get("lifetime")
         line = f"· live({lt or '?'}): {one_line(d.get('text', ''), 200 if lt == 'durable' else 80)}"
         if shown and used + len(line) > DIRECTIVE_BUDGET:
             break
@@ -567,13 +560,8 @@ def cmd_log(args):
         e.update(id=did, state=args.state)
         if args.text:
             e["text"] = args.text
-        # --scope stays accepted for one release: it is what this flag was called when the key
-        # collided with dispatch.scope, and consuming projects have it in their muscle memory.
-        lifetime = args.lifetime or args.scope
-        if args.scope and not args.lifetime:
-            print("hippo: --scope is now --lifetime on a directive (accepted for now)", file=sys.stderr)
-        if lifetime:
-            e["lifetime"] = lifetime
+        if args.lifetime:
+            e["lifetime"] = args.lifetime
     log_and_print(args.hp, e)
 
 
@@ -1017,7 +1005,6 @@ def build_parser():
         choices=sorted(ENUMS[("directive", "lifetime")]),
         help="how long the directive lives",
     )
-    a.add_argument("--scope", choices=sorted(ENUMS[("directive", "lifetime")]), help=argparse.SUPPRESS)
     a.add_argument(
         "--state", default="active", choices=sorted(ENUMS[("directive", "state")])
     )
