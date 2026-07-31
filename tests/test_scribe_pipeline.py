@@ -7,7 +7,7 @@ DESIGN.md §3.5 (steps 4-7):
     a line, ev:clerk ok:true self-metering line appended.
     Failure (malformed output, or schema-invalid events) -> raw output dumped
     under failures/, ledger gets *only* an ev:clerk ok:false line — no
-    fabricated events ("지어내서 메꾸지 않는다").
+    fabricated events (never fill a gap by inventing one).
 
 The exit code of `hippo scribe` itself on a *clerk validation* failure is
 not specified by DESIGN.md (it is designed to run detached from the Stop
@@ -50,7 +50,7 @@ def test_scribe_valid_mock_output_updates_ledger_and_worklog(
     ), clerk_events
 
     worklog_text = worklog_path(tmp_project).read_text(encoding="utf-8")
-    assert "테스트 더미 작업 완료" in worklog_text
+    assert "test dummy work finished" in worklog_text
 
 
 def test_scribe_malformed_json_output_dumped_and_ledger_gets_only_clerk_failure(

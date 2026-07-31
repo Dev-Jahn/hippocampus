@@ -120,22 +120,22 @@ def cursors_path(project_dir) -> Path:
 
 # --------------------------------------------------------------------------
 # Fake transcript (Claude Code session JSONL) — assistant tool_use lines +
-# user lines, per assignment item (5): "가짜 transcript jsonl(assistant
-# tool_use + user 라인 몇 개)".
+# user lines, per assignment item (5): a fake transcript jsonl with a few assistant
+# tool_use lines and a few user lines.
 # --------------------------------------------------------------------------
 
 def _write_transcript(directory) -> Path:
     lines = [
         {
             "type": "user",
-            "message": {"role": "user", "content": "GPU 0,1만 사용해서 진행해줘"},
+            "message": {"role": "user", "content": "Use GPUs 0 and 1 only"},
         },
         {
             "type": "assistant",
             "message": {
                 "role": "assistant",
                 "content": [
-                    {"type": "text", "text": "알겠습니다, dispatch를 시작합니다."},
+                    {"type": "text", "text": "Understood, starting the dispatch."},
                     {
                         "type": "tool_use",
                         "id": "tu_1",
@@ -164,7 +164,7 @@ def _write_transcript(directory) -> Path:
             "type": "assistant",
             "message": {
                 "role": "assistant",
-                "content": [{"type": "text", "text": "완료됐습니다."}],
+                "content": [{"type": "text", "text": "Done."}],
             },
         },
     ]
@@ -194,7 +194,7 @@ def fake_transcript_path(tmp_path) -> Path:
 @pytest.fixture
 def valid_mock_output(tmp_path) -> Path:
     payload = {
-        "worklog": "테스트 더미 작업 완료",
+        "worklog": "test dummy work finished",
         "events": [
             {
                 "ev": "dispatch",
@@ -222,7 +222,7 @@ def malformed_mock_output(tmp_path) -> Path:
 def schema_invalid_mock_output(tmp_path) -> Path:
     """Valid JSON, but the event fails ledger schema validation (unknown ev)."""
     payload = {
-        "worklog": "스키마 위반 테스트",
+        "worklog": "schema violation test",
         "events": [{"ev": "not-a-real-event", "id": "z1"}],
     }
     path = tmp_path / "mock_output_schema_invalid.json"

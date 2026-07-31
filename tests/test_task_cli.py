@@ -110,5 +110,5 @@ def test_task_drop_visible_only_via_explicit_status_or_all(tmp_project, run_hipp
 def test_task_show_missing_id_fails_with_stderr_usage(tmp_project, run_hippo):
     proc = run_hippo(["task", "show", "feat/does-not-exist"], cwd=tmp_project)
     assert proc.returncode != 0
-    # DESIGN.md §3.3: "오류 시 usage를 stderr에 동봉"
+    # DESIGN.md §3.3: attach the usage to stderr on error
     assert proc.stderr.strip() != ""

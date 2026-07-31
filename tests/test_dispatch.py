@@ -96,17 +96,17 @@ def test_uninitialized_project_warns_when_dispatch_is_not_recorded(tmp_path):
         timeout=30,
     )
     assert proc.returncode == 0
-    assert proc.stderr == "dispatch: .hippo/ 없음 — dispatch 기록을 생략합니다\n"
+    assert proc.stderr == "dispatch: no .hippo/ — skipping the dispatch record\n"
     assert proc.stdout.startswith("dispatch:d")
 
 
 # --------------------------------------------------------------------------
-# `hippo dispatch` — CLI 하위 명령이 정본 (scripts/dispatch.sh는 호환 shim)
+# `hippo dispatch` — the CLI subcommand is the real surface (scripts/dispatch.sh is a shim)
 # --------------------------------------------------------------------------
 
 def test_cli_dispatch_records_and_launches(tmp_project, tmp_path, run_hippo):
     proc = run_hippo(
-        ["dispatch", "--kind", "impl", "--scope", "cli 진입점", "--task", "feat/x",
+        ["dispatch", "--kind", "impl", "--scope", "cli entry point", "--task", "feat/x",
          "-m", "gpt-5.6-sol", "-c", 'model_reasoning_effort="high"'],
         cwd=tmp_project,
         env={"PATH": _stub_codex(tmp_path, '#!/bin/sh\nprintf "%s\\n" "$@"\n')},
@@ -114,25 +114,25 @@ def test_cli_dispatch_records_and_launches(tmp_project, tmp_path, run_hippo):
     assert proc.returncode == 0, proc.stderr
     lines = proc.stdout.splitlines()
     assert re.fullmatch(r"d[0-9a-f]{32}", lines[0].removeprefix("dispatch:"))
-    assert lines[1] == "exec"  # codex는 그대로 발사됐다
+    assert lines[1] == "exec"  # codex was launched untouched
     event = json.loads((tmp_project / ".hippo" / "ledger.jsonl").read_text())
     assert event["exec"] == "codex/gpt-5.6-sol/high"
     assert event["task"] == "feat/x" and event["src"] == "wrapper"
 
 
 def test_cli_dispatch_launches_even_without_a_project(tmp_path, run_hippo):
-    """CLI는 .hippo/ 밖에서 무음 no-op이지만 dispatch는 예외다: 기록을 못 한다고
-    발사를 삼키면 래퍼가 아니라 함정이 된다."""
+    """The CLI is a silent no-op outside a .hippo project, but dispatch is the exception:
+    swallowing the launch because the record failed would make it a trap, not a wrapper."""
     project = tmp_path / "bare"
     project.mkdir()
     (project / ".git").touch()
     proc = run_hippo(
-        ["dispatch", "--kind", "impl", "--scope", "기록 없는 발사"],
+        ["dispatch", "--kind", "impl", "--scope", "launch without a record"],
         cwd=project,
         env={"PATH": _stub_codex(tmp_path, '#!/bin/sh\necho launched\n')},
     )
     assert proc.returncode == 0, proc.stderr
-    assert "dispatch: .hippo/ 없음" in proc.stderr
+    assert "dispatch: no .hippo/" in proc.stderr
     assert proc.stdout.splitlines()[1] == "launched"
 
 

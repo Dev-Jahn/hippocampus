@@ -71,10 +71,10 @@ def fmt_tool_use(name, inp):
 
 
 def detect_format(path):
-    """codex rollout인지 Claude transcript인지 첫 줄들로 판별한다.
+    """Tell a codex rollout from a Claude transcript by looking at the first lines.
 
-    두 포맷 다 JSONL이지만 레코드 모양이 다르다: codex는 `payload`를 가진
-    session_meta/response_item/event_msg, Claude는 `message`를 가진 user/assistant."""
+    Both are JSONL, but the record shapes differ: codex has session_meta/response_item/event_msg
+    records carrying a `payload`, Claude has user/assistant records carrying a `message`."""
     with open(path, encoding="utf-8", errors="replace") as f:
         for _, raw in zip(range(20), f):
             try:
@@ -91,7 +91,7 @@ def detect_format(path):
 
 
 def _codex_text(v):
-    """codex의 content는 문자열이거나 {type: input_text|output_text, text} 목록이다."""
+    """codex content is either a string or a list of {type: input_text|output_text, text}."""
     if isinstance(v, str):
         return v
     if isinstance(v, list):
@@ -102,10 +102,10 @@ def _codex_text(v):
 
 
 def digest_codex(path, since_line, until_line=0):
-    """codex rollout JSONL → Claude 다이제스트와 동일한 줄 어휘.
+    """codex rollout JSONL → the same line vocabulary as the Claude digest.
 
-    clerk 프롬프트가 호스트를 몰라도 되도록 출력 형식을 공유한다. reasoning은
-    Claude의 thinking과 같은 이유로 제외한다."""
+    Sharing the output format is what lets the clerk prompt stay unaware of the host. reasoning
+    is excluded for the same reason as Claude's thinking."""
     out = []
     has_content = False
 
@@ -143,7 +143,7 @@ def digest_codex(path, since_line, until_line=0):
                 has_content = True
             elif kind in ("custom_tool_call_output", "function_call_output"):
                 body = _codex_text(pl.get("output"))
-                # codex는 실패를 별도 타입으로 두지 않는다 — 명시적 성공 필드만 신뢰한다.
+                # codex has no separate failure type — trust only an explicit success field.
                 err = pl.get("success") is False
                 out.append(
                     f"{p} {'RES-ERR' if err else 'RES'}: {one_line(trunc(body, 1200 if err else 350))}"
@@ -158,7 +158,8 @@ def digest_codex(path, since_line, until_line=0):
                 has_content = True
             elif kind in ("compaction", "context_compaction", "compaction_trigger"):
                 out.append(f"{p} COMPACTION: {one_line(trunc(_codex_text(pl.get('content')), 800))}")
-            # reasoning·token_count·task_started 등은 여섯 줄 형식이 아니다: 버린다.
+            # reasoning, token_count, task_started and friends are not one of the six line
+            # formats: dropped.
 
     return out, has_content
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# 호환 shim. 정본은 `hippo dispatch` (DESIGN §3.6) — dispatch가 CLI 하위 명령이 되기
-# 전에 만들어진 소비 프로젝트의 진입점(예: tools/dispatch)이 계속 동작하도록 남긴다.
+# Compatibility shim. The real surface is `hippo dispatch` (DESIGN §3.6); this stays so that
+# entry points written before dispatch became a CLI subcommand (e.g. a project's tools/dispatch)
+# keep working.
 set -u
 
-# bin/hippo 를 이 스크립트의 실제 위치 기준으로 해소한다 (심링크 경유 호출 대비).
+# Resolve bin/hippo from this script's real location (it may be reached through a symlink).
 src="${BASH_SOURCE[0]}"
 while [ -L "$src" ]; do
   dir=$(cd -P "$(dirname "$src")" && pwd)

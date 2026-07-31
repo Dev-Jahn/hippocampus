@@ -46,7 +46,7 @@ def _seed_dispatch(tmp_project, run_hippo, did="d001"):
 
 def _seed_directive(tmp_project, run_hippo, did="gpu-01"):
     proc = run_hippo(
-        ["directive", "add", "--id", did, "--text", "GPU 0,1만 사용", "--scope", "phase"],
+        ["directive", "add", "--id", did, "--text", "Use GPUs 0 and 1 only", "--scope", "phase"],
         cwd=tmp_project,
     )
     assert proc.returncode == 0, proc.stderr
@@ -88,7 +88,7 @@ def test_bare_directive_equals_directive_list(tmp_project, run_hippo):
 
 def test_bare_prior_equals_prior_show(tmp_project, run_hippo):
     (tmp_project / ".hippo" / "PRIORS.md").write_text(
-        "# PRIORS\n\n- kernel-impl: sol/high가 실측 우세\n", encoding="utf-8"
+        "# PRIORS\n\n- kernel-impl: sol/high measured ahead\n", encoding="utf-8"
     )
     bare = run_hippo(["prior"], cwd=tmp_project)
     full = run_hippo(["prior", "show"], cwd=tmp_project)
@@ -115,7 +115,7 @@ def test_bare_noun_with_flag_gets_default_sub(tmp_project, run_hippo):
 
 def test_directive_add_autoid_roundtrip(tmp_project, run_hippo):
     add = run_hippo(
-        ["directive", "add", "--text", "GPU 0,1만 사용", "--scope", "phase"],
+        ["directive", "add", "--text", "Use GPUs 0 and 1 only", "--scope", "phase"],
         cwd=tmp_project,
     )
     assert add.returncode == 0, add.stderr
@@ -140,7 +140,7 @@ def test_directive_add_autoid_roundtrip(tmp_project, run_hippo):
 def test_directive_add_autoid_is_deterministic_for_same_text(
     tmp_project, run_hippo
 ):
-    text = "리뷰 회신은 컨텍스트 유지"
+    text = "keep review replies in context"
     first = run_hippo(
         ["directive", "add", "--text", text, "--scope", "durable"], cwd=tmp_project
     )
@@ -244,7 +244,7 @@ def test_noun_help_lists_subcommands_even_outside_project(
 def test_top_level_help_states_the_mental_model(uninitialized_dir, run_hippo):
     proc = run_hippo(["--help"], cwd=uninitialized_dir)
     assert proc.returncode == 0
-    assert "파생 뷰" in proc.stdout
+    assert "derived view" in proc.stdout
 
 
 # --------------------------------------------------------------------------
@@ -254,7 +254,7 @@ def test_top_level_help_states_the_mental_model(uninitialized_dir, run_hippo):
 def test_prior_distill_regenerates_priors_md(tmp_project, run_hippo, tmp_path):
     _seed_dispatch(tmp_project, run_hippo)
     mock = tmp_path / "distill_mock.md"
-    mock.write_text("# PRIORS\n\n- mock 증류 결과\n", encoding="utf-8")
+    mock.write_text("# PRIORS\n\n- mock distillation result\n", encoding="utf-8")
 
     proc = run_hippo(
         ["prior", "distill", "--days", "7"],
@@ -265,18 +265,18 @@ def test_prior_distill_regenerates_priors_md(tmp_project, run_hippo, tmp_path):
 
     priors = tmp_project / ".hippo" / "PRIORS.md"
     assert priors.exists()
-    assert "mock 증류 결과" in priors.read_text(encoding="utf-8")
+    assert "mock distillation result" in priors.read_text(encoding="utf-8")
 
     clerk = [e for e in read_ledger(tmp_project) if e.get("ev") == "clerk"]
     assert clerk and clerk[-1]["name"] == "distiller" and clerk[-1]["ok"] is True
 
     show = run_hippo(["prior", "show"], cwd=tmp_project)
     assert show.returncode == 0
-    assert "mock 증류 결과" in show.stdout
+    assert "mock distillation result" in show.stdout
 
 
 # --------------------------------------------------------------------------
-# 주입 표면: durable 지시는 접히지 않는다 (§6)
+# Injected surface: durable directives are never folded away (§6)
 # --------------------------------------------------------------------------
 
 def _add_directive(run_hippo, cwd, did, text, scope):
@@ -287,13 +287,13 @@ def _add_directive(run_hippo, cwd, did, text, scope):
 
 
 def test_inject_never_folds_durable_directives(tmp_project, run_hippo):
-    """durable은 수명이 없는 사용자 ruling이다 — 세션 시작에 안 보이면 없는 것과 같다.
-    phase/turn 지시가 아무리 많아도 durable을 밀어내지 못한다."""
+    """A durable directive is a user ruling with no lifetime — invisible at session start is the
+    same as absent. No number of phase/turn directives may push one out."""
     for i in range(6):
-        _add_directive(run_hippo, tmp_project, f"dur-{i}", f"영구 지시 {i}", "durable")
+        _add_directive(run_hippo, tmp_project, f"dur-{i}", f"durable directive {i}", "durable")
     for i in range(20):
         _add_directive(
-            run_hippo, tmp_project, f"ph-{i}", f"국면 지시 {i} " + "잡음" * 40, "phase"
+            run_hippo, tmp_project, f"ph-{i}", f"phase directive {i} " + "noise " * 40, "phase"
         )
 
     out = run_hippo(["status", "--inject"], cwd=tmp_project)
@@ -301,18 +301,19 @@ def test_inject_never_folds_durable_directives(tmp_project, run_hippo):
     live = [ln for ln in out.stdout.splitlines() if ln.startswith("· live(")]
     assert sum(1 for ln in live if ln.startswith("· live(durable)")) == 6
     for i in range(6):
-        assert f"영구 지시 {i}" in out.stdout
-    # 접힌 것이 있으면 전문을 볼 명령을 알려준다 ("+N more"만으로는 행동이 안 나온다).
+        assert f"durable directive {i}" in out.stdout
+    # When something is folded, name the command that shows the full text ("+N more" alone
+    # tells the reader nothing to do).
     folded = [ln for ln in out.stdout.splitlines() if "more" in ln]
     assert folded and "hippo directive" in folded[0]
 
 
 def test_inject_keeps_durable_text_readable(tmp_project, run_hippo):
-    """durable 한 줄은 80자에서 잘리면 작동 조항이 사라진다 — 200자까지 살린다."""
-    text = "가" * 150 + " 꼬리조항"
+    """Cutting a durable line at 80 chars would drop its operative clause — keep up to 200."""
+    text = "x" * 150 + " tail clause"
     _add_directive(run_hippo, tmp_project, "long-dur", text, "durable")
     out = run_hippo(["status", "--inject"], cwd=tmp_project)
     body = [ln for ln in out.stdout.splitlines() if ln.startswith("· live(durable)")][0]
     body = body.split(": ", 1)[1]
     assert len(body) > 80 and len(body) <= 200
-    assert "꼬리조항" in body
+    assert "tail clause" in body

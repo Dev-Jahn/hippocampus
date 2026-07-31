@@ -1,284 +1,313 @@
-# hippocampus 1.0 — 설계 문서 (founding)
+# hippocampus 1.0 — design document (founding)
 
-> 2026-07-31. 한 달간의 research-cc dogfooding 전수 감사(37세션·위임 806건·479MB)와
-> Opus 5 prompting guide, `/doctor` skill 분석에서 도출된 재정립.
-> 이전 세대(0.x round/review/delegate/brief 기계)는 `legacy` 브랜치로 은퇴했다.
+> 2026-07-31. A reset derived from a full audit of a month of research-cc dogfooding
+> (37 sessions, 806 delegations, 479MB), the Opus 5 prompting guide, and an analysis of the
+> `/doctor` skill. The previous generation (the 0.x round/review/delegate/brief machinery)
+> retired to the `legacy` branch.
 
-## 0. 한 문장
+## 0. One sentence
 
-**hippocampus는 agent를 통제하는 프로세스가 아니라, agent에게 지각(관측)과 기억(정리)을
-제공하는 배경 기관(organ)이다. 판단과 창발은 모델의 몫이고, 이 기관의 일은 그 판단이
-좋은 증거 위에서 일어나게 조용히 받쳐주는 것이다.**
+**hippocampus is not a process that controls an agent; it is a background organ that gives the
+agent perception (observation) and memory (organization). Judgment and invention belong to the
+model, and this organ's job is to quietly make sure that judgment happens on top of good evidence.**
 
-> 표기: 프로젝트 이름은 **hippocampus**. 플러그인 등록명·슬래시 접두·CLI·상태 디렉터리는
-> 전부 짧은 `hippo`다 (`/hippo:checkup`, `hippo status`, `.hippo/`, `HIPPO_*`).
+> Naming: the project is **hippocampus**. The plugin registration name, the slash prefix, the CLI
+> and the state directory are all the short `hippo` (`/hippo:checkup`, `hippo status`, `.hippo/`,
+> `HIPPO_*`).
 
-## 1. 원칙 (전부 dogfooding 실측에서 도출)
+## 1. Principles (every one derived from measured dogfooding)
 
-1. **간결성** — 규율의 진짜 비용은 규율을 지키는 비용이 아니라 규율에 대해 *생각하는*
-   비용이다. agent의 attention이 도구로 새면 프로젝트가 느려진다.
-   (실측: 이전 세대 CLI 1,081회 호출 중 7.9% 오류 응답·문법 재시도 루프,
-   boundary 훅 259회 실행 전량 무출력, 8–14KB 계약문 재주입.)
-2. **투명성** — 내부가 아무리 복잡해도 표면에 새어나오지 않는다. 표면 노출의 유일한
-   기준: *"이 정보를 알면 agent의 다음 행동이 달라지는가?"* 아니면 침묵.
-3. **기록하되 강제하지 않는다** — git이 무결성을 보증하는 세계에서 provenance는 ledger의
-   사실 한 줄이지 게이트가 아니다. 검사가 필요하면 게이트가 아니라 서비스 내부에 산다.
-4. **derivability test** — 나중에 재유도 가능한 것은 저장하지 않는다(원시 텔레메트리는
-   transcript에 이미 있다). 저장하는 것은 그 순간에만 존재하고 증발하는 *판단*뿐이다.
-5. **해석은 저장하지 않고 생성한다** — 손으로 유지되는 해석 문서는 낡는다(PROGRESS.md
-   실증). ledger는 사실만 쌓고, PRIORS 같은 해석 표면은 매번 재생성한다.
-6. **판단은 main에, 증거는 hippo에** — 모델은 증거가 눈앞에 있으면 알아서 적응하지만
-   증거 수집을 기억하지는 못한다. 라우팅·수용·정책 진화는 main이, 그 근거가 되는
-   측정·축적·증류는 hippo이 맡는다.
-7. **좋은 제약은 가역성 제약뿐** — 행동을 금지하는 제약 대신, 어떤 행동도 되돌릴 수
-   있게 만드는 데 투자한다(worktree 격리가 최고 성과 패턴이었다).
-8. **복잡성은 코드가 아니라 텍스트에 산다** — 판단이 필요한 로직은 clerk/skill 프롬프트로.
-   런타임 코드가 줄면 corner case도 준다. (`/doctor` = 43KB 프롬프트 하나가 존재 증명.)
-9. **순종적인 모델일수록 낡은 지시가 위험하다** — 신형 모델은 stale 지시를 무시하지 않고
-   충실히 실행한다(GPU 조항 모순 fail-closed 사고 실증). 따라서 지시에는 수명(scope)이
-   1급 개념으로 붙고, 지시 위생이 검증 기계보다 우선한다.
+1. **Brevity** — the real cost of a discipline is not obeying it but *thinking about* it. When an
+   agent's attention leaks into the tooling, the project slows down.
+   (Measured: of 1,081 calls to the previous generation's CLI, 7.9% were error responses and
+   syntax-retry loops; 259 runs of the boundary hook produced no output at all; 8–14KB contract
+   documents were re-injected.)
+2. **Transparency** — however complex the inside is, it must not leak onto the surface. The only
+   test for exposing something: *"does knowing this change the agent's next action?"* If not, silence.
+3. **Record, never enforce** — in a world where git guarantees integrity, provenance is one factual
+   line in the ledger, not a gate. When a check is genuinely needed, it lives *inside* the service
+   rather than as a gate.
+4. **The derivability test** — never store what can be re-derived later (the raw telemetry is
+   already in the transcript). What we store is only the *judgment*, which exists in that moment
+   and then evaporates.
+5. **Interpretation is generated, not stored** — a hand-maintained interpretation document goes
+   stale (PROGRESS.md proved it). The ledger accumulates facts only; interpretive surfaces such as
+   PRIORS are regenerated every time.
+6. **Judgment in main, evidence in hippo** — a model adapts on its own when the evidence is in
+   front of it, but it cannot remember to collect that evidence. Routing, acceptance and policy
+   evolution belong to main; the measurement, accumulation and distillation behind them belong to hippo.
+7. **The only good constraint is a reversibility constraint** — instead of constraints that forbid
+   actions, invest in making every action undoable (worktree isolation was the single
+   best-performing pattern).
+8. **Complexity lives in text, not in code** — logic that needs judgment goes into a clerk or skill
+   prompt. Less runtime code means fewer corner cases. (`/doctor` — a single 43KB prompt — is the
+   existence proof.)
+9. **The more obedient the model, the more dangerous a stale instruction is** — a current model does
+   not ignore a stale directive, it executes it faithfully (demonstrated by the fail-closed incident
+   from contradictory GPU clauses). So a directive carries a lifetime (scope) as a first-class
+   concept, and directive hygiene comes before verification machinery.
 
-## 2. 실행 표면 4층
+## 2. The four execution layers
 
-| 층 | 무엇 | 비용 |
+| Layer | What | Cost |
 |---|---|---|
-| deterministic script | 훅·CLI. 빠르고 멍청한 것 | 0 |
-| **clerk** | 훅/cron이 저가 모델(luna·sonnet급)을 headless 호출. 판단이 필요하지만 main의 맥락은 불필요한 일 | 토큰만, main 컨텍스트 0 |
-| skill | main의 맥락이 필요하거나 main이 결과에 따라 행동해야 하는 일 | main 컨텍스트 |
-| main | 라우팅·수용·사용자 대화 | — |
+| deterministic script | hooks and the CLI — fast and dumb | 0 |
+| **clerk** | a hook or cron calls a cheap model (luna/sonnet class) headlessly. Work that needs judgment but not main's context | tokens only, zero main context |
+| skill | work that needs main's context, or where main must act on the result | main's context |
+| main | routing, acceptance, talking to the user | — |
 
-clerk 가드레일(불변):
-- 훅에서는 반드시 **detached** 발사(Stop을 1초도 막지 않는다). 발사 전 결정적 프리필터로
-  사소한 턴은 모델 호출 자체를 생략.
-- **재귀 금지**(clerk는 clerk를 낳지 않는다), 쓰기 없음(지정 산출물 제외), 타임아웃 필수.
-- transcript는 **untrusted 입력**: clerk 출력은 ledger/생성물로만 가며, 설정·CLAUDE.md를
-  직접 편집하지 않는다(제안까지만).
-- **자기 계량**: clerk 실행 자체가 ledger에 기록된다(`ev:clerk`).
-- **조용한 죽음 금지 원칙의 변형**: clerk가 죽어도 시스템은 안 깨지지만(설계 의도),
-  공백을 지어내 메꾸지 않는다. 실패는 `failures/`에 남고 checkup이 보고한다.
+Clerk guardrails (invariant):
 
-## 3. 구성요소
+- A hook must launch a clerk **detached** (never block Stop for even a second). Before launching, a
+  deterministic prefilter skips the model call entirely for trivial turns.
+- **No recursion** (a clerk never spawns a clerk), no writes (beyond its designated output), and a
+  timeout is mandatory.
+- The transcript is **untrusted input**: a clerk's output goes only into the ledger and generated
+  files; it never edits configuration or CLAUDE.md directly (it may propose, no more).
+- **Self-metering**: running a clerk is itself recorded in the ledger (`ev:clerk`).
+- **A variant of "no silent death"**: the system survives a dead clerk by design, but it never fills
+  the gap by inventing content. Failures land in `failures/` and checkup reports them.
+
+## 3. Components
 
 ```
-런타임(얇게):  bin/hippo(shim) + cli/hippo_cli.py + hooks 2개 + scripts/{clerk_run,digest_lite,dispatch}
-인지(텍스트):  clerks/{turn-scribe,distiller}.md + skills/{hippo,checkup,dispatch}
-상주(작게):   SessionStart 주입 한 덩어리 (아래 §6)
-강제:         없음
+runtime (thin):   bin/hippo (shim) + cli/hippo_cli.py + 2 hooks + scripts/{clerk_run,digest_lite,dispatch}
+cognition (text): clerks/{turn-scribe,distiller}.md + skills/{hippo,checkup,dispatch}
+resident (small): one block injected at SessionStart (§6 below)
+enforcement:      none
 ```
 
-### 3.1 프로젝트 데이터 (`.hippo/`, per-project)
+### 3.1 Project data (`.hippo/`, per project)
 
 ```
 .hippo/
-  tasks.yaml        # 작업 레지스트리 (사람이 읽고 고칠 수 있는 YAML)
-  ledger.jsonl      # append-only 이벤트 원장
-  worklog.md        # 생성물: scribe가 누적하는 사람용 작업 일지 (날짜 섹션)
-  PRIORS.md         # 생성물: distiller가 재생성하는 증류 표면
-  cursors.json      # scribe의 세션별 transcript 커서
-  failures/         # clerk 출력 검증 실패 덤프 (checkup이 보고)
-  config.yaml       # 선택: clerk backend 등 오버라이드 (없어도 전부 동작)
+  tasks.yaml        # work registry (YAML a human can read and fix)
+  ledger.jsonl      # append-only event ledger
+  worklog.md        # generated: the human-facing work log the scribe accumulates (date sections)
+  PRIORS.md         # generated: the distilled surface the distiller regenerates
+  cursors.json      # the scribe's per-session transcript cursors
+  failures/         # dumps of clerk output that failed validation (checkup reports them)
+  config.yaml       # optional: overrides such as the clerk backend (everything works without it)
 ```
 
-`.hippo/`가 없는 디렉터리에서 모든 훅·CLI는 **완전 무음 no-op**이다(다른 프로젝트 오염 0).
+In a directory with no `.hippo/`, every hook and every CLI command is a **completely silent no-op**
+(zero contamination of other projects).
 
-### 3.2 Ledger 스키마 (계약 — 정확히 이대로)
+### 3.2 Ledger schema (a contract — exactly this)
 
-한 줄 = JSON 객체. 공통 필드: `t`(ISO8601, 기록기가 스탬프), `ev`, 선택 `src`(`scribe|cli|wrapper`).
+One line = one JSON object. Common fields: `t` (ISO8601, stamped by the writer), `ev`, and the
+optional `src` (`scribe|cli|wrapper`).
 
 ```jsonl
 {"t":"…","ev":"dispatch","id":"d041","kind":"kernel-impl","exec":"codex/gpt-5.6-sol/high","scope":"pass2 SS-UMMA tensorize","task":"feat/x"}
-{"t":"…","ev":"outcome","ref":"d041","result":"refuted","attr":"work","rework":2,"by":"verify/opus","note":"oracle 순환참조"}
+{"t":"…","ev":"outcome","ref":"d041","result":"refuted","attr":"work","rework":2,"by":"verify/opus","note":"circular oracle reference"}
 {"t":"…","ev":"review","id":"r007","base":"abc123f","source":"chatgpt-web","findings":4}
 {"t":"…","ev":"review-status","ref":"r007","addressed":"partial","at":"def4567"}
-{"t":"…","ev":"directive","id":"gpu-01","text":"GPU 0,1만 사용","scope":"phase","state":"active"}
+{"t":"…","ev":"directive","id":"gpu-01","text":"use GPUs 0 and 1 only","scope":"phase","state":"active"}
 {"t":"…","ev":"directive","id":"gpu-01","state":"retracted"}
 {"t":"…","ev":"clerk","name":"turn-scribe","ms":8100,"ok":true,"tokens":1400}
 ```
 
-- `outcome.result ∈ {accepted, revised, refuted, no-go, lost}`;
-  `attr ∈ {work, brief, harness}` (accepted가 아닐 때 권장 — 귀속 없는 실패 집계는
-  거짓 prior를 만든다. 실측: REFUTED 다발은 work, GPU 조항 모순 NO-GO는 brief,
-  StructuredOutput 증발은 harness였다).
-- `directive.scope ∈ {turn, phase, durable}`, `state ∈ {active, retracted, expired}`.
-  같은 `id`의 마지막 이벤트가 현재 상태다(파생 뷰는 저장하지 않는다 — 원칙 4·5).
-- `review.base`는 리뷰 대상 커밋(`^[0-9a-f]{7,40}$`) — **이것이 SHA pinning의 전부다**
-  (원칙 3). sha를 모르면 review 이벤트를 기록하지 않는다.
-- 검증: `hippo log`는 ev별 필수 필드를 fail-closed로 검사한다. 미지의 `ev`는 거부.
-- 소요 시간은 필드가 아니다: dispatch/outcome 타임스탬프 차로 유도(원칙 4).
-- 규모 근거: research-cc 한 달 = 위임 806건 → 약 1,600행 ≈ 300KB. grep으로 충분.
+- `outcome.result ∈ {accepted, revised, refuted, no-go, lost}`; `attr ∈ {work, brief, harness}`
+  (recommended whenever the result is not accepted — a failure count with no attribution produces a
+  lying prior. Measured: the run of REFUTEDs was work, the NO-GO from contradictory GPU clauses was
+  brief, and the vanished StructuredOutput was harness).
+- `directive.scope ∈ {turn, phase, durable}`, `state ∈ {active, retracted, expired}`. The last event
+  for an `id` is its current state (a derived view is never stored — principles 4 and 5).
+- `review.base` is the reviewed commit (`^[0-9a-f]{7,40}$`) — **this is the whole of SHA pinning**
+  (principle 3). Without a known sha, do not record the review event at all.
+- Validation: `hippo log` checks the required fields per ev, fail-closed. An unknown `ev` is rejected.
+- Elapsed time is not a field: derive it from the dispatch/outcome timestamps (principle 4).
+- Scale: a month of research-cc = 806 delegations → roughly 1,600 lines ≈ 300KB. grep is plenty.
 
 ### 3.3 CLI (`bin/hippo` → `cli/hippo_cli.py`)
 
-- 구현: Python 단일 파일(PEP 723 인라인 메타데이터, deps: PyYAML), `bin/hippo`은
-  `uv run --script` shim(+ uv 부재 시 python3 폴백, 실패는 명확한 오류로).
-- **모든 서브커맨드에 `-h/--help`, 오류 시 usage를 stderr에 동봉** (0.x 최다 마찰 직접 수리).
-- 표면:
+- Implementation: a single Python file (PEP 723 inline metadata, deps: PyYAML); `bin/hippo` is a
+  `uv run --script` shim (falling back to python3 when uv is absent, with a clear error on failure).
+- **Every subcommand has `-h/--help`, and errors attach the usage to stderr** (a direct fix for the
+  largest source of friction in 0.x).
+- The surface:
 
 ```
-hippo init                                  # .hippo/ 생성만. 그 외 아무것도 안 함
-hippo status [--inject]                     # 한 덩어리 요약; --inject는 훅용(무음 no-op 규칙)
+hippo init                                  # creates .hippo/ and nothing else
+hippo status [--inject]                     # one-block summary; --inject is for the hook (silent no-op rule)
 hippo task add <id> --title T [--status pending] [--notes N] [--deps a,b]
 hippo task set <id> <field> <value>
 hippo task done <id> [--note N]
-hippo task list [--status s1,s2] [--all] [--json]   # 콤마 다중 필터 (0.x 요구 수리)
+hippo task list [--status s1,s2] [--all] [--json]   # comma multi-filter (fixes a 0.x request)
 hippo task show <id> [--json] | task drop <id>
 hippo log <ev> [typed flags…]               # dispatch|outcome|review|review-status
-hippo log raw '<json>'                      # 검증 후 append
-hippo log tail [-n N] [--ev TYPE]           # 최근 기록 조회
+hippo log raw '<json>'                      # validate, then append
+hippo log tail [-n N] [--ev TYPE]           # read recent records
 hippo directive list [--active] [--json]
-hippo directive add [typed flags…]          # --id 생략 시 text에서 auto-id
+hippo directive add [typed flags…]          # auto-id derived from text when --id is omitted
 hippo directive retract <directive-id>
 hippo prior show
-hippo prior distill [--days N]              # distiller clerk 실행 → PRIORS.md 재생성
+hippo prior distill [--days N]              # run the distiller clerk → regenerate PRIORS.md
 hippo dispatch --kind K --scope S [--task T] [--] <codex exec args…>   # §3.6
-hippo scribe --transcript P --session S     # Stop 훅이 detached로 부르는 내부 표면
+hippo scribe --transcript P --session S     # internal surface the Stop hook calls detached
 ```
 
-- **bare-noun 기본**: `task|log|directive|prior`에서 서브커맨드를 생략하면 각각
-  `list|tail|list|show`로 동작한다(`hippo task -h`는 task 자체의 help).
-- 멘탈 모델(최상위 `--help`에도 한 줄로): 기록은 `log <이벤트>` 한 문으로 들어가고,
-  맨몸 `hippo log`는 최근 기록 조회, `directive`·`prior`는 원장에서 매번 재계산되는
-  파생 뷰다.
+- **Bare-noun default**: omitting the subcommand of `task|log|directive|prior` runs `list|tail|list|show`
+  respectively (`hippo task -h` still prints task's own help).
+- The mental model (also stated in one line by the top-level `--help`): facts go in through one
+  door, `log <event>`; bare `hippo log` reads recent records; `directive` and `prior` are derived
+  views recomputed from the ledger every time.
+- Task states: `pending|active|done|dropped`. tasks.yaml may be edited by hand and the CLI always
+  re-parses it. No acrobatics such as comment preservation (a lesson from 0.x).
 
-- task 상태: `pending|active|done|dropped`. tasks.yaml은 사람이 직접 편집해도 되고
-  CLI는 항상 재파싱한다. 주석 보존 같은 곡예는 하지 않는다(0.x 교훈).
-
-### 3.4 훅 (전부 2개 — 그 외 추가 금지)
+### 3.4 Hooks (exactly two — adding a third is forbidden)
 
 `hooks/hooks.json`:
-- **SessionStart** (startup·resume·clear·compact): `hooks/session_start.sh`
-  → `.hippo/` 없으면 무음 exit 0. 있으면 `hippo status --inject` (§6 형식).
-  compact 후 재주입이 곧 **context keeper**다: 살아있는 directive가 compaction을 넘어
-  생존한다(compaction 86회 실측 유실 문제의 해법).
-- **Stop**: `hooks/stop.sh` — stdin JSON에서 `transcript_path`·`session_id`·`cwd` 파싱,
-  `.hippo/` 없으면 무음 exit 0. 있으면
-  `setsid hippo scribe … >/dev/null 2>&1 &` 후 **즉시 exit 0** (<100ms).
 
-### 3.5 Scribe 파이프라인 (`hippo scribe` 내부)
+- **SessionStart** (startup, resume, clear, compact): `hooks/session_start.sh` → silent exit 0 with
+  no `.hippo/`; otherwise `hippo status --inject` (the §6 format). Re-injection after a compact is
+  what makes it a **context keeper**: live directives survive compaction (the fix for the loss
+  measured across 86 compactions).
+- **Stop**: `hooks/stop.sh` — parse `transcript_path`, `session_id` and `cwd` from the stdin JSON;
+  silent exit 0 with no `.hippo/`; otherwise `setsid hippo scribe … >/dev/null 2>&1 &` and then
+  **exit 0 immediately** (<100ms).
 
-1. `.hippo/scribe.lock` flock 논블로킹 — 잡혀 있으면 그냥 종료(커서가 다음 실행 때
-   공백을 자동 커버).
-2. `cursors.json`에서 이 세션 커서 로드 → `digest_lite.py`로 커서 이후 라인만 압축
-   (479MB 감사에서 검증된 다이제스트 로직의 경량판).
-3. **결정적 프리필터**: 다이제스트에 TOOL/USER 라인이 없으면 커서만 갱신하고 종료
-   (모델 호출 0).
-4. backend 해석: `config.yaml > $HIPPO_CLERK_BACKEND > 자동(codex 있으면
-   codex/gpt-5.6-luna/low, 아니면 claude -p sonnet) > mock`(테스트용). 120s 타임아웃.
-5. 프롬프트 = `clerks/turn-scribe.md` + 다이제스트. 기대 출력 = 엄격 JSON:
-   `{"worklog": "…", "events": [ …t 없는 ledger 이벤트… ]}`.
-6. 검증: 이벤트를 `hippo log`와 동일 규칙으로 검사(ev별 허용 키 whitelist — 미지 키
-   거부; `t`/`src`는 호출자가 공급할 수 없고 기록기가 무조건 스탬프한다). 실패 →
-   `failures/`에 원문 덤프 + `ev:clerk ok:false` 기록, ledger는 오염시키지 않으며,
-   **커서는 실패 시에도 전진한다**(덤프가 기록이다 — 같은 입력에 무한 재과금 금지).
-   **지어내서 메꾸지 않는다.**
-7. 성공 → 이벤트 append(`src:scribe`), worklog.md의 오늘 날짜 섹션에 한 줄 append,
-   커서 갱신, `ev:clerk` 자기 계량 append.
+### 3.5 The scribe pipeline (inside `hippo scribe`)
 
-### 3.6 dispatch 래퍼 (`hippo dispatch`)
+1. Non-blocking flock on `.hippo/scribe.lock` — if it is held, just exit (the cursor covers the gap
+   on the next run automatically).
+2. Load this session's cursor from `cursors.json` → compress only the lines after it with
+   `digest_lite.py` (a light port of the digest logic proven on the 479MB audit).
+3. **Deterministic prefilter**: if the digest has no TOOL or USER line, update the cursor and exit
+   (zero model calls).
+4. Resolve the backend: `config.yaml > $HIPPO_CLERK_BACKEND > automatic (codex/gpt-5.6-luna/low when
+   codex exists, otherwise claude -p sonnet) > mock` (for tests). 120s timeout.
+5. Prompt = `clerks/turn-scribe.md` + the digest. Expected output = strict JSON:
+   `{"worklog": "…", "events": [ …ledger events without t… ]}`.
+6. Validation: check the events by the same rules as `hippo log` (per-ev key whitelist — unknown
+   keys rejected; `t` and `src` cannot be supplied by the caller and are always stamped by the
+   writer). On failure → dump the raw output to `failures/` and record `ev:clerk ok:false`; the
+   ledger is never contaminated, and **the cursor advances even on failure** (the dump is the
+   record — never re-bill the same input forever). **Never fill a gap by inventing content.**
+7. On success → append the events (`src:scribe`), append one line to today's date section of
+   worklog.md, update the cursor, and append the `ev:clerk` self-metering event.
 
-codex exec 래퍼: 자기 argv에서 model/effort를 이미 아는 지점이 곧 자동 수집 지점이다
-(원칙 6). `--kind`·`--scope`·`--task` 라벨을 받아 `ev:dispatch`를 자동 기록하고 dispatch id를
-stdout 첫 줄에 찍은 뒤 `codex exec … < /dev/null`을 그대로 실행한다. outcome은 기록하지
-않는다 — 수용 판단은 main(직접 CLI) 또는 scribe(추론)의 몫.
+### 3.6 The dispatch wrapper (`hippo dispatch`)
 
-CLI 하위 명령인 이유: 플러그인은 `bin/`만 PATH에 올리고 `${CLAUDE_PLUGIN_ROOT}`는 평범한
-Bash 호출에서 비어 있다. `scripts/`에 두면 소비 프로젝트마다 캐시 절대경로를 박은 shim이
-하나씩 생긴다(실측). `scripts/dispatch.sh`는 그 shim들을 위한 호환 forwarder로만 남는다.
+A codex exec wrapper: the point that already knows the model and effort from its own argv is
+exactly the point to collect them automatically (principle 6). It takes the `--kind`, `--scope` and
+`--task` labels, records `ev:dispatch`, prints the dispatch id on stdout's first line, and then runs
+`codex exec … < /dev/null` unchanged. It does not record an outcome — the acceptance judgment
+belongs to main (through the CLI directly) or to the scribe (by inference).
 
-이 표면만 무음 no-op 규칙의 예외다: `.hippo/`가 없으면 경고를 내고 **발사는 그대로 한다**.
-본업이 codex 실행인데 기록을 못 한다고 발사를 삼키면 래퍼가 아니라 함정이 된다. 남은 인자는
-`--` 이후까지 포함해 해석하지 않고 통째로 넘긴다 — 그것은 codex의 문법이지 이 CLI의 것이 아니다.
+Why it is a CLI subcommand: a plugin puts only `bin/` on PATH, and `${CLAUDE_PLUGIN_ROOT}` is empty
+in an ordinary Bash call. Leaving it in `scripts/` means every consuming project grows its own shim
+with a hard-coded cache path (measured). `scripts/dispatch.sh` remains only as a compatibility
+forwarder for those shims.
 
-### 3.7 Skills (3개)
+This surface is the one exception to the silent no-op rule: with no `.hippo/` it warns and
+**launches anyway**. Its real job is running codex, and swallowing the launch because the record
+failed would make it a trap rather than a wrapper. The remaining arguments — including everything
+after `--` — are passed through without interpretation; that is codex's grammar, not this CLI's.
 
-> 표기: plugin name은 `hippo`라 slash 접두는 `/hippo:hippo`·`/hippo:checkup`·`/hippo:dispatch`이고,
-> CLI 명령(`hippo`)·`.hippo/`·`HIPPO_*` 환경변수도 같은 이름을 쓴다.
+### 3.7 Skills (three)
 
-- **`hippo:hippo`** — 메인 nudge skill. description은 고정 영문
-  "This is your hippocampus. Always use it." — 이 한 줄이 모든 세션의 skill 목록에
-  상주하며 유일한 사용 유도 장치다(원칙 2: 상주 주입이 아니라 짧은 description).
-  본문은 CLI 간단 안내(문법 한 줄·언제 무엇을·강제 없음)만 담고, 이 이상 커지면 회귀다.
-- **`hippo:checkup`** — `/doctor`형 프로젝트 진단. ledger·PRIORS·failures·커서 공백·
-  최근 transcript·CLAUDE.md/메모리를 읽고: 낭비 패턴(재시도 루프·limit 정지·고아 dispatch),
-  지시 위생(stale/모순 directive vs 문서), clerk 건강(공백·실패·오버헤드)을 보고.
-  제안은 recommend-first, AskUserQuestion 최대 2회, 가역성 명시. 자동 적용 없음.
-- **`hippo:dispatch`** — fleet-dispatch 개정판. 핵심 개정(전부 감사·가이드 근거):
-  검증자는 **전부 보고, 필터는 main**(문자적 순종 모델에서 severity 상한은 발견을
-  실제로 감춘다); 검증 예산은 고정 의례가 아니라 **PRIORS의 반증률에 비례**; 자기 작업
-  재검증 금지(경계 검증만); GPU·메모리 안전성 서술은 중립 어휘(콘텐츠 필터 오탐 10건
-  실측); 장시간 실행은 background+Monitor(포그라운드 sleep 폴링 금지); 브리프 합성 시
-  공용/개별 조항 모순 사전 grep; 게이트 확인과 push는 반드시 별도 호출.
+> Naming: the plugin name is `hippo`, so the slash prefixes are `/hippo:hippo`, `/hippo:checkup`
+> and `/hippo:dispatch`; the CLI command (`hippo`), `.hippo/` and the `HIPPO_*` environment
+> variables use the same name.
 
-### 3.8 호스트 (Claude Code · Codex CLI)
+- **`hippo:hippo`** — the main nudge skill. Its description is the fixed line
+  "This is your hippocampus. Always use it." — that single line sits in every session's skill list
+  and is the only thing that invites use (principle 2: a short description rather than a resident
+  injection). The body holds nothing but a brief CLI guide (the grammar in one line, when to reach
+  for what, and that nothing is enforced); anything larger than that is a regression.
+- **`hippo:checkup`** — a `/doctor`-style project diagnosis. It reads the ledger, PRIORS, failures,
+  cursor gaps, recent transcripts and CLAUDE.md/memory, then reports waste patterns (retry loops,
+  limit stalls, orphan dispatches), directive hygiene (stale or contradictory directives versus the
+  documents) and clerk health (gaps, failures, overhead). Proposals are recommend-first, at most two
+  AskUserQuestion rounds, with reversibility stated. Nothing is applied automatically.
+- **`hippo:dispatch`** — the revised fleet-dispatch. The key revisions (all grounded in the audit and
+  the guide): a verifier **reports everything and main filters** (with a literal-minded model, a
+  severity ceiling genuinely hides findings); the verification budget is **proportional to the
+  refutation rate in PRIORS** rather than a fixed ritual; no re-verifying one's own work (boundary
+  verification only); safety statements about GPUs and memory use neutral vocabulary (10 measured
+  content-filter false positives); long runs go to background plus Monitor (no foreground sleep
+  polling); grep the shared and individual brief clauses for contradictions before composing them;
+  and the gate check and the push must always be separate calls.
 
-같은 repo가 두 호스트의 플러그인이다. 층 4개 중 셋(CLI·clerk·skill)은 원래 호스트 무관이었고,
-훅만 호스트 종속이었다 — codex가 hook 엔진을 갖추면서 그 벽이 사라졌다(0.144.6 실측).
+### 3.8 Hosts (Claude Code · Codex CLI)
+
+The same repo is a plugin for both hosts. Three of the four layers (CLI, clerk, skill) were always
+host-agnostic and only the hooks were host-bound — and that wall came down when codex grew a hook
+engine (measured on 0.144.6).
 
 | | Claude Code | Codex CLI |
 |---|---|---|
-| 매니페스트 | `.claude-plugin/plugin.json` | `.codex-plugin/plugin.json` (`skills`·`hooks` 경로를 명시) |
-| 훅 | `hooks/hooks.json` | **같은 파일** — 이벤트 키(PascalCase)·matcher·stdin 페이로드 필드·SessionStart stdout 주입이 전부 동일 |
-| 플러그인 `bin/` | PATH에 자동 편입 | **편입되지 않는다** → skill은 SKILL.md 위치 기준 상대경로로 `bin/hippo`를 해소한다 |
-| transcript | Claude JSONL | codex rollout JSONL — `digest_lite.py`가 첫 줄들로 판별해 같은 줄 어휘로 환원한다 |
+| Manifest | `.claude-plugin/plugin.json` | `.codex-plugin/plugin.json` (names the `skills` and `hooks` paths) |
+| Hooks | `hooks/hooks.json` | **the same file** — event keys (PascalCase), matcher, stdin payload fields and SessionStart stdout injection are all identical |
+| Plugin `bin/` | added to PATH automatically | **not added** → a skill resolves `bin/hippo` relative to its own SKILL.md |
+| Transcript | Claude JSONL | codex rollout JSONL — `digest_lite.py` detects the format from the first lines and reduces both to the same line vocabulary |
 
-codex 고유 제약 (0.144.6):
+Constraints specific to codex (0.144.6):
 
-- **훅은 신뢰 승인 전까지 조용히 건너뛴다.** `/hooks`에서 한 번 검토·신뢰하거나
-  `--dangerously-bypass-hook-trust`로 우회한다. 설치했는데 캡슐이 안 보이면 먼저 여기를 본다.
-- 프로젝트 `.codex/` 계층은 **신뢰된 프로젝트에서만** 로드된다(플러그인 훅은 무관).
-- `"async": true`는 파싱은 되지만 **건너뛴다** — Stop의 비차단은 훅 자신이 detach해서 얻는다
-  (우리 `stop.sh`는 이미 setsid + 삼중 스트림 차단으로 그렇게 한다).
-- 두 매니페스트의 `version`은 반드시 같다(테스트가 강제한다).
+- **Hooks are skipped silently until they are trusted.** Review and trust them once through
+  `/hooks`, or bypass with `--dangerously-bypass-hook-trust`. If the capsule never appears after
+  installing, look here first.
+- The project `.codex/` layer loads **only in a trusted project** (plugin hooks are unaffected).
+- `"async": true` parses but is **skipped** — a Stop hook earns its non-blocking behavior by
+  detaching itself (our `stop.sh` already does, with setsid and all three streams closed).
+- The `version` in the two manifests must match (a test enforces it).
 
-## 4. 존재하지 않는 것 (NOT-list — 재도입하려면 이 문서를 개정하라)
+## 4. What does not exist (the NOT-list — reintroducing any of it requires revising this document)
 
-| 없음 | 이유 (실측) |
+| Absent | Why (measured) |
 |---|---|
-| round / round close | 범위 기준 불명 + 리뷰 대기 = 개발 정지. 사용자가 이미 continuous dispatch로 해체 |
-| review packet·ingest·receipt·attestation | 회신은 채팅에 raw로(파일 저장 리뷰는 attention에서 죽는다 — whack-a-mole 6라운드 실증). pinning은 `ev:review.base` 한 필드로 충분 |
-| delegate 표면·역할 바인딩 config | 라우팅은 main의 판단 + PRIORS의 증거로. config 고정은 stale 지시 사고의 원천 |
-| brief 타입 사실·assurance DAG | 의도는 짧은 문서와 대화로. drift는 통제가 아니라 가시화로 |
-| PreToolUse/PostToolUse/UserPromptSubmit 훅 | 매 호출 지연 + 무출력 훅 실증. 훅은 2개가 상한 |
-| OPERATING CONTRACT류 상주 주입 | 8–14KB 재주입 실측. 상주는 §6의 한 덩어리뿐 |
-| 손으로 쓰는 PROGRESS.md | 낡는다. worklog(생성) + ledger(사실) + PRIORS(증류)로 대체 |
-| typed refusal 게이트·frozen sidecar·remote verify | 기록하되 강제하지 않는다(원칙 3) |
-| 자동 cron 설치 | 사용자가 원하면 직접 건다. 플러그인은 스케줄을 소유하지 않는다 |
+| round / round close | No clear scope criterion, plus waiting on review = development stops. The user had already dismantled it with continuous dispatch |
+| review packet, ingest, receipt, attestation | Replies stay raw in the chat (a review saved to a file dies in attention — demonstrated across 6 rounds of whack-a-mole). One field, `ev:review.base`, is enough pinning |
+| a delegate surface, role-binding config | Routing comes from main's judgment plus the evidence in PRIORS. Freezing it in config is the source of stale-instruction incidents |
+| typed brief facts, assurance DAG | Intent belongs in short documents and conversation. Drift is handled by making it visible, not by control |
+| PreToolUse/PostToolUse/UserPromptSubmit hooks | Latency on every call, plus hooks measured to produce no output. Two hooks is the ceiling |
+| OPERATING CONTRACT-style resident injection | 8–14KB re-injected, measured. The only resident thing is the one block in §6 |
+| a hand-written PROGRESS.md | It goes stale. Replaced by worklog (generated) + ledger (facts) + PRIORS (distilled) |
+| typed refusal gates, frozen sidecars, remote verify | Record, never enforce (principle 3) |
+| installing a cron job automatically | A user who wants one sets it up. The plugin does not own a schedule |
 
-## 5. MVP 이후 (기록만, 지금 만들지 않는다)
+## 5. After the MVP (recorded only; not being built now)
 
-- staleness resolver: 낡은 리뷰 회신 → 현재 HEAD 기준 delta digest(clerk). base SHA
-  실존 검사는 이 서비스 *내부*에 산다.
-- watchman: outcome 없는 dispatch·limit 정지 감지 → telegram 통지 (대부분 결정적).
-- distill 결과의 조회형 노출(위임 직전 `prior show` 습관)을 dispatch skill에 편입.
+- staleness resolver: a stale review reply → a delta digest against the current HEAD (a clerk). The
+  base-SHA existence check lives *inside* that service.
+- watchman: detect dispatches with no outcome and limit stalls → notify over telegram (mostly
+  deterministic).
+- Fold a read-oriented exposure of the distilled result (the habit of running `prior show` right
+  before delegating) into the dispatch skill.
 
-## 6. 상주 표면 (전문 — 이것보다 커지면 회귀다)
+## 6. The resident surface (in full — anything larger is a regression)
 
 ```
 [hippo] tasks 3 open · directives 2 live · priors 07-31 · worklog 07-31
-· live(durable): 리뷰 회신은 컨텍스트 유지, 파일 저장 금지
-· live(phase): GPU 0,1만 사용
-· last: v2 Pareto duo 머지, full gate green(1421)
+· live(durable): keep review replies in context, never save them to a file
+· live(phase): use GPUs 0 and 1 only
+· last: merged the v2 Pareto duo, full gate green (1421)
 ```
 
-지시 블록의 규칙 두 개:
+Two rules govern the directive block:
 
-- **durable은 접지 않는다.** 수명이 없는 사용자 ruling이 세션 시작에 안 보이면 그 지시는
-  사실상 없는 것이다. 항상 먼저, 전부 나온다 (줄당 200자). phase/turn이 아무리 많아도
-  durable을 밀어내지 못한다.
-- 상한은 줄 수가 아니라 **글자 예산**(1600자)이다 — 긴 지시 한 줄과 짧은 지시 한 줄이 같은
-  비용일 이유가 없다. 접힐 때는 `+N more` 로 끝내지 않고 전문을 볼 명령
-  (`hippo directive`)을 같이 찍는다. 개수가 아니라 행동을 알려주는 것이 접힘의 목적이다.
+- **durable is never folded.** A user ruling with no lifetime that is invisible at session start is
+  effectively not there. Durable directives come first and all of them appear (up to 200 chars per
+  line). No number of phase/turn directives may push one out.
+- The cap is a **character budget** (1600), not a line count — there is no reason a long directive
+  and a short one should cost the same. When something is folded, do not stop at `+N more`: print
+  the command that shows the full text (`hippo directive`) alongside it. The point of folding is to
+  name an action, not a count.
 
-## 7. 테스트 방침
+## 7. Testing policy
 
-테스트는 수단이다: CLI 왕복(add/set/list 다중 필터/done), log 검증(정상·기형 fail-closed),
-directive 수명주기, status --inject(존재/부재 무음), scribe 전체 파이프라인
-(mock backend: 커서 전진·ledger append·worklog append·lock 경합·기형 JSON→failures 격리),
-digest_lite 기본. 20개 내외. `uv run pytest`.
+Tests are a means: CLI round trips (add/set/list with multi-filter/done), log validation (valid and
+malformed, fail-closed), the directive lifecycle, status --inject (present and absent, silent), the
+whole scribe pipeline (mock backend: cursor advance, ledger append, worklog append, lock contention,
+malformed JSON isolated into failures), and digest_lite basics. Around twenty of them. `uv run pytest`.
 
-## 8. 인수(salvage) 기록
+## 8. Salvage record
 
-- 감사 다이제스트 로직(digest.py, 479MB 실증) → `scripts/digest_lite.py`
-- task registry 개념(플러그인 off 후에도 1,081회 자발 사용 = revealed preference) → 얇은 재작성
-- fleet-dispatch skill 본문 → `skills/dispatch` 개정판
-- 나머지 0.x 기계 전부 → `legacy` 브랜치로 은퇴. 감사 보고서: `~/workspace/b200-2-research-cc-audit/`
+- The audit's digest logic (digest.py, proven on 479MB) → `scripts/digest_lite.py`
+- The task registry concept (1,081 voluntary uses even after the plugin was switched off = revealed
+  preference) → a thin rewrite
+- The body of the fleet-dispatch skill → the revised `skills/dispatch`
+- Everything else from 0.x → retired to the `legacy` branch. Audit report:
+  `~/workspace/b200-2-research-cc-audit/`

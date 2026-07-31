@@ -1,7 +1,7 @@
-"""Codex CLI 호스트 지원 (DESIGN §3.8).
+"""Codex CLI host support (DESIGN §3.8).
 
-여기서 고정하는 것은 전부 codex-cli 0.144.6 실측에서 나온 계약이다:
-훅 파일은 두 호스트가 공유하고, transcript만 포맷이 다르다.
+Everything pinned here comes from measuring codex-cli 0.144.6: the two hosts share the hook
+file, and only the transcript format differs.
 """
 import json
 import subprocess
@@ -20,7 +20,7 @@ def _json(path):
 
 
 def test_manifests_agree_on_identity_and_version():
-    """두 매니페스트가 다른 버전을 주장하면 두 마켓플레이스의 pin이 갈라진다."""
+    """If the two manifests claim different versions, the two marketplace pins drift apart."""
     c, x = _json(CLAUDE_MANIFEST), _json(CODEX_MANIFEST)
     assert c["name"] == x["name"] == "hippo"
     assert c["version"] == x["version"]
@@ -28,7 +28,7 @@ def test_manifests_agree_on_identity_and_version():
 
 
 def test_codex_manifest_paths_are_plugin_relative():
-    """codex는 `./`로 시작하고 플러그인 루트 안에 있는 경로만 받는다."""
+    """codex only accepts paths that start with `./` and stay inside the plugin root."""
     x = _json(CODEX_MANIFEST)
     for key in ("skills", "hooks"):
         assert x[key].startswith("./"), key
@@ -39,8 +39,8 @@ def test_codex_manifest_paths_are_plugin_relative():
 
 
 def test_hooks_json_is_shared_by_both_hosts():
-    """codex 0.144.6은 PascalCase 이벤트 키에 `type: command` 핸들러만 실행한다.
-    `async: true`는 파싱은 되지만 건너뛰므로, 비차단은 스크립트가 스스로 얻어야 한다."""
+    """codex 0.144.6 runs only `type: command` handlers under PascalCase event keys.
+    `async: true` parses but is skipped, so a hook must earn its non-blocking behavior itself."""
     h = _json(HOOKS_JSON)["hooks"]
     assert set(h) == {"SessionStart", "Stop"}
     for groups in h.values():
@@ -62,9 +62,9 @@ def _run_digest(path):
 def _codex_rollout(tmp_path):
     lines = [
         {"type": "session_meta", "payload": {"session_id": "s1", "cwd": "/tmp/x"}},
-        {"type": "event_msg", "payload": {"type": "user_message", "message": "GPU 0,1만 써줘"}},
-        {"type": "response_item", "payload": {"type": "reasoning", "summary": "숨겨야 함"}},
-        {"type": "event_msg", "payload": {"type": "agent_message", "message": "알겠습니다"}},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "Use GPUs 0 and 1 only"}},
+        {"type": "response_item", "payload": {"type": "reasoning", "summary": "must stay hidden"}},
+        {"type": "event_msg", "payload": {"type": "agent_message", "message": "Understood"}},
         {
             "type": "response_item",
             "payload": {
@@ -90,20 +90,22 @@ def _codex_rollout(tmp_path):
 
 
 def test_digest_reduces_codex_rollout_to_the_shared_line_vocabulary(tmp_path):
-    """clerk 프롬프트가 호스트를 몰라도 되도록 두 포맷이 같은 줄 어휘로 환원된다."""
+    """Both formats reduce to the same line vocabulary, so the clerk prompt never learns which
+    host it is reading."""
     proc = _run_digest(_codex_rollout(tmp_path))
     assert proc.returncode == 0, proc.stderr
     out = proc.stdout
-    assert "USER: GPU 0,1만 써줘" in out
-    assert "ASSIST: 알겠습니다" in out
+    assert "USER: Use GPUs 0 and 1 only" in out
+    assert "ASSIST: Understood" in out
     assert "TOOL exec:" in out and "pytest -q" in out
     assert "RES: 3 passed" in out
-    assert "숨겨야 함" not in out  # reasoning은 thinking과 같은 이유로 제외
+    assert "must stay hidden" not in out  # reasoning is excluded for the same reason as thinking
     assert "token_count" not in out
 
 
 def test_digest_prefilter_still_applies_to_codex(tmp_path):
-    """TOOL도 USER도 없는 rollout이면 무출력·rc=0 (clerk 호출 자체를 생략하는 관문)."""
+    """A rollout with no TOOL and no USER line prints nothing and exits 0 (the gate that skips
+    the clerk call entirely)."""
     p = tmp_path / "empty.jsonl"
     p.write_text(
         json.dumps({"type": "event_msg", "payload": {"type": "token_count", "total": 1}}) + "\n",
@@ -115,7 +117,7 @@ def test_digest_prefilter_still_applies_to_codex(tmp_path):
 
 
 def test_digest_still_reads_claude_transcripts(fake_transcript_path):
-    """포맷 판별이 기존 경로를 밀어내지 않는다."""
+    """Format detection must not displace the existing path."""
     proc = _run_digest(fake_transcript_path)
     assert proc.returncode == 0, proc.stderr
     assert "USER:" in proc.stdout and "TOOL Bash:" in proc.stdout

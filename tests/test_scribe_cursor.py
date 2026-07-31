@@ -1,8 +1,8 @@
 """Item (6): scribe cursor advancement — a second consecutive run with no new
 transcript lines must exit without invoking the model at all.
 
-DESIGN.md §3.5 step 3 (결정적 프리필터) + §7's own suggested verification
-method: "mock 파일 삭제해두면 검증됨" — if the second run tried to call the
+DESIGN.md §3.5 step 3 (the deterministic prefilter) plus §7's own suggested verification
+method: deleting the mock file proves it — if the second run tried to call the
 (mock) backend again it would have nothing to read and would either error or
 produce a new ev:clerk line; observing neither proves the model call was
 skipped by the deterministic prefilter/cursor check before backend

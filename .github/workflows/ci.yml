@@ -28,7 +28,7 @@ jobs:
             .skills == "./skills/" and
             .hooks == "./hooks/hooks.json"
           ' .codex-plugin/plugin.json >/dev/null
-          # 두 호스트의 매니페스트가 서로 다른 버전을 주장하면 릴리스가 갈라진다.
+          # If the two host manifests claim different versions, the two releases drift apart.
           a=$(jq -r .version .claude-plugin/plugin.json)
           b=$(jq -r .version .codex-plugin/plugin.json)
           test "$a" = "$b" || { echo "version drift: claude=$a codex=$b"; exit 1; }

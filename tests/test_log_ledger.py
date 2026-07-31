@@ -8,8 +8,8 @@ beyond the schema's field names; these tests assume `--<field> <value>`
 mirrors the schema field name 1:1 (the simplest reading, and the only one
 consistent with `hippo log raw` accepting the same field names literally).
 
-Fail-closed contract (§3.2): "hippo log는 ev별 필수 필드를 fail-closed로
-검사한다. 미지의 ev는 거부." — nonzero exit, and the ledger file must be
+Fail-closed contract (§3.2): hippo log checks the required fields per ev, fail-closed, and
+rejects unknown ev values. — nonzero exit, and the ledger file must be
 byte-identical before/after a rejected call (no partial/corrupt append).
 """
 import json
@@ -108,7 +108,7 @@ def test_log_outcome_valid_appends(tmp_project, run_hippo):
             "--rework",
             "2",
             "--note",
-            "oracle 순환참조",
+            "circular oracle reference",
         ],
         cwd=tmp_project,
     )
@@ -200,7 +200,7 @@ def test_directive_add_valid_appends(tmp_project, run_hippo):
             "--id",
             "gpu-01",
             "--text",
-            "GPU 0,1만 사용",
+            "Use GPUs 0 and 1 only",
             "--scope",
             "phase",
             "--state",
@@ -392,7 +392,7 @@ def test_log_raw_valid_json_appends(tmp_project, run_hippo):
         {
             "ev": "directive",
             "id": "raw-01",
-            "text": "raw 경로 확인",
+            "text": "check the raw path",
             "scope": "phase",
             "state": "active",
         },

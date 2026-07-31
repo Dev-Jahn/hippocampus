@@ -1,8 +1,8 @@
 """Item (3): directive lifecycle — active -> retract -> gone from
 `directive list --active`.
 
-DESIGN.md §3.2: "같은 id의 마지막 이벤트가 현재 상태다(파생 뷰는 저장하지
-않는다 — 원칙 4·5)." 1.0 surface: `hippo directive add [flags]`,
+DESIGN.md §3.2: the last event for an id is its current state; derived views are never stored
+(principles 4 and 5). 1.0 surface: `hippo directive add [flags]`,
 `hippo directive retract <directive-id>`,
 `hippo directive list [--active] [--json]`.
 """
@@ -19,7 +19,7 @@ def test_directive_active_then_retract_disappears_from_active_list(
             "--id",
             "gpu-01",
             "--text",
-            "GPU 0,1만 사용",
+            "Use GPUs 0 and 1 only",
             "--scope",
             "phase",
             "--state",
@@ -55,7 +55,7 @@ def test_directive_state_resolution_uses_last_event_not_history(
             "--id",
             "dur-01",
             "--text",
-            "리뷰 회신은 컨텍스트 유지, 파일 저장 금지",
+            "Keep review replies in context; never save them to a file",
             "--scope",
             "durable",
             "--state",
@@ -77,7 +77,7 @@ def test_directive_state_resolution_uses_last_event_not_history(
             "--id",
             "dur-01",
             "--text",
-            "리뷰 회신은 컨텍스트 유지, 파일 저장 금지",
+            "Keep review replies in context; never save them to a file",
             "--scope",
             "durable",
             "--state",

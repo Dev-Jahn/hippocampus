@@ -5,7 +5,7 @@
 set -u
 
 # A clerk runs headless Claude/codex sessions of its own; their hooks must not
-# fire, or this hook would spawn a clerk that spawns a clerk (재귀 금지, §2).
+# fire, or this hook would spawn a clerk that spawns a clerk (no recursion, §2).
 [ -n "${HIPPO_CLERK:-}" ] && exit 0
 
 # jq is preferred but not required: python3 is already a hard dependency of the

@@ -1,8 +1,8 @@
 """Item (7): digest_lite baseline — sample jsonl -> non-empty digest,
 --since-line behaves.
 
-DESIGN.md §3.5 step 2 only describes digest_lite.py's role ("커서 이후
-라인만 압축") without freezing an exact CLI surface. This test assumes the
+DESIGN.md §3.5 step 2 only describes digest_lite.py's role (compress only the lines after the
+cursor) without freezing an exact CLI surface. This test assumes the
 simplest reading consistent with that description and with `scripts/` being
 plain-Python entry points invoked positionally:
 

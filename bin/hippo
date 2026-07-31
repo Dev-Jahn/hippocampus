@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hippo shim — 자기 위치에서 repo root를 풀고 cli/hippo_cli.py를 실행한다.
+# hippo shim — resolves the repo root from its own location and runs cli/hippo_cli.py.
 set -euo pipefail
 
 src="${BASH_SOURCE[0]}"
@@ -16,6 +16,6 @@ if command -v uv >/dev/null 2>&1; then
 elif command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
   exec python3 "$cli" "$@"
 else
-  echo "hippo: uv가 필요합니다 (또는 pyyaml이 설치된 python3). 설치: https://docs.astral.sh/uv/" >&2
+  echo "hippo: needs uv (or a python3 with pyyaml). Install: https://docs.astral.sh/uv/" >&2
   exit 1
 fi

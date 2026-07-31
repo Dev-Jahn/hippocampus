@@ -162,7 +162,7 @@ def test_b1_scribe_cannot_forge_t_or_src_through_clerk_output(
     mock.write_text(
         json.dumps(
             {
-                "worklog": "위조 시도",
+                "worklog": "forgery attempt",
                 "events": [
                     {
                         "ev": "dispatch",
@@ -308,12 +308,12 @@ def test_m1_scribe_may_still_emit_directives(
     mock.write_text(
         json.dumps(
             {
-                "worklog": "지시 포착",
+                "worklog": "directive captured",
                 "events": [
                     {
                         "ev": "directive",
                         "id": "gpu-01",
-                        "text": "GPU 0,1만 사용",
+                        "text": "Use GPUs 0 and 1 only",
                         "scope": "phase",
                         "state": "active",
                     }
@@ -337,7 +337,7 @@ def test_m1_scribe_may_still_emit_directives(
 def test_m1_inject_truncates_long_directive_text(tmp_project, run_hippo):
     """--inject is a resident surface fed by untrusted transcript text: a
     directive is folded to one capped line so it cannot blow the surface up."""
-    long_text = "A" * 300 + "\n두 번째 줄\n세 번째 줄"
+    long_text = "A" * 300 + "\nsecond line\nthird line"
     proc = run_hippo(
         [
             "log",
@@ -364,7 +364,7 @@ def test_m1_inject_truncates_long_directive_text(tmp_project, run_hippo):
     assert len(live) == 1
     body = live[0].split(": ", 1)[1]
     assert len(body) <= 80, body
-    assert "두 번째 줄" not in inject.stdout
+    assert "second line" not in inject.stdout
 
 
 # --------------------------------------------------------------------------
@@ -376,12 +376,12 @@ def test_m2_same_second_failures_do_not_overwrite_each_other(tmp_project):
     import hippo_cli  # deliberately not imported at collection time
 
     hp = tmp_project / ".hippo"
-    first = hippo_cli.dump_failure(hp, "scribe", "첫 번째 실패")
-    second = hippo_cli.dump_failure(hp, "scribe", "두 번째 실패")
+    first = hippo_cli.dump_failure(hp, "scribe", "first failure")
+    second = hippo_cli.dump_failure(hp, "scribe", "second failure")
     assert first != second
     assert first.exists() and second.exists()
-    assert first.read_text(encoding="utf-8") == "첫 번째 실패"
-    assert second.read_text(encoding="utf-8") == "두 번째 실패"
+    assert first.read_text(encoding="utf-8") == "first failure"
+    assert second.read_text(encoding="utf-8") == "second failure"
 
 
 # --------------------------------------------------------------------------
@@ -715,7 +715,7 @@ def test_m3_scribe_review_without_sha_is_rejected(
     mock.write_text(
         json.dumps(
             {
-                "worklog": "리뷰 회신",
+                "worklog": "review reply",
                 "events": [
                     {
                         "ev": "review",
@@ -739,8 +739,11 @@ def test_m3_scribe_review_without_sha_is_rejected(
 
 
 def test_m3_clerk_prompt_no_longer_teaches_unknown_base(repo_root):
+    """base is the whole of SHA pinning: the prompt must tell the clerk to omit the event
+    rather than fill base with a placeholder."""
     text = (repo_root / "clerks" / "turn-scribe.md").read_text(encoding="utf-8")
-    assert 'base를 "unknown"으로' not in text
+    assert "omit the review event entirely" in text
+    assert "unknown" not in text
 
 
 def test_m4_digest_lite_until_line_bounds_the_window(fake_transcript_path):
@@ -957,11 +960,11 @@ def test_m10_no_scratch_files_inside_hippo_dir(
 
 def test_m11_inject_last_ignores_nested_and_free_bullets(tmp_project, run_hippo):
     worklog_path(tmp_project).write_text(
-        "## 2026-07-30\n\n- 09:00 어제 한 일\n\n## 2026-07-31\n\n"
-        "- 10:00 진짜 마지막 항목\n  - 중첩 불릿은 항목이 아니다\n- 자유 불릿\n",
+        "## 2026-07-30\n\n- 09:00 yesterday's work\n\n## 2026-07-31\n\n"
+        "- 10:00 the real last entry\n  - a nested bullet is not an entry\n- a free bullet\n",
         encoding="utf-8",
     )
     proc = run_hippo(["status", "--inject"], cwd=tmp_project)
     assert proc.returncode == 0, proc.stderr
     last = [ln for ln in proc.stdout.splitlines() if ln.startswith("· last:")]
-    assert last == ["· last: 진짜 마지막 항목"], proc.stdout
+    assert last == ["· last: the real last entry"], proc.stdout
