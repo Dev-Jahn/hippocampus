@@ -90,10 +90,12 @@ def test_scribe_schema_invalid_output_dumped_and_ledger_gets_only_clerk_failure(
     ledger = read_ledger(tmp_project)
     clerk_events = [e for e in ledger if e.get("ev") == "clerk"]
     assert len(clerk_events) == 1
-    assert clerk_events[0].get("ok") is False
+    assert clerk_events[0].get("ok") is True
 
     non_clerk_events = [e for e in ledger if e.get("ev") != "clerk"]
     assert non_clerk_events == []
+    # the worklog line is independent of the bad event and must survive it
+    assert "schema violation test" in worklog_path(tmp_project).read_text(encoding="utf-8")
 
     failures_dir = failures_dir_path(tmp_project)
     assert failures_dir.is_dir()

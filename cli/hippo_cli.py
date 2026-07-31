@@ -60,6 +60,14 @@ ALLOWED = {
 WRITER_ONLY = ("t", "src")
 SRC_VALUES = ("scribe", "cli", "wrapper")  # DESIGN §3.2
 SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+# exec is the second axis PRIORS aggregates on, so its shape is a contract, not a hint:
+# exactly vehicle/model/effort, no whitespace. Measured on a real ledger, a free-form field
+# produced 24 spellings for 4 vehicles ("fork agent", "background/sol xhigh", the shim path
+# as the vehicle, even the literal placeholder) — every variant its own useless column.
+EXEC_RE = re.compile(r"^[^/\s]+/[^/\s]+/[^/\s]+$")
+# The placeholder words themselves showed up as values ("vehicle/gpt-5.6-sol/high"): the
+# shape was right, so only naming them catches it.
+EXEC_PLACEHOLDERS = {"vehicle", "model", "effort"}
 ENUMS = {
     ("outcome", "result"): {"accepted", "revised", "refuted", "no-go", "lost"},
     ("outcome", "attr"): {"work", "brief", "harness"},
@@ -100,6 +108,13 @@ def validate_event(e):
             return f"ev={ev}: {f} must be an integer"
     if ev == "clerk" and not isinstance(e["ok"], bool):
         return "ev=clerk: ok must be true or false"
+    if ev == "dispatch":
+        ex = str(e["exec"])
+        if not EXEC_RE.match(ex) or EXEC_PLACEHOLDERS & set(ex.split("/")):
+            return (
+                f"ev=dispatch: exec must be vehicle/model/effort with no spaces: {ex!r} "
+                "(e.g. codex/gpt-5.6-sol/high, fork/fable/inherit)"
+            )
     # review.base is the whole of SHA pinning (§3.2) — refuse placeholders like "unknown".
     if ev == "review" and not SHA_RE.match(str(e["base"])):
         return f"ev=review: base must be a 7-40 char hex sha: {e['base']!r}"
@@ -477,8 +492,35 @@ def cmd_task_show(args):
     print(yaml.safe_dump(t, allow_unicode=True, sort_keys=False).rstrip())
 
 
+# ev -> the ev its `ref` must point at.
+REF_TARGET = {"outcome": "dispatch", "review-status": "review"}
+REF_HINT = {
+    "outcome": " — a task id is not a dispatch id; the launcher prints the id as `dispatch:<id>`",
+    "review-status": "",
+}
+
+
+def check_ref(hp, e):
+    """`ref` must name an event that actually exists in this ledger.
+
+    Measured on a real ledger: 54% of outcomes never joined to a dispatch — half of them because
+    a caller passed a task id, the other half because the scribe invented an id of the right
+    shape. Both look like data and both vanish from the priors, so this is fail-closed."""
+    target = REF_TARGET.get(e.get("ev"))
+    if target is None:
+        return None
+    ref = e.get("ref")
+    known = {x.get("id") for x in read_ledger(hp) if x.get("ev") == target}
+    if ref in known:
+        return None
+    return (
+        f"ev={e['ev']}: ref={ref!r} is not a known {target} id"
+        f"{REF_HINT.get(e['ev'], '')}. Find it with `hippo log tail --ev {target}`"
+    )
+
+
 def log_and_print(hp, e):
-    err = validate_event(e)
+    err = validate_event(e) or check_ref(hp, e)
     if err:
         die(f"validation failed: {err}")
     rec = append_event(hp, e)
@@ -834,13 +876,15 @@ def cmd_scribe(args):
         obj.get("events", []), list
     ):
         fail("worklog must be a string and events must be an array")
+    # Per-event isolation (§3.5.6): one bad event must not erase the rest of the turn. The
+    # clerk's other events and its worklog line are still worth keeping, and the rejected event
+    # is preserved in failures/ — which is what "the dump is the record" means.
     events = obj.get("events", [])
     for e in events:
-        verr = validate_event(e)
+        verr = validate_event(e) or check_ref(hp, e)
         if verr:
-            fail(f"event validation failed: {verr}")
-
-    for e in events:
+            dump_failure(hp, "scribe", f"{verr}\n\n{json.dumps(e, ensure_ascii=False, indent=2)}\n")
+            continue
         append_event(hp, e, src="scribe")
     if obj.get("worklog", "").strip():
         worklog_append(hp, obj["worklog"].strip())

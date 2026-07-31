@@ -43,10 +43,11 @@ hippo dispatch --kind kernel-impl --scope "pass2 tensorize" --task feat/x \
 Filling the three groups of arguments:
 
 - **Labels** — `--kind` is the aggregation axis of PRIORS (`kind × exec`), so **reuse a tag rather
-  than inventing one per wave**; scattered tags mean the priors never accumulate a sample. Standard
-  vocabulary: `kernel-impl` (implementation), `verify` (boundary verification), `design`,
-  `research`, `docs`, `infra`, `fix`, `perf`, `chore`. Add one only when nothing fits.
-  `--scope` is one line a human can read a month later. `--task` links a registry id when there is one.
+  than inventing one per wave**; scattered tags mean the priors never accumulate a sample
+  (measured: one ledger carried 26 tags across 108 dispatches, 19 of them used exactly once).
+  The vocabulary, shared with the scribe: `impl` `fix` `perf` `verify` `audit` `design`
+  `research` `spike` `docs` `infra` `chore`. kind is the **category**; the subject goes in
+  `--scope`, one line a human can read a month later. `--task` links a registry id.
 - **Routing** — `-m <model>` and `-c model_reasoning_effort=<low|medium|high|xhigh>`. Read
   `hippo prior` first; with no evidence yet, start from difficulty: an atomized fragment goes cheap
   (low/medium), a design or a whole-file rewrite goes high/xhigh. Do not burn the top tier on

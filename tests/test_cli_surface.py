@@ -335,3 +335,64 @@ def test_prompts_directory_is_never_read_by_hippo(tmp_project, run_hippo):
     for argv in (["status"], ["status", "--inject"], ["task"], ["log"], ["directive"]):
         proc = run_hippo(argv, cwd=tmp_project)
         assert proc.returncode == 0, (argv, proc.stderr)
+
+
+# --------------------------------------------------------------------------
+# The two PRIORS axes are contracts, not hints (measured on a real ledger)
+# --------------------------------------------------------------------------
+
+def _dispatch(run_hippo, cwd, did="d-real", exec_="codex/gpt-5.6-sol/high"):
+    return run_hippo(
+        ["log", "dispatch", "--id", did, "--kind", "impl", "--exec", exec_, "--scope", "s"],
+        cwd=cwd,
+    )
+
+
+def test_outcome_ref_must_name_a_real_dispatch(tmp_project, run_hippo):
+    """54% of outcomes in a real ledger never joined: half passed a task id, half were ids the
+    scribe invented. Both looked like data and both vanished from the priors."""
+    assert _dispatch(run_hippo, tmp_project).returncode == 0
+
+    for bad in ("feat/some-task", "d-invented"):
+        proc = run_hippo(
+            ["log", "outcome", "--ref", bad, "--result", "accepted"], cwd=tmp_project
+        )
+        assert proc.returncode != 0, bad
+        assert "not a known dispatch id" in proc.stderr
+        assert "hippo log tail --ev dispatch" in proc.stderr
+    # a task id is the confusion worth naming outright
+    proc = run_hippo(
+        ["log", "outcome", "--ref", "feat/x", "--result", "accepted"], cwd=tmp_project
+    )
+    assert "task id is not a dispatch id" in proc.stderr
+
+    ok = run_hippo(["log", "outcome", "--ref", "d-real", "--result", "accepted"], cwd=tmp_project)
+    assert ok.returncode == 0, ok.stderr
+
+
+def test_review_status_ref_must_name_a_real_review(tmp_project, run_hippo):
+    proc = run_hippo(
+        ["log", "review-status", "--ref", "r-nope", "--addressed", "full"], cwd=tmp_project
+    )
+    assert proc.returncode != 0
+    assert "not a known review id" in proc.stderr
+
+
+def test_exec_must_be_vehicle_model_effort(tmp_project, run_hippo):
+    """A free-form exec produced 24 spellings for 4 vehicles — including the wrapper's own path
+    as the vehicle and the literal placeholder text."""
+    for bad in (
+        "gpt-5.6-sol/high",                    # vehicle missing
+        "tools/dispatch/gpt-5.6-sol/xhigh",    # the shim path taken as the vehicle
+        "background/sol xhigh",                # whitespace
+        "fork agent",                          # prose
+        "vehicle/model/effort unknown",        # the placeholder itself
+        "vehicle/gpt-5.6-sol/high",            # right shape, placeholder word as the value
+    ):
+        proc = _dispatch(run_hippo, tmp_project, did=f"d-{abs(hash(bad))%9999}", exec_=bad)
+        assert proc.returncode != 0, bad
+        assert "vehicle/model/effort" in proc.stderr
+
+    for good in ("codex/gpt-5.6-sol/high", "fork/fable/inherit", "workflow/fable/xhigh"):
+        proc = _dispatch(run_hippo, tmp_project, did=f"ok-{abs(hash(good))%9999}", exec_=good)
+        assert proc.returncode == 0, (good, proc.stderr)

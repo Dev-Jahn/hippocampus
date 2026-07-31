@@ -186,7 +186,10 @@ def test_b1_scribe_cannot_forge_t_or_src_through_clerk_output(
     )
     ledger = read_ledger(tmp_project)
     assert [e for e in ledger if e.get("ev") != "clerk"] == []
-    assert [e for e in ledger if e.get("ev") == "clerk"][0]["ok"] is False
+    # Per-event isolation (§3.5.6): the forged event is dumped, not appended — and it does not
+    # void the rest of the turn, so the clerk run itself still succeeded.
+    assert [e for e in ledger if e.get("ev") == "clerk"][0]["ok"] is True
+    assert len(list(failures_dir_path(tmp_project).iterdir())) == 1
 
 
 def test_b1_unknown_hippo_src_env_is_rejected(tmp_project, run_hippo):
@@ -290,6 +293,7 @@ def test_m1_documented_optional_keys_still_accepted(tmp_project, run_hippo):
             "by": "verify/opus",
             "note": "n",
         },
+        {"ev": "review", "id": "r1", "base": "abc1234", "source": "chatgpt", "findings": 1},
         {"ev": "review-status", "ref": "r1", "addressed": "partial", "at": "abc1234"},
         {"ev": "clerk", "name": "turn-scribe", "ok": True, "ms": 10, "tokens": 5},
     ):
@@ -743,7 +747,11 @@ def test_m3_clerk_prompt_no_longer_teaches_unknown_base(repo_root):
     rather than fill base with a placeholder."""
     text = (repo_root / "clerks" / "turn-scribe.md").read_text(encoding="utf-8")
     assert "omit the review event entirely" in text
-    assert "unknown" not in text
+    # `unknown` is a legitimate value for one part of exec, so the check is scoped to base:
+    # nothing may teach filling base with a placeholder.
+    base_para = text.split("base is the sha")[1].split("\n\n")[0]
+    assert "unknown" not in base_para
+    assert "placeholder value defeats the pinning" in base_para
 
 
 def test_m4_digest_lite_until_line_bounds_the_window(fake_transcript_path):

@@ -122,6 +122,13 @@ optional `src` (`scribe|cli|wrapper`).
   brief, and the vanished StructuredOutput was harness).
 - `directive.scope ∈ {turn, phase, durable}`, `state ∈ {active, retracted, expired}`. The last event
   for an `id` is its current state (a derived view is never stored — principles 4 and 5).
+- `dispatch.exec` is exactly `vehicle/model/effort`, no whitespace, and `outcome.ref` /
+  `review-status.ref` must name an event that exists in this ledger — both fail-closed. These two
+  fields are the axes PRIORS aggregates on, so a free-form value is not a small mess, it is a
+  column of one. Measured on a real ledger: 26 kinds across 108 dispatches with 19 used exactly
+  once, 24 spellings of exec for 4 vehicles (including the wrapper's own path and the literal
+  placeholder), and **54% of outcomes joining to no dispatch at all** — half from a caller passing
+  a task id, half from ids the scribe invented in the right shape. All of it looked like data.
 - `review.base` is the reviewed commit (`^[0-9a-f]{7,40}$`) — **this is the whole of SHA pinning**
   (principle 3). Without a known sha, do not record the review event at all.
 - Validation: `hippo log` checks the required fields per ev, fail-closed. An unknown `ev` is rejected.
@@ -188,11 +195,14 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
    codex exists, otherwise claude -p sonnet) > mock` (for tests). 120s timeout.
 5. Prompt = `clerks/turn-scribe.md` + the digest. Expected output = strict JSON:
    `{"worklog": "…", "events": [ …ledger events without t… ]}`.
-6. Validation: check the events by the same rules as `hippo log` (per-ev key whitelist — unknown
-   keys rejected; `t` and `src` cannot be supplied by the caller and are always stamped by the
-   writer). On failure → dump the raw output to `failures/` and record `ev:clerk ok:false`; the
-   ledger is never contaminated, and **the cursor advances even on failure** (the dump is the
-   record — never re-bill the same input forever). **Never fill a gap by inventing content.**
+6. Validation, **per event**: check each event by the same rules as `hippo log` (per-ev key
+   whitelist — unknown keys rejected; `t` and `src` are always stamped by the writer; exec shape
+   and ref existence as in §3.2). A rejected event is dumped to `failures/` and skipped; the
+   turn's other events and its worklog line are still recorded. One hallucinated ref must not
+   erase a good worklog — that is what "the dump is the record" means. A failure *of the clerk
+   call itself* (no JSON, wrong envelope, nonzero rc) is still all-or-nothing and records
+   `ev:clerk ok:false`. Either way the ledger is never contaminated and **the cursor advances**
+   (never re-bill the same input forever). **Never fill a gap by inventing content.**
 7. On success → append the events (`src:scribe`), append one line to today's date section of
    worklog.md, update the cursor, and append the `ev:clerk` self-metering event.
 
