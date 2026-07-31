@@ -1,4 +1,4 @@
-# hippo 1.0 — 설계 문서 (founding)
+# hippocampus 1.0 — 설계 문서 (founding)
 
 > 2026-07-31. 한 달간의 research-cc dogfooding 전수 감사(37세션·위임 806건·479MB)와
 > Opus 5 prompting guide, `/doctor` skill 분석에서 도출된 재정립.
@@ -6,9 +6,12 @@
 
 ## 0. 한 문장
 
-**hippo은 agent를 통제하는 프로세스가 아니라, agent에게 지각(관측)과 기억(정리)을
-제공하는 배경 기관(organ)이다. 판단과 창발은 모델의 몫이고, hippo의 일은 그 판단이
+**hippocampus는 agent를 통제하는 프로세스가 아니라, agent에게 지각(관측)과 기억(정리)을
+제공하는 배경 기관(organ)이다. 판단과 창발은 모델의 몫이고, 이 기관의 일은 그 판단이
 좋은 증거 위에서 일어나게 조용히 받쳐주는 것이다.**
+
+> 표기: 프로젝트 이름은 **hippocampus**. 플러그인 등록명·슬래시 접두·CLI·상태 디렉터리는
+> 전부 짧은 `hippo`다 (`/hippo:checkup`, `hippo status`, `.hippo/`, `HIPPO_*`).
 
 ## 1. 원칙 (전부 dogfooding 실측에서 도출)
 
