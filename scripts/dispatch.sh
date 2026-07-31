@@ -105,16 +105,36 @@ if [ -n "$task" ]; then
   log_args+=(--task "$task")
 fi
 
+# The CLI is intentionally a silent no-op outside initialized projects. The
+# wrapper must still tell its caller that this dispatch was not recorded.
+dir="$(pwd -P)"
+hippo_project=""
+while :; do
+  if [ -d "$dir/.hippo" ]; then
+    hippo_project="$dir"
+    break
+  fi
+  if [ -e "$dir/.git" ]; then
+    break
+  fi
+  [ -n "${HOME:-}" ] && [ "$dir" = "$HOME" ] && break
+  parent="$(dirname "$dir")"
+  [ "$parent" = "$dir" ] && break
+  dir="$parent"
+done
+
 # The ledger line goes to stderr, not stdout: DESIGN §3.6 reserves stdout's
 # first line for the dispatch id.
-if [ -x "$hippo_bin" ]; then
+if [ -z "$hippo_project" ]; then
+  echo "dispatch: .hippo/ 없음 — dispatch 기록을 생략합니다" >&2
+elif [ -x "$hippo_bin" ]; then
   HIPPO_SRC=wrapper "$hippo_bin" "${log_args[@]}" >&2
   log_status=$?
+  if [ "$log_status" -ne 0 ]; then
+    echo "dispatch: hippo log dispatch 기록 실패 (exit $log_status) — 위임은 계속 진행합니다" >&2
+  fi
 else
-  log_status=127
-fi
-if [ "$log_status" -ne 0 ]; then
-  echo "dispatch: hippo log dispatch 기록 실패 (exit $log_status) — 위임은 계속 진행합니다" >&2
+  echo "dispatch: hippo log dispatch 기록 실패 (exit 127) — 위임은 계속 진행합니다" >&2
 fi
 
 echo "dispatch:$id"

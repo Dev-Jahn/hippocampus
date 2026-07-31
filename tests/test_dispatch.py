@@ -73,3 +73,28 @@ def test_double_dash_forwards_wrapper_shaped_flags(tmp_project, tmp_path):
     event = json.loads((tmp_project / ".hippo" / "ledger.jsonl").read_text())
     assert event["kind"] == "wrapper-kind"
     assert event["scope"] == "wrapper-scope"
+
+
+def test_uninitialized_project_warns_when_dispatch_is_not_recorded(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").touch()
+    path = _stub_codex(tmp_path)
+    proc = subprocess.run(
+        [
+            "bash",
+            str(SCRIPTS_DIR / "dispatch.sh"),
+            "--kind",
+            "test",
+            "--scope",
+            "missing-hippo",
+        ],
+        cwd=project,
+        env={**os.environ, "PATH": path},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0
+    assert proc.stderr == "dispatch: .hippo/ 없음 — dispatch 기록을 생략합니다\n"
+    assert proc.stdout.startswith("dispatch:d")
