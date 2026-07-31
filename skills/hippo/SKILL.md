@@ -17,7 +17,7 @@ hippo는 너를 통제하지 않는다. 기억을 대신 맡아줄 뿐이다: �
 ## 언제 무엇을
 
 - 작업을 위임하며: `hippo log dispatch --id <새 id> --kind <태그> --exec <vehicle/model/effort> --scope "<한 줄>"`
-  (codex exec은 `scripts/dispatch.sh` 래퍼를 쓰면 자동 기록)
+  (codex exec은 `hippo dispatch --kind … --scope … -- <codex 인자>` 로 발사하면 자동 기록)
 - 위임이 판정되면: `hippo log outcome --ref <id> --result accepted|revised|refuted|no-go|lost --attr work|brief|harness`
 - 사용자가 지속 지시를 내리면: `hippo directive add --text "…" --scope turn|phase|durable`,
   끝나면 `hippo directive retract <id>`

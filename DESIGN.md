@@ -127,6 +127,7 @@ hippo directive add [typed flags…]          # --id 생략 시 text에서 auto-
 hippo directive retract <directive-id>
 hippo prior show
 hippo prior distill [--days N]              # distiller clerk 실행 → PRIORS.md 재생성
+hippo dispatch --kind K --scope S [--task T] [--] <codex exec args…>   # §3.6
 hippo scribe --transcript P --session S     # Stop 훅이 detached로 부르는 내부 표면
 ```
 
@@ -170,12 +171,20 @@ hippo scribe --transcript P --session S     # Stop 훅이 detached로 부르는 
 7. 성공 → 이벤트 append(`src:scribe`), worklog.md의 오늘 날짜 섹션에 한 줄 append,
    커서 갱신, `ev:clerk` 자기 계량 append.
 
-### 3.6 dispatch 래퍼 (`scripts/dispatch.sh`)
+### 3.6 dispatch 래퍼 (`hippo dispatch`)
 
 codex exec 래퍼: 자기 argv에서 model/effort를 이미 아는 지점이 곧 자동 수집 지점이다
 (원칙 6). `--kind`·`--scope`·`--task` 라벨을 받아 `ev:dispatch`를 자동 기록하고 dispatch id를
 stdout 첫 줄에 찍은 뒤 `codex exec … < /dev/null`을 그대로 실행한다. outcome은 기록하지
 않는다 — 수용 판단은 main(직접 CLI) 또는 scribe(추론)의 몫.
+
+CLI 하위 명령인 이유: 플러그인은 `bin/`만 PATH에 올리고 `${CLAUDE_PLUGIN_ROOT}`는 평범한
+Bash 호출에서 비어 있다. `scripts/`에 두면 소비 프로젝트마다 캐시 절대경로를 박은 shim이
+하나씩 생긴다(실측). `scripts/dispatch.sh`는 그 shim들을 위한 호환 forwarder로만 남는다.
+
+이 표면만 무음 no-op 규칙의 예외다: `.hippo/`가 없으면 경고를 내고 **발사는 그대로 한다**.
+본업이 codex 실행인데 기록을 못 한다고 발사를 삼키면 래퍼가 아니라 함정이 된다. 남은 인자는
+`--` 이후까지 포함해 해석하지 않고 통째로 넘긴다 — 그것은 codex의 문법이지 이 CLI의 것이 아니다.
 
 ### 3.7 Skills (3개)
 

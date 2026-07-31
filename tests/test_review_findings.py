@@ -846,7 +846,8 @@ def test_m8_dispatch_flag_without_value_prints_usage(tmp_project):
         timeout=30,
     )
     assert proc.returncode == 2, proc
-    assert "Usage:" in proc.stderr
+    assert "usage: hippo dispatch" in proc.stderr
+    assert proc.stdout == ""
     assert "unbound variable" not in proc.stderr
 
 

@@ -660,6 +660,91 @@ def save_cursors(hp, cursors):
     os.replace(tmp, p)
 
 
+DISPATCH_USAGE = (
+    "usage: hippo dispatch --kind <kind> --scope <scope> [--task <task-id>] "
+    "[--] <codex exec args...>\n"
+    "       -- 이후 인자는 wrapper flag와 같은 형태여도 모두 codex exec로 전달됩니다"
+)
+
+
+def split_dispatch_argv(argv):
+    """dispatch 자기 flag만 떼고 나머지는 codex exec로 통째 넘긴다.
+
+    argparse를 쓰지 않는 이유: 남은 인자는 codex의 문법(-m, -c k=v, -C dir …)이라
+    이 파서가 해석하려 들면 안 된다. `--` 이후는 wrapper flag와 같은 형태여도 전부 통과."""
+    kind = scope = task = ""
+    rest = []
+    i, n = 0, len(argv)
+    while i < n:
+        a = argv[i]
+        if a == "--":
+            rest.extend(argv[i + 1 :])
+            break
+        for name, key in (("--kind", "kind"), ("--scope", "scope"), ("--task", "task")):
+            if a == name:
+                if i + 1 >= n:
+                    die(f"dispatch: {name} 에 값이 없습니다\n{DISPATCH_USAGE}", 2)
+                val, i = argv[i + 1], i + 2
+                break
+            if a.startswith(name + "="):
+                val, i = a[len(name) + 1 :], i + 1
+                break
+        else:
+            rest.append(a)
+            i += 1
+            continue
+        if key == "kind":
+            kind = val
+        elif key == "scope":
+            scope = val
+        else:
+            task = val
+    if not kind or not scope:
+        die(DISPATCH_USAGE, 2)
+    return kind, scope, task, rest
+
+
+def exec_label(rest):
+    """codex로 갈 인자에서 model/effort를 읽는다(소비하지 않는다) — 자기 argv에서
+    이미 아는 지점이 곧 자동 수집 지점이다(원칙 6)."""
+    model = effort = ""
+    for i, a in enumerate(rest):
+        nxt = rest[i + 1] if i + 1 < len(rest) else ""
+        if a in ("-m", "--model"):
+            model = nxt
+        elif a == "-c" and nxt.startswith("model_reasoning_effort="):
+            effort = nxt[len("model_reasoning_effort=") :].strip('"')
+    return f"codex/{model or 'unset'}/{effort or 'unset'}"
+
+
+def run_dispatch(argv):
+    """DESIGN §3.6. 기록에 실패해도 발사는 막지 않는다 — 이 표면의 본업은 codex 실행이고
+    ledger는 부수 효과다. 다만 기록이 없어진 사실은 반드시 소리를 낸다."""
+    kind, scope, task, rest = split_dispatch_argv(argv)
+    did = "d" + os.urandom(16).hex()
+    hp = find_hippo()
+    if hp is None:
+        print("dispatch: .hippo/ 없음 — dispatch 기록을 생략합니다", file=sys.stderr)
+    else:
+        e = {"ev": "dispatch", "id": did, "kind": kind, "exec": exec_label(rest), "scope": scope}
+        if task:
+            e["task"] = task
+        bad = validate_event(e)
+        if bad:
+            print(f"dispatch: 기록 실패 ({bad}) — 위임은 계속 진행합니다", file=sys.stderr)
+        else:
+            # 원장 줄은 stderr로: stdout 첫 줄은 dispatch id의 자리다(§3.6).
+            print(json.dumps(append_event(hp, e, src="wrapper"), ensure_ascii=False), file=sys.stderr)
+    print(f"dispatch:{did}", flush=True)
+    # stdin을 닫고 넘긴다 — 열린 채로 두면 codex exec가 입력을 기다리며 멈춘다.
+    with open(os.devnull) as devnull:
+        os.dup2(devnull.fileno(), 0)
+    try:
+        os.execvp("codex", ["codex", "exec", *rest])
+    except OSError as err:
+        die(f"dispatch: codex 실행 실패: {err}", 127)
+
+
 def cmd_scribe(args):
     hp = args.hp
     lock = (hp / "scribe.lock").open("w")
@@ -875,6 +960,15 @@ def build_parser():
     a.add_argument("--days", type=int, default=14)
     a.set_defaults(fn=cmd_distill)
 
+    # dispatch는 main()이 argparse 앞에서 가로챈다 (남은 인자가 codex의 문법이라
+    # 이 파서가 해석하면 안 된다). 여기 등록은 목록·--help 노출 전용이다.
+    sub.add_parser(
+        "dispatch",
+        help="codex exec 발사 + ev:dispatch 자동 기록",
+        usage=DISPATCH_USAGE.splitlines()[0].removeprefix("usage: "),
+        description=DISPATCH_USAGE,
+    )
+
     a = sub.add_parser("scribe", help="Stop 훅이 detached로 부르는 내부 표면")
     a.add_argument("--transcript", required=True)
     a.add_argument("--session", required=True)
@@ -932,6 +1026,14 @@ def parse_args_quietly(parser, argv):
 
 def main():
     global ACTIVE_PARSER
+    argv = sys.argv[1:]
+    # dispatch는 .hippo/ 없는 곳에서도 무음 종료하지 않는다: 이 표면의 본업은 codex
+    # 발사이고, 기록을 못 한다고 발사를 삼키면 래퍼가 아니라 함정이 된다.
+    if argv and argv[0] == "dispatch":
+        head = argv[1 : argv.index("--")] if "--" in argv else argv[1:]
+        if not ({"-h", "--help"} & set(head)):
+            run_dispatch(argv[1:])
+            return
     parser = build_parser()
     args = parse_args_quietly(parser, insert_default_sub(sys.argv[1:]))
     ACTIVE_PARSER = getattr(args, "_parser", parser)
