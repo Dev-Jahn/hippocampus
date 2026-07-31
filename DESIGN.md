@@ -2,7 +2,7 @@
 
 > 2026-07-31. 한 달간의 research-cc dogfooding 전수 감사(37세션·위임 806건·479MB)와
 > Opus 5 prompting guide, `/doctor` skill 분석에서 도출된 재정립.
-> 이전 세대(0.x round/review/delegate/brief 기계)는 git 이력(dev 브랜치)으로 은퇴했다.
+> 이전 세대(0.x round/review/delegate/brief 기계)는 `legacy` 브랜치로 은퇴했다.
 
 ## 0. 한 문장
 
@@ -14,7 +14,7 @@
 
 1. **간결성** — 규율의 진짜 비용은 규율을 지키는 비용이 아니라 규율에 대해 *생각하는*
    비용이다. agent의 attention이 도구로 새면 프로젝트가 느려진다.
-   (실측: waystone CLI 1,081회 호출 중 7.9% 오류 응답·문법 재시도 루프,
+   (실측: 이전 세대 CLI 1,081회 호출 중 7.9% 오류 응답·문법 재시도 루프,
    boundary 훅 259회 실행 전량 무출력, 8–14KB 계약문 재주입.)
 2. **투명성** — 내부가 아무리 복잡해도 표면에 새어나오지 않는다. 표면 노출의 유일한
    기준: *"이 정보를 알면 agent의 다음 행동이 달라지는가?"* 아니면 침묵.
@@ -278,6 +278,4 @@ digest_lite 기본. 20개 내외. `uv run pytest`.
 - 감사 다이제스트 로직(digest.py, 479MB 실증) → `scripts/digest_lite.py`
 - task registry 개념(플러그인 off 후에도 1,081회 자발 사용 = revealed preference) → 얇은 재작성
 - fleet-dispatch skill 본문 → `skills/dispatch` 개정판
-- 나머지 0.x 기계 전부 → git 이력(dev)으로 은퇴. 감사 보고서: `~/workspace/b200-2-research-cc-audit/`
-- 이름 이력: jahns-workflow → waystone → ws(plugin name) → **hippo** (2026-07-31
-  hippocampus rebrand — 해마: agent의 기억 기관이라는 정체성에 맞춤). 문법·계약 무변.
+- 나머지 0.x 기계 전부 → `legacy` 브랜치로 은퇴. 감사 보고서: `~/workspace/b200-2-research-cc-audit/`
