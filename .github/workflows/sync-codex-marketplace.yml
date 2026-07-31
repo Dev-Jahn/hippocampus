@@ -1,0 +1,72 @@
+name: Sync Codex marketplace pin
+
+# main이 움직이면 Dev-Jahn/jahns-codex-marketplace의 marketplace.json에 이 repo의 main sha와
+# .codex-plugin/plugin.json의 version/description을 반영한다 (Claude 쪽 sync-marketplace.yml의
+# codex 짝). 두 매니페스트의 version은 CI가 동일함을 강제한다.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-codex-marketplace
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (read plugin version)
+        uses: actions/checkout@v5
+
+      - name: Read plugin version + description
+        id: meta
+        run: |
+          echo "version=$(jq -r .version .codex-plugin/plugin.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "description<<JWEOF"
+            jq -r .description .codex-plugin/plugin.json
+            echo "JWEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Configure deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.CODEX_MARKETPLACE_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_KEY"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pin sha + version + description in the Codex marketplace
+        env:
+          NEW_SHA: ${{ github.sha }}
+          NEW_VERSION: ${{ steps.meta.outputs.version }}
+          NEW_DESC: ${{ steps.meta.outputs.description }}
+        run: |
+          set -euo pipefail
+          git clone git@github.com:Dev-Jahn/jahns-codex-marketplace.git mp
+          cd mp
+          f=.agents/plugins/marketplace.json
+          # 대상 entry가 없으면 무음 성공(diff 없음)으로 죽는다 — 크게 실패시킨다.
+          jq -e '.plugins[] | select(.name=="hippo")' "$f" > /dev/null \
+            || { echo "codex marketplace.json has no plugin entry named 'hippo' — nothing to pin"; exit 1; }
+          tmp=$(mktemp)
+          jq --indent 2 --arg sha "$NEW_SHA" --arg ver "$NEW_VERSION" --arg desc "$NEW_DESC" \
+            '(.plugins[] | select(.name=="hippo")) |= (.source.sha = $sha | .version = $ver | .description = $desc)' \
+            "$f" > "$tmp"
+          mv "$tmp" "$f"
+          if git diff --quiet -- "$f"; then
+            echo "codex marketplace already in sync at ${NEW_SHA} @ v${NEW_VERSION} — nothing to do."
+            exit 0
+          fi
+          git config user.name "hippo-ci"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- "$f"
+          git commit -qm "chore(hippo): sync v${NEW_VERSION} @ ${NEW_SHA:0:7} (auto-sync from main)"
+          git push origin HEAD:main
+          echo "codex marketplace updated → v${NEW_VERSION} @ ${NEW_SHA:0:7}"

@@ -107,11 +107,14 @@ case "$BACKEND" in
     if ! command -v codex >/dev/null 2>&1; then
       exit 3
     fi
+    # --disable hooks: clerk가 띄우는 codex 세션의 Stop 훅이 또 clerk를 낳지 않게.
+    # HIPPO_CLERK 가드와 이중 방어다 (env가 벗겨져도 재귀가 안 난다).
     with_timeout "$TIMEOUT" codex exec \
       -m "$MODEL" \
       -c model_reasoning_effort="low" \
       -c service_tier="fast" \
       -s read-only \
+      --disable hooks \
       --skip-git-repo-check \
       --color never \
       "$COMBINED" \
