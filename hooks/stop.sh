@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# waystone Stop hook.
-# Silent no-op unless cwd sits inside a project that has .waystone/.
+# hippo Stop hook.
+# Silent no-op unless cwd sits inside a project that has .hippo/.
 # Launches the scribe detached and returns immediately (<100ms budget).
 set -u
 
 # A clerk runs headless Claude/codex sessions of its own; their hooks must not
 # fire, or this hook would spawn a clerk that spawns a clerk (재귀 금지, §2).
-[ -n "${WAYSTONE_CLERK:-}" ] && exit 0
+[ -n "${HIPPO_CLERK:-}" ] && exit 0
 
 # jq is preferred but not required: python3 is already a hard dependency of the
 # CLI shim, so a missing jq must not turn this hook into a silent death.
@@ -49,12 +49,12 @@ cwd="$(json_get cwd)"
 [ -n "$cwd" ] || exit 0
 [ -d "$cwd" ] || exit 0
 
-# Walk upward from cwd looking for .waystone/, capped at the git root (inclusive)
+# Walk upward from cwd looking for .hippo/, capped at the git root (inclusive)
 # and at $HOME (never adopt a project from above the user's home).
 dir="$cwd"
 found=""
 while :; do
-  if [ -d "$dir/.waystone" ]; then
+  if [ -d "$dir/.hippo" ]; then
     found="$dir"
     break
   fi
@@ -88,7 +88,7 @@ fi
 
 (
   cd "$cwd" || exit 0
-  exec ${detach[@]+"${detach[@]}"} "$root/bin/waystone" scribe \
+  exec ${detach[@]+"${detach[@]}"} "$root/bin/hippo" scribe \
     --transcript "$transcript" --session "$session" \
     </dev/null >/dev/null 2>&1
 ) &

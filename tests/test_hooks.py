@@ -2,7 +2,7 @@
 
 DESIGN.md §3.4: both hooks parse the Claude Code hook JSON off stdin
 (`transcript_path` / `session_id` / `cwd` for Stop; `cwd` for SessionStart)
-and, when `.waystone/` is absent for that `cwd`, must be a complete silent
+and, when `.hippo/` is absent for that `cwd`, must be a complete silent
 no-op: exit 0, 0 bytes on stdout and stderr (the same global rule as every
 other surface).
 
@@ -69,7 +69,7 @@ def test_session_start_hook_emits_capsule_when_initialized(tmp_project, repo_roo
     }
     proc = _run_hook(repo_root / "hooks" / "session_start.sh", payload, cwd=tmp_project)
     assert proc.returncode == 0
-    assert proc.stdout.strip().startswith("[waystone]")
+    assert proc.stdout.strip().startswith("[hippo]")
 
 
 def test_session_start_uses_stdin_cwd_not_process_cwd(tmp_project, repo_root):
@@ -81,7 +81,7 @@ def test_session_start_uses_stdin_cwd_not_process_cwd(tmp_project, repo_root):
 
     repo_root is used as the foreign process cwd: it is guaranteed to differ
     from tmp_project and, having a .git, terminates the upward walk without
-    finding a .waystone of its own. (Note `uninitialized_dir` would NOT work
+    finding a .hippo of its own. (Note `uninitialized_dir` would NOT work
     here — it and `tmp_project` share the same underlying `tmp_path`.)
     """
     payload = {"cwd": str(tmp_project), "hook_event_name": "SessionStart"}
@@ -89,7 +89,7 @@ def test_session_start_uses_stdin_cwd_not_process_cwd(tmp_project, repo_root):
         repo_root / "hooks" / "session_start.sh", payload, cwd=repo_root
     )
     assert proc.returncode == 0
-    assert proc.stdout.strip().startswith("[waystone]"), (
+    assert proc.stdout.strip().startswith("[hippo]"), (
         f"hook must honor the stdin cwd, got stdout={proc.stdout!r}"
     )
 
@@ -104,8 +104,8 @@ def test_stop_hook_returns_immediately_detached(
         "hook_event_name": "Stop",
     }
     env = {
-        "WAYSTONE_CLERK_BACKEND": "mock",
-        "WAYSTONE_MOCK_OUTPUT": str(valid_mock_output),
+        "HIPPO_CLERK_BACKEND": "mock",
+        "HIPPO_MOCK_OUTPUT": str(valid_mock_output),
     }
     start = time.monotonic()
     proc = _run_hook(

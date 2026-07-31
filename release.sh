@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# waystone 릴리스: 현재 HEAD(개발 브랜치 rebirth)의 ship allowlist만 main으로 투영한다.
+# hippo 릴리스: 현재 HEAD(개발 브랜치 rebirth)의 ship allowlist만 main으로 투영한다.
 # main push → .github/workflows/sync-marketplace.yml 이 marketplace pin(sha·version·
 # description)을 자동 갱신한다. main은 사실상 dist 브랜치다 — 직접 커밋 금지.
 set -euo pipefail

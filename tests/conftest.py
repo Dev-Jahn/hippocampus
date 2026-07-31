@@ -1,12 +1,12 @@
-"""Shared fixtures for the waystone 1.0 contract test suite.
+"""Shared fixtures for the hippo 1.0 contract test suite.
 
 Everything here treats DESIGN.md as the sole source of truth for interface
 shape. Where DESIGN.md leaves a detail unspecified (e.g. the exact typed-flag
-names for `waystone log <ev>`, or task JSON key names), the fixtures/tests pick
+names for `hippo log <ev>`, or task JSON key names), the fixtures/tests pick
 the simplest interpretation consistent with the ledger schema (§3.2) and note
 it in the test that relies on it.
 
-Implementation (bin/waystone, hooks/*, scripts/*) may not exist yet while this
+Implementation (bin/hippo, hooks/*, scripts/*) may not exist yet while this
 suite is authored in parallel — tests are expected to fail at *run* time in
 that case, not at *collection* time. Nothing here imports application code at
 module scope.
@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-WAYSTONE_BIN = REPO_ROOT / "bin" / "waystone"
+HIPPO_BIN = REPO_ROOT / "bin" / "hippo"
 HOOKS_DIR = REPO_ROOT / "hooks"
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 
@@ -40,8 +40,8 @@ def repo_root() -> Path:
 # --------------------------------------------------------------------------
 
 @pytest.fixture
-def run_waystone():
-    """Return a callable that invokes bin/waystone as a subprocess.
+def run_hippo():
+    """Return a callable that invokes bin/hippo as a subprocess.
 
     run(args, cwd, env=None, input_text=None, timeout=30) -> CompletedProcess
     """
@@ -51,7 +51,7 @@ def run_waystone():
         if env:
             full_env.update(env)
         return subprocess.run(
-            [str(WAYSTONE_BIN), *args],
+            [str(HIPPO_BIN), *args],
             cwd=str(cwd),
             env=full_env,
             input=input_text,
@@ -69,7 +69,7 @@ def run_waystone():
 
 @pytest.fixture
 def uninitialized_dir(tmp_path_factory) -> Path:
-    """A fresh directory with no .waystone/ — the global silent-no-op case.
+    """A fresh directory with no .hippo/ — the global silent-no-op case.
 
     Deliberately NOT derived from `tmp_path`: `tmp_project` is, so sharing it
     would make any test requesting both fixtures silently compare a directory
@@ -79,13 +79,13 @@ def uninitialized_dir(tmp_path_factory) -> Path:
 
 
 @pytest.fixture
-def tmp_project(tmp_path, run_waystone) -> Path:
-    """A directory initialized via `waystone init`."""
-    proc = run_waystone(["init"], cwd=tmp_path)
+def tmp_project(tmp_path, run_hippo) -> Path:
+    """A directory initialized via `hippo init`."""
+    proc = run_hippo(["init"], cwd=tmp_path)
     assert proc.returncode == 0, (
-        f"waystone init failed (stdout={proc.stdout!r} stderr={proc.stderr!r})"
+        f"hippo init failed (stdout={proc.stdout!r} stderr={proc.stderr!r})"
     )
-    assert (tmp_path / ".waystone").is_dir(), "waystone init must create .waystone/"
+    assert (tmp_path / ".hippo").is_dir(), "hippo init must create .hippo/"
     return tmp_path
 
 
@@ -95,7 +95,7 @@ def tmp_project(tmp_path, run_waystone) -> Path:
 # --------------------------------------------------------------------------
 
 def ledger_path(project_dir) -> Path:
-    return Path(project_dir) / ".waystone" / "ledger.jsonl"
+    return Path(project_dir) / ".hippo" / "ledger.jsonl"
 
 
 def read_ledger(project_dir) -> list[dict]:
@@ -107,15 +107,15 @@ def read_ledger(project_dir) -> list[dict]:
 
 
 def worklog_path(project_dir) -> Path:
-    return Path(project_dir) / ".waystone" / "worklog.md"
+    return Path(project_dir) / ".hippo" / "worklog.md"
 
 
 def failures_dir_path(project_dir) -> Path:
-    return Path(project_dir) / ".waystone" / "failures"
+    return Path(project_dir) / ".hippo" / "failures"
 
 
 def cursors_path(project_dir) -> Path:
-    return Path(project_dir) / ".waystone" / "cursors.json"
+    return Path(project_dir) / ".hippo" / "cursors.json"
 
 
 # --------------------------------------------------------------------------
@@ -183,12 +183,12 @@ def fake_transcript(tmp_project) -> Path:
 
 @pytest.fixture
 def fake_transcript_path(tmp_path) -> Path:
-    """Fake transcript standalone (no .waystone/ needed — for digest_lite tests)."""
+    """Fake transcript standalone (no .hippo/ needed — for digest_lite tests)."""
     return _write_transcript(tmp_path)
 
 
 # --------------------------------------------------------------------------
-# Mock clerk output files (WAYSTONE_MOCK_OUTPUT target)
+# Mock clerk output files (HIPPO_MOCK_OUTPUT target)
 # --------------------------------------------------------------------------
 
 @pytest.fixture

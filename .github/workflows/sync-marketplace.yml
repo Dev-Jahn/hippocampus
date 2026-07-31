@@ -51,20 +51,20 @@ jobs:
           cd mp
           f=.claude-plugin/marketplace.json
           # 대상 entry가 없으면 무음 성공(diff 없음 → "already in sync")으로 죽는다 — 크게 실패시킨다.
-          jq -e '.plugins[] | select(.name=="ws")' "$f" > /dev/null \
-            || { echo "marketplace.json has no plugin entry named 'ws' — nothing to pin"; exit 1; }
+          jq -e '.plugins[] | select(.name=="hippo")' "$f" > /dev/null \
+            || { echo "marketplace.json has no plugin entry named 'hippo' — nothing to pin"; exit 1; }
           tmp=$(mktemp)
           jq --indent 2 --arg sha "$NEW_SHA" --arg ver "$NEW_VERSION" --arg desc "$NEW_DESC" \
-            '(.plugins[] | select(.name=="ws")) |= (.source.sha = $sha | .version = $ver | .description = $desc)' \
+            '(.plugins[] | select(.name=="hippo")) |= (.source.sha = $sha | .version = $ver | .description = $desc)' \
             "$f" > "$tmp"
           mv "$tmp" "$f"
           if git diff --quiet -- "$f"; then
             echo "marketplace already in sync at ${NEW_SHA} @ v${NEW_VERSION} — nothing to do."
             exit 0
           fi
-          git config user.name "waystone-ci"
+          git config user.name "hippo-ci"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- "$f"
-          git commit -qm "chore(ws): sync v${NEW_VERSION} @ ${NEW_SHA:0:7} (auto-sync from main)"
+          git commit -qm "chore(hippo): sync v${NEW_VERSION} @ ${NEW_SHA:0:7} (auto-sync from main)"
           git push origin HEAD:main
           echo "marketplace updated → v${NEW_VERSION} @ ${NEW_SHA:0:7}"

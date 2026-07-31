@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# waystone shim — 자기 위치에서 repo root를 풀고 cli/waystone_cli.py를 실행한다.
+# hippo shim — 자기 위치에서 repo root를 풀고 cli/hippo_cli.py를 실행한다.
 set -euo pipefail
 
 src="${BASH_SOURCE[0]}"
@@ -9,13 +9,13 @@ while [ -L "$src" ]; do
   [[ "$src" != /* ]] && src="$dir/$src"
 done
 root="$(cd -P "$(dirname "$src")/.." && pwd)"
-cli="$root/cli/waystone_cli.py"
+cli="$root/cli/hippo_cli.py"
 
 if command -v uv >/dev/null 2>&1; then
   exec uv run --quiet --script "$cli" "$@"
 elif command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
   exec python3 "$cli" "$@"
 else
-  echo "waystone: uv가 필요합니다 (또는 pyyaml이 설치된 python3). 설치: https://docs.astral.sh/uv/" >&2
+  echo "hippo: uv가 필요합니다 (또는 pyyaml이 설치된 python3). 설치: https://docs.astral.sh/uv/" >&2
   exit 1
 fi

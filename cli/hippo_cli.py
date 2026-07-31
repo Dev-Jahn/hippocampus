@@ -2,7 +2,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["pyyaml"]
 # ///
-"""waystone CLI — ledger·task·directive 기록과 clerk 파이프라인 (DESIGN.md §3.2·3.3·3.5)."""
+"""hippo CLI — ledger·task·directive 기록과 clerk 파이프라인 (DESIGN.md §3.2·3.3·3.5)."""
 
 import argparse
 import contextlib
@@ -131,16 +131,16 @@ def die(msg, code=1):
     sys.exit(code)
 
 
-def find_ws():
-    """cwd에서 위로 .waystone/ 탐색 (git root와 $HOME이 상한)."""
+def find_hippo():
+    """cwd에서 위로 .hippo/ 탐색 (git root와 $HOME이 상한)."""
     d = Path.cwd().resolve()
     try:
         home = Path.home().resolve()
     except (RuntimeError, OSError):
         home = None
     for p in [d, *d.parents]:
-        if (p / ".waystone").is_dir():
-            return p / ".waystone"
+        if (p / ".hippo").is_dir():
+            return p / ".hippo"
         if (p / ".git").exists():
             break
         if p == home:  # 홈 위로는 올라가지 않는다 — 남의 프로젝트를 주울 수 있다
@@ -149,26 +149,26 @@ def find_ws():
 
 
 def resolve_src(src=None):
-    """src ∈ scribe|cli|wrapper (DESIGN §3.2). scripts/dispatch.sh만 WAYSTONE_SRC로
+    """src ∈ scribe|cli|wrapper (DESIGN §3.2). scripts/dispatch.sh만 HIPPO_SRC로
     자신을 wrapper라 선언한다 — 그 값도 whitelist 밖이면 조용히 넘기지 않고 죽는다."""
-    v = src or os.environ.get("WAYSTONE_SRC") or "cli"
+    v = src or os.environ.get("HIPPO_SRC") or "cli"
     if v not in SRC_VALUES:
-        die(f"src는 {'|'.join(SRC_VALUES)} 중 하나여야 합니다: {v!r} (WAYSTONE_SRC 확인)")
+        die(f"src는 {'|'.join(SRC_VALUES)} 중 하나여야 합니다: {v!r} (HIPPO_SRC 확인)")
     return v
 
 
-def append_event(ws, e, src=None):
+def append_event(hp, e, src=None):
     # t/src는 기록기가 무조건 스탬프한다: 호출자가 실어 보낸 값은 여기서 버려지고
     # (validate_event는 애초에 거부한다) 검증된 값으로 대체된다.
     body = {k: v for k, v in e.items() if k not in WRITER_ONLY}
     rec = {"t": now_iso(), **body, "src": resolve_src(src)}
-    with (ws / "ledger.jsonl").open("a", encoding="utf-8") as f:
+    with (hp / "ledger.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     return rec
 
 
-def read_ledger(ws):
-    p = ws / "ledger.jsonl"
+def read_ledger(hp):
+    p = hp / "ledger.jsonl"
     if not p.exists():
         return []
     out = []
@@ -181,10 +181,10 @@ def read_ledger(ws):
     return out
 
 
-def directives(ws):
+def directives(hp):
     """id → 현재 상태 (같은 id의 마지막 이벤트가 진실 — 파생 파일 없음)."""
     cur = {}
-    for e in read_ledger(ws):
+    for e in read_ledger(hp):
         if e.get("ev") != "directive" or not e.get("id"):
             continue
         d = cur.setdefault(e["id"], {"id": e["id"]})
@@ -192,8 +192,8 @@ def directives(ws):
     return cur
 
 
-def tasks_load(ws):
-    p = ws / "tasks.yaml"
+def tasks_load(hp):
+    p = hp / "tasks.yaml"
     data = yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else None
     data = data or {}
     if not isinstance(data, dict) or not isinstance(data.get("tasks", []), list):
@@ -202,8 +202,8 @@ def tasks_load(ws):
     return data
 
 
-def tasks_save(ws, data):
-    p = ws / "tasks.yaml"
+def tasks_save(hp, data):
+    p = hp / "tasks.yaml"
     tmp = p.with_suffix(".yaml.tmp")
     tmp.write_text(
         yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=100),
@@ -219,23 +219,23 @@ def find_task(data, tid):
     return None
 
 
-def config(ws):
-    p = ws / "config.yaml"
+def config(hp):
+    p = hp / "config.yaml"
     if not p.exists():
         return {}
     return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
 
 
-def clerk_env(ws, timeout):
+def clerk_env(hp, timeout):
     env = dict(os.environ)
-    env["WAYSTONE_CLERK_TIMEOUT"] = str(timeout)
-    backend = (config(ws).get("clerk") or {}).get("backend")
-    if backend:  # config.yaml > $WAYSTONE_CLERK_BACKEND (DESIGN §3.5.4)
-        env["WAYSTONE_CLERK_BACKEND"] = str(backend)
+    env["HIPPO_CLERK_TIMEOUT"] = str(timeout)
+    backend = (config(hp).get("clerk") or {}).get("backend")
+    if backend:  # config.yaml > $HIPPO_CLERK_BACKEND (DESIGN §3.5.4)
+        env["HIPPO_CLERK_BACKEND"] = str(backend)
     return env
 
 
-def run_clerk(ws, prompt_path, input_text, timeout):
+def run_clerk(hp, prompt_path, input_text, timeout):
     """clerk_run.sh 호출 → (stdout, stderr, rc, ms, tokens).
     인프라 부재·실패는 예외 없이 오류로 종료. tokens는 문자수/4 추정치(m2)."""
     script = SCRIPTS / "clerk_run.sh"
@@ -244,9 +244,9 @@ def run_clerk(ws, prompt_path, input_text, timeout):
     if not prompt_path.exists():
         die(f"clerk 프롬프트가 없습니다: {prompt_path}")
     prompt_text = prompt_path.read_text(encoding="utf-8")
-    # 스크래치 파일은 .waystone/ 밖(시스템 임시 디렉터리)에 둔다 — .waystone/의
+    # 스크래치 파일은 .hippo/ 밖(시스템 임시 디렉터리)에 둔다 — .hippo/의
     # 내용물은 §3.1에 문서화된 것만이어야 한다.
-    fd, tmp_name = tempfile.mkstemp(prefix="waystone-clerk-", suffix=".txt")
+    fd, tmp_name = tempfile.mkstemp(prefix="hippo-clerk-", suffix=".txt")
     tmp = Path(tmp_name)
     os.close(fd)
     tmp.write_text(input_text, encoding="utf-8")
@@ -257,7 +257,7 @@ def run_clerk(ws, prompt_path, input_text, timeout):
             capture_output=True,
             text=True,
             timeout=timeout + REAP_GRACE,
-            env=clerk_env(ws, timeout),
+            env=clerk_env(hp, timeout),
         )
         out, err, rc = r.stdout, r.stderr, r.returncode
     except subprocess.TimeoutExpired:
@@ -268,8 +268,8 @@ def run_clerk(ws, prompt_path, input_text, timeout):
     return out, err, rc, int((time.monotonic() - t0) * 1000), tokens
 
 
-def dump_failure(ws, kind, text):
-    d = ws / "failures"
+def dump_failure(hp, kind, text):
+    d = hp / "failures"
     d.mkdir(exist_ok=True)
     # 초 단위 타임스탬프만으로는 같은 초에 난 두 실패가 서로를 덮어쓴다.
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -296,25 +296,25 @@ def extract_json(text):
 
 
 def cmd_init(_args):
-    ws = Path.cwd() / ".waystone"
-    if ws.is_dir():
-        print(f"이미 있습니다: {ws}")
+    hp = Path.cwd() / ".hippo"
+    if hp.is_dir():
+        print(f"이미 있습니다: {hp}")
         return
-    ws.mkdir(parents=True)
-    (ws / "failures").mkdir()
-    (ws / "ledger.jsonl").touch()
-    tasks_save(ws, {"tasks": []})
-    print(f"생성: {ws}")
+    hp.mkdir(parents=True)
+    (hp / "failures").mkdir()
+    (hp / "ledger.jsonl").touch()
+    tasks_save(hp, {"tasks": []})
+    print(f"생성: {hp}")
 
 
-def status_lines(ws):
+def status_lines(hp):
     """DESIGN §6 상주 표면 (≤6줄)."""
-    data = tasks_load(ws)
+    data = tasks_load(hp)
     n_open = sum(1 for t in data["tasks"] if t.get("status") in OPEN_STATUSES)
-    live = [d for d in directives(ws).values() if d.get("state") == "active"]
+    live = [d for d in directives(hp).values() if d.get("state") == "active"]
 
     def stamp(name):
-        p = ws / name
+        p = hp / name
         return (
             datetime.fromtimestamp(p.stat().st_mtime).strftime("%m-%d")
             if p.exists()
@@ -323,7 +323,7 @@ def status_lines(ws):
 
     lines = [
         (
-            f"[waystone] tasks {n_open} open · directives {len(live)} live "
+            f"[hippo] tasks {n_open} open · directives {len(live)} live "
             f"· priors {stamp('PRIORS.md')} · worklog {stamp('worklog.md')}"
         )
     ]
@@ -332,7 +332,7 @@ def status_lines(ws):
         lines.append(f"· live({d.get('scope', '?')}): {one_line(d.get('text', ''), 80)}")
     if len(live) > 4:
         lines.append(f"· (+{len(live) - 3} more live directives)")
-    p = ws / "worklog.md"
+    p = hp / "worklog.md"
     if p.exists():
         # 마지막 날짜 섹션 안에서, scribe가 쓴 "- HH:MM …" 항목만 본다.
         # (중첩 불릿이나 사람이 쓴 자유 불릿을 last로 오픽업하지 않는다.)
@@ -346,12 +346,12 @@ def status_lines(ws):
 
 
 def cmd_status(args):
-    ws = args.ws
-    print("\n".join(status_lines(ws)))
+    hp = args.hp
+    print("\n".join(status_lines(hp)))
     if args.inject:
         return
     open_tasks = [
-        t for t in tasks_load(ws)["tasks"] if t.get("status") in OPEN_STATUSES
+        t for t in tasks_load(hp)["tasks"] if t.get("status") in OPEN_STATUSES
     ]
     if open_tasks:
         print("\ntasks:")
@@ -360,7 +360,7 @@ def cmd_status(args):
 
 
 def cmd_task_add(args):
-    data = tasks_load(args.ws)
+    data = tasks_load(args.hp)
     if find_task(data, args.id):
         die(f"이미 있는 task id: {args.id}")
     t = {
@@ -376,12 +376,12 @@ def cmd_task_add(args):
     if t["status"] not in TASK_STATUSES:
         die(f"status는 {'|'.join(TASK_STATUSES)} 중 하나여야 합니다: {t['status']}")
     data["tasks"].append(t)
-    tasks_save(args.ws, data)
+    tasks_save(args.hp, data)
     print(f"added {args.id}")
 
 
 def cmd_task_set(args):
-    data = tasks_load(args.ws)
+    data = tasks_load(args.hp)
     t = find_task(data, args.id)
     if not t:
         die(f"없는 task id: {args.id}")
@@ -397,12 +397,12 @@ def cmd_task_set(args):
     else:
         t[field] = value
     t["updated"] = now_iso()
-    tasks_save(args.ws, data)
+    tasks_save(args.hp, data)
     print(f"{args.id}.{field} = {value}")
 
 
 def cmd_task_done(args):
-    data = tasks_load(args.ws)
+    data = tasks_load(args.hp)
     t = find_task(data, args.id)
     if not t:
         die(f"없는 task id: {args.id}")
@@ -413,23 +413,23 @@ def cmd_task_done(args):
             t["notes"] = [t["notes"]]
         t["notes"].append(args.note)
     t["updated"] = now_iso()
-    tasks_save(args.ws, data)
+    tasks_save(args.hp, data)
     print(f"done {args.id}")
 
 
 def cmd_task_drop(args):
-    data = tasks_load(args.ws)
+    data = tasks_load(args.hp)
     t = find_task(data, args.id)
     if not t:
         die(f"없는 task id: {args.id}")
     t["status"] = "dropped"
     t["updated"] = now_iso()
-    tasks_save(args.ws, data)
+    tasks_save(args.hp, data)
     print(f"dropped {args.id}")
 
 
 def cmd_task_list(args):
-    tasks = tasks_load(args.ws)["tasks"]
+    tasks = tasks_load(args.hp)["tasks"]
     if not args.all:
         want = (
             [s.strip() for s in args.status.split(",") if s.strip()]
@@ -448,7 +448,7 @@ def cmd_task_list(args):
 
 
 def cmd_task_show(args):
-    t = find_task(tasks_load(args.ws), args.id)
+    t = find_task(tasks_load(args.hp), args.id)
     if not t:
         die(f"없는 task id: {args.id}")
     if args.json:
@@ -457,11 +457,11 @@ def cmd_task_show(args):
     print(yaml.safe_dump(t, allow_unicode=True, sort_keys=False).rstrip())
 
 
-def log_and_print(ws, e):
+def log_and_print(hp, e):
     err = validate_event(e)
     if err:
         die(f"검증 실패: {err}")
-    rec = append_event(ws, e)
+    rec = append_event(hp, e)
     print(json.dumps(rec, ensure_ascii=False))
 
 
@@ -494,7 +494,7 @@ def cmd_log(args):
             e["text"] = args.text
         if args.scope:
             e["scope"] = args.scope
-    log_and_print(args.ws, e)
+    log_and_print(args.hp, e)
 
 
 def cmd_log_raw(args):
@@ -502,18 +502,18 @@ def cmd_log_raw(args):
         e = json.loads(args.json)
     except json.JSONDecodeError as ex:
         die(f"JSON 파싱 실패: {ex}")
-    log_and_print(args.ws, e)
+    log_and_print(args.hp, e)
 
 
 def cmd_directive_retract(args):
-    d = directives(args.ws).get(args.id)
+    d = directives(args.hp).get(args.id)
     if not d:
         die(f"없는 directive id: {args.id}")
-    log_and_print(args.ws, {"ev": "directive", "id": args.id, "state": "retracted"})
+    log_and_print(args.hp, {"ev": "directive", "id": args.id, "state": "retracted"})
 
 
 def cmd_directive_list(args):
-    ds = list(directives(args.ws).values())
+    ds = list(directives(args.hp).values())
     if args.active:
         ds = [d for d in ds if d.get("state") == "active"]
     if args.json:
@@ -528,7 +528,7 @@ def cmd_directive_list(args):
 def cmd_log_tail(args):
     # 주의: `log` 서브파서의 dest가 ev라서 args.ev == "tail"이다 — 필터 플래그
     # `--ev`는 dest=ev_filter로 비켜서 받는다 (표면은 구 `ledger tail`과 동일).
-    p = args.ws / "ledger.jsonl"
+    p = args.hp / "ledger.jsonl"
     lines = p.read_text(encoding="utf-8").splitlines() if p.exists() else []
     if args.ev_filter:
         keep = []
@@ -544,19 +544,19 @@ def cmd_log_tail(args):
 
 
 def cmd_prior_show(args):
-    p = args.ws / "PRIORS.md"
+    p = args.hp / "PRIORS.md"
     print(
         p.read_text(encoding="utf-8").rstrip()
         if p.exists()
-        else "아직 없음 — waystone prior distill"
+        else "아직 없음 — hippo prior distill"
     )
 
 
 def cmd_distill(args):
-    ws = args.ws
+    hp = args.hp
     cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
     kept = []
-    for e in read_ledger(ws):
+    for e in read_ledger(hp):
         try:
             t = datetime.strptime(e.get("t", ""), "%Y-%m-%dT%H:%M:%SZ").replace(
                 tzinfo=timezone.utc
@@ -566,8 +566,8 @@ def cmd_distill(args):
         if t >= cutoff:
             kept.append(json.dumps(e, ensure_ascii=False))
     priors = (
-        (ws / "PRIORS.md").read_text(encoding="utf-8")
-        if (ws / "PRIORS.md").exists()
+        (hp / "PRIORS.md").read_text(encoding="utf-8")
+        if (hp / "PRIORS.md").exists()
         else "(없음)"
     )
     payload = (
@@ -578,27 +578,27 @@ def cmd_distill(args):
         + "\n"
     )
     out, err, rc, ms, tokens = run_clerk(
-        ws, CLERKS / "distiller.md", payload, DISTILL_TIMEOUT
+        hp, CLERKS / "distiller.md", payload, DISTILL_TIMEOUT
     )
     meter = {"ev": "clerk", "name": "distiller", "ms": ms, "tokens": tokens}
     if rc != 0 or not out.strip():
         p = dump_failure(
-            ws, "distill", f"rc={rc}\n--- stderr ---\n{err}\n--- stdout ---\n{out}"
+            hp, "distill", f"rc={rc}\n--- stderr ---\n{err}\n--- stdout ---\n{out}"
         )
-        append_event(ws, {**meter, "ok": False})
+        append_event(hp, {**meter, "ok": False})
         die(f"distill 실패 (rc={rc}) — 덤프: {p}")
-    tmp = ws / "PRIORS.md.tmp"
+    tmp = hp / "PRIORS.md.tmp"
     tmp.write_text(out.strip() + "\n", encoding="utf-8")
-    os.replace(tmp, ws / "PRIORS.md")
-    append_event(ws, {**meter, "ok": True})
+    os.replace(tmp, hp / "PRIORS.md")
+    append_event(hp, {**meter, "ok": True})
     print(f"PRIORS.md 재생성 ({len(kept)}건 / {args.days}일, {ms}ms)")
 
 
 # --- scribe (DESIGN §3.5) -----------------------------------------------------
 
 
-def worklog_append(ws, text):
-    p = ws / "worklog.md"
+def worklog_append(hp, text):
+    p = hp / "worklog.md"
     now = datetime.now()
     hdr = f"## {now.strftime('%Y-%m-%d')}"
     entry = f"- {now.strftime('%H:%M')} {text}"
@@ -617,26 +617,26 @@ def worklog_append(ws, text):
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def load_cursors(ws):
+def load_cursors(hp):
     """읽기 실패는 커서 전체를 잃는 것보다 낫다 — 원문을 덤프하고 빈 상태로 시작한다."""
-    p = ws / "cursors.json"
+    p = hp / "cursors.json"
     if not p.exists():
         return {}
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError) as ex:
-        dump_failure(ws, "cursors", f"{type(ex).__name__}: {ex}\n")
+        dump_failure(hp, "cursors", f"{type(ex).__name__}: {ex}\n")
         return {}
     if not isinstance(data, dict):
-        dump_failure(ws, "cursors", f"cursors.json이 객체가 아님: {data!r}\n")
+        dump_failure(hp, "cursors", f"cursors.json이 객체가 아님: {data!r}\n")
         return {}
     return data
 
 
-def save_cursors(ws, cursors):
+def save_cursors(hp, cursors):
     # tmp + os.replace: 중간에 죽어도 반쯤 쓰인 cursors.json이 남지 않는다.
-    # (tmp를 .waystone/ 안에 두는 이유는 os.replace가 같은 파일시스템을 요구하기 때문)
-    p = ws / "cursors.json"
+    # (tmp를 .hippo/ 안에 두는 이유는 os.replace가 같은 파일시스템을 요구하기 때문)
+    p = hp / "cursors.json"
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(
         json.dumps(cursors, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -645,8 +645,8 @@ def save_cursors(ws, cursors):
 
 
 def cmd_scribe(args):
-    ws = args.ws
-    lock = (ws / "scribe.lock").open("w")
+    hp = args.hp
+    lock = (hp / "scribe.lock").open("w")
     deadline = time.monotonic() + LOCK_WAIT
     while True:
         try:
@@ -662,7 +662,7 @@ def cmd_scribe(args):
     transcript = Path(args.transcript)
     if not transcript.exists():
         die(f"transcript가 없습니다: {transcript}")
-    cursors = load_cursors(ws)
+    cursors = load_cursors(hp)
     since = int(cursors.get(args.session, 0))
     end = sum(1 for _ in transcript.open("r", encoding="utf-8", errors="replace"))
 
@@ -694,7 +694,7 @@ def cmd_scribe(args):
 
     def save_cursor():
         cursors[args.session] = end
-        save_cursors(ws, cursors)
+        save_cursors(hp, cursors)
 
     # 3. 결정적 프리필터: 실질 활동이 없으면 모델 호출 자체를 생략
     # (digest 라인 형식: "[123] TOOL Bash: …" / "[124] USER: …")
@@ -703,13 +703,13 @@ def cmd_scribe(args):
         return
 
     out, err, rc, ms, tokens = run_clerk(
-        ws, CLERKS / "turn-scribe.md", digest, SCRIBE_TIMEOUT
+        hp, CLERKS / "turn-scribe.md", digest, SCRIBE_TIMEOUT
     )
     meter = {"ev": "clerk", "name": "turn-scribe", "ms": ms, "tokens": tokens}
 
     def fail(reason):
         p = dump_failure(
-            ws,
+            hp,
             "scribe",
             f"{reason}\nrc={rc}\n--- stderr ---\n{err}\n--- stdout ---\n{out}",
         )
@@ -717,7 +717,7 @@ def cmd_scribe(args):
         # 덤프이고(그것이 곧 기록이다), 커서를 세워두면 같은 입력을 매 턴 다시
         # 모델에 태워 무한히 재과금한다.
         save_cursor()
-        append_event(ws, {**meter, "ok": False}, src="scribe")
+        append_event(hp, {**meter, "ok": False}, src="scribe")
         die(f"scribe 실패: {reason} — 덤프: {p}")
 
     if rc != 0:
@@ -736,11 +736,11 @@ def cmd_scribe(args):
             fail(f"이벤트 검증 실패: {verr}")
 
     for e in events:
-        append_event(ws, e, src="scribe")
+        append_event(hp, e, src="scribe")
     if obj.get("worklog", "").strip():
-        worklog_append(ws, obj["worklog"].strip())
+        worklog_append(hp, obj["worklog"].strip())
     save_cursor()
-    append_event(ws, {**meter, "ok": True}, src="scribe")
+    append_event(hp, {**meter, "ok": True}, src="scribe")
 
 
 # --- argparse -----------------------------------------------------------------
@@ -748,17 +748,17 @@ def cmd_scribe(args):
 
 def build_parser():
     p = argparse.ArgumentParser(
-        prog="waystone",
+        prog="hippo",
         description=(
-            "waystone — 관측·기억 배경 기관. "
-            "기록은 `log <이벤트>` 한 문으로 들어가고, 맨몸 `waystone log`는 "
+            "hippo — 관측·기억 배경 기관. "
+            "기록은 `log <이벤트>` 한 문으로 들어가고, 맨몸 `hippo log`는 "
             "최근 기록 조회, `directive`·`prior`는 원장에서 매번 재계산되는 "
             "파생 뷰다."
         ),
     )
     sub = p.add_subparsers(dest="cmd")
 
-    sub.add_parser("init", help=".waystone/ 생성 (cwd)").set_defaults(fn=cmd_init)
+    sub.add_parser("init", help=".hippo/ 생성 (cwd)").set_defaults(fn=cmd_init)
 
     s = sub.add_parser("status", help="한 덩어리 요약")
     s.add_argument(
@@ -829,7 +829,7 @@ def build_parser():
     a = lsub.add_parser("raw", help="JSON 한 줄을 검증 후 append")
     a.add_argument("json")
     a.set_defaults(fn=cmd_log_raw)
-    a = lsub.add_parser("tail", help="마지막 N행 (맨몸 `waystone log`의 기본)")
+    a = lsub.add_parser("tail", help="마지막 N행 (맨몸 `hippo log`의 기본)")
     a.add_argument("-n", type=int, default=20)
     a.add_argument("--ev", dest="ev_filter", help="ev 타입 필터")
     a.set_defaults(fn=cmd_log_tail)
@@ -886,8 +886,8 @@ def insert_default_sub(argv):
     (task→list, log→tail, directive→list, prior→show).
 
     삽입 조건: argv[0]가 noun이고, 다음 토큰이 없거나 '-'로 시작하되
-    -h/--help가 아닐 때. `waystone task -h`는 noun 자신의 help가 떠야 하고,
-    `waystone log raw '{…}'`처럼 '-'로 시작하지 않는 인자는 건드리지 않는다."""
+    -h/--help가 아닐 때. `hippo task -h`는 noun 자신의 help가 떠야 하고,
+    `hippo log raw '{…}'`처럼 '-'로 시작하지 않는 인자는 건드리지 않는다."""
     if argv and argv[0] in BARE_DEFAULT:
         nxt = argv[1] if len(argv) > 1 else None
         if nxt is None or (nxt.startswith("-") and nxt not in ("-h", "--help")):
@@ -896,7 +896,7 @@ def insert_default_sub(argv):
 
 
 def parse_args_quietly(parser, argv):
-    """.waystone 밖에서는 argparse의 usage+rc2도 새어나오면 안 된다(§3.1 완전 무음).
+    """.hippo 밖에서는 argparse의 usage+rc2도 새어나오면 안 된다(§3.1 완전 무음).
     -h/--help(정상 종료 rc 0)는 어디서든 그대로 출력한다(§3.3)."""
     out, err = io.StringIO(), io.StringIO()
     try:
@@ -904,7 +904,7 @@ def parse_args_quietly(parser, argv):
             args = parser.parse_args(argv)
     except SystemExit as ex:
         code = ex.code if isinstance(ex.code, int) else 1
-        if code != 0 and find_ws() is None:
+        if code != 0 and find_hippo() is None:
             sys.exit(0)
         sys.stdout.write(out.getvalue())
         sys.stderr.write(err.getvalue())
@@ -920,15 +920,15 @@ def main():
     args = parse_args_quietly(parser, insert_default_sub(sys.argv[1:]))
     ACTIVE_PARSER = getattr(args, "_parser", parser)
     if not hasattr(args, "fn"):
-        if find_ws() is None:
-            sys.exit(0)  # .waystone 없는 곳에서는 완전 무음 no-op
+        if find_hippo() is None:
+            sys.exit(0)  # .hippo 없는 곳에서는 완전 무음 no-op
         parser.print_help(sys.stderr)
         sys.exit(2)
     if args.fn is not cmd_init:
-        ws = find_ws()
-        if ws is None:
+        hp = find_hippo()
+        if hp is None:
             sys.exit(0)
-        args.ws = ws
+        args.hp = hp
     args.fn(args)
 
 

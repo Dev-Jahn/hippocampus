@@ -1,14 +1,14 @@
 """Item (2): the 5 ledger event kinds + fail-closed validation.
 
-DESIGN.md §3.2 (schema, verbatim contract) and §3.3 (`waystone log <ev>
-[typed flags...]` / `waystone log raw '<json>'`).
+DESIGN.md §3.2 (schema, verbatim contract) and §3.3 (`hippo log <ev>
+[typed flags...]` / `hippo log raw '<json>'`).
 
 Typed-flag names are not spelled out character-for-character in DESIGN.md
 beyond the schema's field names; these tests assume `--<field> <value>`
 mirrors the schema field name 1:1 (the simplest reading, and the only one
-consistent with `waystone log raw` accepting the same field names literally).
+consistent with `hippo log raw` accepting the same field names literally).
 
-Fail-closed contract (§3.2): "waystone log는 ev별 필수 필드를 fail-closed로
+Fail-closed contract (§3.2): "hippo log는 ev별 필수 필드를 fail-closed로
 검사한다. 미지의 ev는 거부." — nonzero exit, and the ledger file must be
 byte-identical before/after a rejected call (no partial/corrupt append).
 """
@@ -20,11 +20,11 @@ from conftest import ledger_path, read_ledger
 ISO_T_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}T")
 
 
-def _seed_one_valid_line(tmp_project, run_waystone):
+def _seed_one_valid_line(tmp_project, run_hippo):
     """Ensure ledger.jsonl exists and has at least one line, so a
     byte-for-byte before/after comparison around a failing call is possible
     regardless of whether ledger.jsonl is created eagerly at init."""
-    proc = run_waystone(
+    proc = run_hippo(
         [
             "log",
             "dispatch",
@@ -46,9 +46,9 @@ def _seed_one_valid_line(tmp_project, run_waystone):
 # Valid appends for each of the 5 event kinds
 # --------------------------------------------------------------------------
 
-def test_log_dispatch_valid_appends(tmp_project, run_waystone):
+def test_log_dispatch_valid_appends(tmp_project, run_hippo):
     before = read_ledger(tmp_project)
-    proc = run_waystone(
+    proc = run_hippo(
         [
             "log",
             "dispatch",
@@ -76,8 +76,8 @@ def test_log_dispatch_valid_appends(tmp_project, run_waystone):
     assert ISO_T_PREFIX.match(entry["t"]), entry["t"]
 
 
-def test_log_outcome_valid_appends(tmp_project, run_waystone):
-    _seed_dispatch = run_waystone(
+def test_log_outcome_valid_appends(tmp_project, run_hippo):
+    _seed_dispatch = run_hippo(
         [
             "log",
             "dispatch",
@@ -95,7 +95,7 @@ def test_log_outcome_valid_appends(tmp_project, run_waystone):
     assert _seed_dispatch.returncode == 0, _seed_dispatch.stderr
 
     before = read_ledger(tmp_project)
-    proc = run_waystone(
+    proc = run_hippo(
         [
             "log",
             "outcome",
@@ -122,9 +122,9 @@ def test_log_outcome_valid_appends(tmp_project, run_waystone):
     assert entry["result"] == "refuted"
 
 
-def test_log_review_valid_appends(tmp_project, run_waystone):
+def test_log_review_valid_appends(tmp_project, run_hippo):
     before = read_ledger(tmp_project)
-    proc = run_waystone(
+    proc = run_hippo(
         [
             "log",
             "review",
@@ -149,8 +149,8 @@ def test_log_review_valid_appends(tmp_project, run_waystone):
     assert entry["base"] == "abc123f"
 
 
-def test_log_review_status_valid_appends(tmp_project, run_waystone):
-    seed = run_waystone(
+def test_log_review_status_valid_appends(tmp_project, run_hippo):
+    seed = run_hippo(
         [
             "log",
             "review",
@@ -168,7 +168,7 @@ def test_log_review_status_valid_appends(tmp_project, run_waystone):
     assert seed.returncode == 0, seed.stderr
 
     before = read_ledger(tmp_project)
-    proc = run_waystone(
+    proc = run_hippo(
         [
             "log",
             "review-status",
@@ -191,9 +191,9 @@ def test_log_review_status_valid_appends(tmp_project, run_waystone):
     assert entry["addressed"] == "partial"
 
 
-def test_directive_add_valid_appends(tmp_project, run_waystone):
+def test_directive_add_valid_appends(tmp_project, run_hippo):
     before = read_ledger(tmp_project)
-    proc = run_waystone(
+    proc = run_hippo(
         [
             "directive",
             "add",
@@ -224,13 +224,13 @@ def test_directive_add_valid_appends(tmp_project, run_waystone):
 # --------------------------------------------------------------------------
 
 def test_log_dispatch_missing_id_fails_closed_and_ledger_unmodified(
-    tmp_project, run_waystone
+    tmp_project, run_hippo
 ):
-    _seed_one_valid_line(tmp_project, run_waystone)
+    _seed_one_valid_line(tmp_project, run_hippo)
     lp = ledger_path(tmp_project)
     before_bytes = lp.read_bytes()
 
-    proc = run_waystone(
+    proc = run_hippo(
         [
             "log",
             "dispatch",
@@ -249,13 +249,13 @@ def test_log_dispatch_missing_id_fails_closed_and_ledger_unmodified(
 
 
 def test_log_outcome_missing_ref_fails_closed_and_ledger_unmodified(
-    tmp_project, run_waystone
+    tmp_project, run_hippo
 ):
-    _seed_one_valid_line(tmp_project, run_waystone)
+    _seed_one_valid_line(tmp_project, run_hippo)
     lp = ledger_path(tmp_project)
     before_bytes = lp.read_bytes()
 
-    proc = run_waystone(
+    proc = run_hippo(
         ["log", "outcome", "--result", "accepted"],
         cwd=tmp_project,
     )
@@ -265,13 +265,13 @@ def test_log_outcome_missing_ref_fails_closed_and_ledger_unmodified(
 
 
 def test_log_review_missing_base_fails_closed_and_ledger_unmodified(
-    tmp_project, run_waystone
+    tmp_project, run_hippo
 ):
-    _seed_one_valid_line(tmp_project, run_waystone)
+    _seed_one_valid_line(tmp_project, run_hippo)
     lp = ledger_path(tmp_project)
     before_bytes = lp.read_bytes()
 
-    proc = run_waystone(
+    proc = run_hippo(
         ["log", "review", "--id", "r-bad", "--source", "chatgpt-web", "--findings", "1"],
         cwd=tmp_project,
     )
@@ -284,8 +284,8 @@ def test_log_review_missing_base_fails_closed_and_ledger_unmodified(
 # Fail-closed: invalid enum values
 # --------------------------------------------------------------------------
 
-def test_log_outcome_invalid_result_enum_fails_closed(tmp_project, run_waystone):
-    seed = run_waystone(
+def test_log_outcome_invalid_result_enum_fails_closed(tmp_project, run_hippo):
+    seed = run_hippo(
         [
             "log",
             "dispatch",
@@ -305,7 +305,7 @@ def test_log_outcome_invalid_result_enum_fails_closed(tmp_project, run_waystone)
     lp = ledger_path(tmp_project)
     before_bytes = lp.read_bytes()
 
-    proc = run_waystone(
+    proc = run_hippo(
         ["log", "outcome", "--ref", "d-enum", "--result", "maybe-ish"],
         cwd=tmp_project,
     )
@@ -314,12 +314,12 @@ def test_log_outcome_invalid_result_enum_fails_closed(tmp_project, run_waystone)
     assert lp.read_bytes() == before_bytes
 
 
-def test_directive_add_invalid_scope_enum_fails_closed(tmp_project, run_waystone):
-    _seed_one_valid_line(tmp_project, run_waystone)
+def test_directive_add_invalid_scope_enum_fails_closed(tmp_project, run_hippo):
+    _seed_one_valid_line(tmp_project, run_hippo)
     lp = ledger_path(tmp_project)
     before_bytes = lp.read_bytes()
 
-    proc = run_waystone(
+    proc = run_hippo(
         [
             "directive",
             "add",
@@ -339,12 +339,12 @@ def test_directive_add_invalid_scope_enum_fails_closed(tmp_project, run_waystone
     assert lp.read_bytes() == before_bytes
 
 
-def test_directive_add_invalid_state_enum_fails_closed(tmp_project, run_waystone):
-    _seed_one_valid_line(tmp_project, run_waystone)
+def test_directive_add_invalid_state_enum_fails_closed(tmp_project, run_hippo):
+    _seed_one_valid_line(tmp_project, run_hippo)
     lp = ledger_path(tmp_project)
     before_bytes = lp.read_bytes()
 
-    proc = run_waystone(
+    proc = run_hippo(
         [
             "directive",
             "add",
@@ -368,12 +368,12 @@ def test_directive_add_invalid_state_enum_fails_closed(tmp_project, run_waystone
 # Fail-closed: unknown event type
 # --------------------------------------------------------------------------
 
-def test_log_unknown_event_type_rejected(tmp_project, run_waystone):
-    _seed_one_valid_line(tmp_project, run_waystone)
+def test_log_unknown_event_type_rejected(tmp_project, run_hippo):
+    _seed_one_valid_line(tmp_project, run_hippo)
     lp = ledger_path(tmp_project)
     before_bytes = lp.read_bytes()
 
-    proc = run_waystone(
+    proc = run_hippo(
         ["log", "made-up-event", "--id", "x"],
         cwd=tmp_project,
     )
@@ -383,10 +383,10 @@ def test_log_unknown_event_type_rejected(tmp_project, run_waystone):
 
 
 # --------------------------------------------------------------------------
-# `waystone log raw '<json>'`
+# `hippo log raw '<json>'`
 # --------------------------------------------------------------------------
 
-def test_log_raw_valid_json_appends(tmp_project, run_waystone):
+def test_log_raw_valid_json_appends(tmp_project, run_hippo):
     before = read_ledger(tmp_project)
     payload = json.dumps(
         {
@@ -398,7 +398,7 @@ def test_log_raw_valid_json_appends(tmp_project, run_waystone):
         },
         ensure_ascii=False,
     )
-    proc = run_waystone(["log", "raw", payload], cwd=tmp_project)
+    proc = run_hippo(["log", "raw", payload], cwd=tmp_project)
     assert proc.returncode == 0, proc.stderr
 
     after = read_ledger(tmp_project)
@@ -407,37 +407,37 @@ def test_log_raw_valid_json_appends(tmp_project, run_waystone):
     assert after[-1]["id"] == "raw-01"
 
 
-def test_log_raw_malformed_json_text_rejected(tmp_project, run_waystone):
-    _seed_one_valid_line(tmp_project, run_waystone)
+def test_log_raw_malformed_json_text_rejected(tmp_project, run_hippo):
+    _seed_one_valid_line(tmp_project, run_hippo)
     lp = ledger_path(tmp_project)
     before_bytes = lp.read_bytes()
 
-    proc = run_waystone(["log", "raw", "{not valid json ####"], cwd=tmp_project)
+    proc = run_hippo(["log", "raw", "{not valid json ####"], cwd=tmp_project)
     assert proc.returncode != 0
     assert proc.stderr.strip() != ""
     assert lp.read_bytes() == before_bytes
 
 
-def test_log_raw_unknown_ev_rejected(tmp_project, run_waystone):
-    _seed_one_valid_line(tmp_project, run_waystone)
+def test_log_raw_unknown_ev_rejected(tmp_project, run_hippo):
+    _seed_one_valid_line(tmp_project, run_hippo)
     lp = ledger_path(tmp_project)
     before_bytes = lp.read_bytes()
 
     payload = json.dumps({"ev": "not-a-real-event", "id": "z1"})
-    proc = run_waystone(["log", "raw", payload], cwd=tmp_project)
+    proc = run_hippo(["log", "raw", payload], cwd=tmp_project)
     assert proc.returncode != 0
     assert proc.stderr.strip() != ""
     assert lp.read_bytes() == before_bytes
 
 
-def test_log_raw_missing_required_field_rejected(tmp_project, run_waystone):
-    _seed_one_valid_line(tmp_project, run_waystone)
+def test_log_raw_missing_required_field_rejected(tmp_project, run_hippo):
+    _seed_one_valid_line(tmp_project, run_hippo)
     lp = ledger_path(tmp_project)
     before_bytes = lp.read_bytes()
 
     # directive without id — required per schema
     payload = json.dumps({"ev": "directive", "state": "active"})
-    proc = run_waystone(["log", "raw", payload], cwd=tmp_project)
+    proc = run_hippo(["log", "raw", payload], cwd=tmp_project)
     assert proc.returncode != 0
     assert proc.stderr.strip() != ""
     assert lp.read_bytes() == before_bytes

@@ -13,14 +13,14 @@ from conftest import failures_dir_path, read_ledger
 
 
 def test_second_run_with_no_new_lines_skips_model_call(
-    tmp_project, run_waystone, fake_transcript, valid_mock_output
+    tmp_project, run_hippo, fake_transcript, valid_mock_output
 ):
     env = {
-        "WAYSTONE_CLERK_BACKEND": "mock",
-        "WAYSTONE_MOCK_OUTPUT": str(valid_mock_output),
+        "HIPPO_CLERK_BACKEND": "mock",
+        "HIPPO_MOCK_OUTPUT": str(valid_mock_output),
     }
 
-    first = run_waystone(
+    first = run_hippo(
         ["scribe", "--transcript", str(fake_transcript), "--session", "sess-cursor"],
         cwd=tmp_project,
         env=env,
@@ -41,7 +41,7 @@ def test_second_run_with_no_new_lines_skips_model_call(
     # below would change.
     valid_mock_output.unlink()
 
-    second = run_waystone(
+    second = run_hippo(
         ["scribe", "--transcript", str(fake_transcript), "--session", "sess-cursor"],
         cwd=tmp_project,
         env=env,

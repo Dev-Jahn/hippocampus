@@ -1,5 +1,5 @@
 {
-  "description": "waystone: inject status capsule at session start (incl. post-compact re-entry); detached scribe on Stop.",
+  "description": "hippo: inject status capsule at session start (incl. post-compact re-entry); detached scribe on Stop.",
   "hooks": {
     "SessionStart": [
       {

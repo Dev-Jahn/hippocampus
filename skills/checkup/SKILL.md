@@ -1,12 +1,12 @@
 ---
 name: checkup
-description: waystone 프로젝트 건강 진단 — ledger·clerk·지시 위생·낭비 패턴을 점검하고 정리를 제안한다. 사용자가 "/ws:checkup", "프로젝트 점검", "낭비 점검", "지시 정리", "clerk 상태 확인"을 요청하면 사용.
+description: hippo 프로젝트 건강 진단 — ledger·clerk·지시 위생·낭비 패턴을 점검하고 정리를 제안한다. 사용자가 "/hippo:checkup", "프로젝트 점검", "낭비 점검", "지시 정리", "clerk 상태 확인"을 요청하면 사용.
 ---
 
-# waystone: checkup
+# hippo: checkup
 
 프로젝트 계층의 `/doctor`다. 읽기 전용으로 전부 진단한 뒤 보고하고, 정리는 확인 후에만
-적용한다. `.waystone/`이 없으면 "waystone 미초기화 — `waystone init`" 한 줄로 끝낸다.
+적용한다. `.hippo/`이 없으면 "hippo 미초기화 — `hippo init`" 한 줄로 끝낸다.
 
 ## Ground rules (doctor 규약 승계)
 
@@ -27,7 +27,7 @@ description: waystone 프로젝트 건강 진단 — ledger·clerk·지시 위�
 
 ## Check 2 — 지시 위생 (최우선 — 순종적 모델에서 stale 지시는 사고를 실행한다)
 
-- `waystone directive list`의 active 지시들을 나이순으로: phase 지시가 2주 이상 살아있으면
+- `hippo directive list`의 active 지시들을 나이순으로: phase 지시가 2주 이상 살아있으면
   "국면이 끝났을 가능성 — 유지/철회?" 후보로.
 - active 지시 ↔ CLAUDE.md ↔ 메모리 파일 사이의 **모순·중복**을 대조(의미 기준).
   모순은 양쪽을 인용하고 어느 쪽을 남길지 입장을 내라. 편집은 확인 후, 로컬 파일 우선.
@@ -43,7 +43,7 @@ description: waystone 프로젝트 건강 진단 — ledger·clerk·지시 위�
   executor 교체로 풀 일이 아님을 명시.
 - 최근 transcript 표본(최신 2-3개, digest_lite로 압축해서)에서: 같은 오류 3회+ 반복,
   포그라운드 sleep 폴링, "File has not been read yet" 다발 — 각 건수와 대표 사례만.
-- PRIORS.md가 7일 이상 낡았으면 `waystone prior distill` 실행을 제안(정리 묶음에 포함).
+- PRIORS.md가 7일 이상 낡았으면 `hippo prior distill` 실행을 제안(정리 묶음에 포함).
 
 ## Check 4 — 데이터 위생
 

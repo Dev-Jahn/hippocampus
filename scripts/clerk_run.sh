@@ -3,9 +3,9 @@
 #
 # Concatenates prompt-file ++ input-file into one query, fires it at a
 # headless low-cost model backend, and prints the model's raw response to
-# stdout. Backend resolution: $WAYSTONE_CLERK_BACKEND (auto|codex|claude|mock,
+# stdout. Backend resolution: $HIPPO_CLERK_BACKEND (auto|codex|claude|mock,
 # default auto). auto picks codex if the codex CLI is installed, else claude,
-# else exits 3. The whole call is bounded to $WAYSTONE_CLERK_TIMEOUT seconds
+# else exits 3. The whole call is bounded to $HIPPO_CLERK_TIMEOUT seconds
 # (default 120; exit 124 on timeout). Backend stderr is discarded.
 set -u
 
@@ -28,13 +28,13 @@ for f in "$PROMPT_FILE" "$INPUT_FILE"; do
   fi
 done
 
-BACKEND=${WAYSTONE_CLERK_BACKEND:-auto}
-MODEL=${WAYSTONE_CLERK_MODEL:-gpt-5.6-luna}
-TIMEOUT=${WAYSTONE_CLERK_TIMEOUT:-120}
+BACKEND=${HIPPO_CLERK_BACKEND:-auto}
+MODEL=${HIPPO_CLERK_MODEL:-gpt-5.6-luna}
+TIMEOUT=${HIPPO_CLERK_TIMEOUT:-120}
 
 # 재귀 금지 (DESIGN §2): 아래 backend는 자기 훅을 가진 세션을 띄울 수 있다.
-# 이 표식이 환경에 있으면 waystone 훅들은 즉시 exit 0 한다 — clerk는 clerk를 낳지 않는다.
-export WAYSTONE_CLERK=1
+# 이 표식이 환경에 있으면 hippo 훅들은 즉시 exit 0 한다 — clerk는 clerk를 낳지 않는다.
+export HIPPO_CLERK=1
 
 if [ "$BACKEND" = "auto" ]; then
   if command -v codex >/dev/null 2>&1; then
@@ -67,7 +67,7 @@ with_timeout() {
   # A marker file written by the watchdog distinguishes the real timeout, and
   # the child is started in its own session so its whole group can be reaped.
   local marker
-  marker="$(mktemp "${TMPDIR:-/tmp}/waystone-clerk-timeout.XXXXXX" 2>/dev/null)" || marker=""
+  marker="$(mktemp "${TMPDIR:-/tmp}/hippo-clerk-timeout.XXXXXX" 2>/dev/null)" || marker=""
   [ -n "$marker" ] && rm -f "$marker"
   local launcher=()
   if command -v python3 >/dev/null 2>&1; then
@@ -97,10 +97,10 @@ COMBINED=$(cat "$PROMPT_FILE" "$INPUT_FILE")
 
 case "$BACKEND" in
   mock)
-    if [ -z "${WAYSTONE_MOCK_OUTPUT:-}" ] || [ ! -r "${WAYSTONE_MOCK_OUTPUT:-/nonexistent}" ]; then
+    if [ -z "${HIPPO_MOCK_OUTPUT:-}" ] || [ ! -r "${HIPPO_MOCK_OUTPUT:-/nonexistent}" ]; then
       exit 4
     fi
-    with_timeout "$TIMEOUT" cat "$WAYSTONE_MOCK_OUTPUT"
+    with_timeout "$TIMEOUT" cat "$HIPPO_MOCK_OUTPUT"
     exit $?
     ;;
   codex)
@@ -132,7 +132,7 @@ case "$BACKEND" in
     # 모델 기본은 sonnet — haiku는 A/B 실측(2026-07-31)에서 수용 보류 상태의
     # lane에 outcome:accepted를 발명해 강등됨 (스키마는 통과하는 의미 오류).
     with_timeout "$TIMEOUT" claude -p \
-      --model "${WAYSTONE_CLAUDE_CLERK_MODEL:-sonnet}" \
+      --model "${HIPPO_CLAUDE_CLERK_MODEL:-sonnet}" \
       --tools "" \
       --strict-mcp-config \
       --setting-sources "" \

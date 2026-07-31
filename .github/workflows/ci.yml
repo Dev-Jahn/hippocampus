@@ -18,7 +18,7 @@ jobs:
         run: |
           set -euo pipefail
           jq -e '
-            .name == "waystone" and
+            .name == "hippo" and
             (.version | test(
               "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"
             ))
@@ -28,11 +28,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      # bin/waystone prefers `uv run --script`; without uv it falls back to a
+      # bin/hippo prefers `uv run --script`; without uv it falls back to a
       # python3 that happens to have PyYAML, which no runner guarantees.
       - uses: astral-sh/setup-uv@v6
-      - name: bin/waystone --help
-        run: bin/waystone --help
+      - name: bin/hippo --help
+        run: bin/hippo --help
 
   tests:
     runs-on: ubuntu-latest
