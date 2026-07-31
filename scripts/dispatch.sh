@@ -79,7 +79,7 @@ exec_field="codex/${model:-unset}/${effort:-unset}"
 # 8-char dispatch id: d + 7 hex chars.
 id="d$(printf '%03x%03x%03x' $((RANDOM % 4096)) $((RANDOM % 4096)) $((RANDOM % 4096)) | cut -c1-7)"
 
-# Resolve bin/waystone relative to this script's real location.
+# Resolve bin/hippo relative to this script's real location.
 src="${BASH_SOURCE[0]}"
 while [ -L "$src" ]; do
   d="$(cd -P "$(dirname "$src")" && pwd)"
@@ -87,7 +87,7 @@ while [ -L "$src" ]; do
   [[ "$src" != /* ]] && src="$d/$src"
 done
 root="$(cd -P "$(dirname "$src")/.." && pwd)"
-waystone_bin="$root/bin/waystone"
+hippo_bin="$root/bin/hippo"
 
 log_args=(log dispatch --id "$id" --kind "$kind" --scope "$scope" --exec "$exec_field")
 if [ -n "$task" ]; then
@@ -96,14 +96,14 @@ fi
 
 # The ledger line goes to stderr, not stdout: DESIGN §3.6 reserves stdout's
 # first line for the dispatch id.
-if [ -x "$waystone_bin" ]; then
-  WAYSTONE_SRC=wrapper "$waystone_bin" "${log_args[@]}" >&2
+if [ -x "$hippo_bin" ]; then
+  HIPPO_SRC=wrapper "$hippo_bin" "${log_args[@]}" >&2
   log_status=$?
 else
   log_status=127
 fi
 if [ "$log_status" -ne 0 ]; then
-  echo "dispatch: waystone log dispatch 기록 실패 (exit $log_status) — 위임은 계속 진행합니다" >&2
+  echo "dispatch: hippo log dispatch 기록 실패 (exit $log_status) — 위임은 계속 진행합니다" >&2
 fi
 
 echo "dispatch:$id"

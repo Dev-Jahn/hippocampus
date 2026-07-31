@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# waystone SessionStart hook.
-# Silent no-op unless the session's cwd sits inside a project that has .waystone/.
+# hippo SessionStart hook.
+# Silent no-op unless the session's cwd sits inside a project that has .hippo/.
 set -u
 
 # A clerk runs headless Claude/codex sessions of its own; their hooks must not
 # fire, or a Stop hook would spawn a clerk that spawns a clerk (재귀 금지, §2).
-[ -n "${WAYSTONE_CLERK:-}" ] && exit 0
+[ -n "${HIPPO_CLERK:-}" ] && exit 0
 
 # jq is preferred but not required: python3 is already a hard dependency of the
 # CLI shim, so a missing jq must not turn this hook into a silent death.
@@ -43,12 +43,12 @@ cwd="$(json_get cwd)"
 [ -n "$cwd" ] || exit 0
 [ -d "$cwd" ] || exit 0
 
-# Walk upward from cwd looking for .waystone/, capped at the git root (inclusive)
+# Walk upward from cwd looking for .hippo/, capped at the git root (inclusive)
 # and at $HOME (never adopt a project from above the user's home).
 dir="$cwd"
 found=""
 while :; do
-  if [ -d "$dir/.waystone" ]; then
+  if [ -d "$dir/.hippo" ]; then
     found="$dir"
     break
   fi
@@ -66,7 +66,7 @@ done
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 root="${CLAUDE_PLUGIN_ROOT:-$(dirname "$script_dir")}"
 
-# cd into the session's cwd (as Stop does): the CLI re-derives .waystone/ from
+# cd into the session's cwd (as Stop does): the CLI re-derives .hippo/ from
 # its own working directory, which is not necessarily this hook's.
 cd "$cwd" || exit 0
-exec "$root/bin/waystone" status --inject
+exec "$root/bin/hippo" status --inject

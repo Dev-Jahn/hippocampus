@@ -3,15 +3,15 @@ name: dispatch
 description: 병렬 위임 웨이브 운영 규약 — 여러 작업을 외부 실행기(codex exec)·subagent에 동시 위임하고 main이 회수·검증·머지한다. 사용자가 "병렬로 launch", "함대", "wave", "나눠서 시켜", "가능한 task 전부 착수"를 지시하면 사용. 단일 위임이라도 호출 패턴·worktree 격리가 필요하면 참조.
 ---
 
-# waystone: dispatch — 병렬 위임 웨이브
+# hippo: dispatch — 병렬 위임 웨이브
 
 fleet-dispatch의 계승·개정판. 개정 근거는 전부 dogfooding 감사와 Opus 5 guide 실측이다.
 
 ## 0. 발사 전 30초
 
-1. `waystone prior show` — 이 kind에 어떤 (모델·effort)가 실측으로 유리했는지 확인.
+1. `hippo prior show` — 이 kind에 어떤 (모델·effort)가 실측으로 유리했는지 확인.
    프라이어는 조언이다: 최종 라우팅은 지금 작업의 난이도·볼륨으로 main이 판단한다.
-2. `waystone directive list --active` — 살아있는 제약(GPU 범위, 보류 정책 등)을 브리프에
+2. `hippo directive list --active` — 살아있는 제약(GPU 범위, 보류 정책 등)을 브리프에
    반영한다. **공용 브리프(COMMON)와 개별 브리프의 제약 조항이 충돌하는지 grep으로
    사전 대조**(모순 조항이 fail-closed NO-GO를 만든 실사고).
 3. 자산 프리플라이트: 브리프가 지목하는 파일·모델·데이터가 실존하는지 main이 확인.
@@ -70,7 +70,7 @@ codex exec·subagent·프로젝트 내 하네스 재호출 금지" — 금지 �
 - **검증자 브리프에 severity 상한·보수성 지시를 넣지 마라** — 문자적으로 순종해 실제로
   덜 보고한다. "발견 전부 보고, 필터링은 회수 측에서"로 쓴다.
 - 검증 verdict를 근거로 outcome을 기록한다:
-  `waystone log outcome --ref <id> --result refuted --attr work --note "..."`.
+  `hippo log outcome --ref <id> --result refuted --attr work --note "..."`.
   귀속을 정직하게: 산출물 문제=work, 브리프 결함=brief, 인프라 유실=harness —
   귀속이 틀리면 프라이어가 거짓말을 한다.
 
@@ -85,7 +85,7 @@ codex exec·subagent·프로젝트 내 하네스 재호출 금지" — 금지 �
 - **게이트 확인과 push를 한 호출에 묶지 마라** — `tail …; git push` 체이닝이 실패
   상태를 push한 실사고 2건. 게이트 rc를 확인한 *다음* 별도 호출로 push.
 - 권위 측정(성능표 등)이 도는 동안 main은 tracked 파일에 커밋하지 않는다(측정 폐기 실사고).
-- 수용 시: `waystone log outcome --ref <id> --result accepted`, task done, worktree/branch 정리.
+- 수용 시: `hippo log outcome --ref <id> --result accepted`, task done, worktree/branch 정리.
 - "실행 중" 보고 전 실측: 프로세스 테이블(+GPU면 `nvidia-smi --query-compute-apps`)로
   PID를 확인한다 — worktree 커밋 존재만으로 추정 금지(오보→사용자 정정 실사고 2건).
 

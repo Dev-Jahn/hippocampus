@@ -18,7 +18,7 @@ events: 다음 4종만 허용된다. 각 필드는 정확히 이 이름으로.
 1. `{"ev":"dispatch","id":"<8자 이내 새 id>","kind":"<작업 종류 태그>","exec":"<vehicle/model/effort>","scope":"<한 줄>"}`
    — 이 구간에서 *발사된* 위임: codex exec 실행(Bash 명령에서 -m 모델과 effort를 읽어라),
    Agent/Task 도구 호출(모델·설명에서), Workflow 발사. wrapper가 이미 기록한 dispatch
-   (다이제스트에 "waystone log dispatch"나 dispatch.sh 흔적이 보이면)는 **중복 기록하지 마라**.
+   (다이제스트에 "hippo log dispatch"나 dispatch.sh 흔적이 보이면)는 **중복 기록하지 마라**.
    kind는 짧은 kebab-case 자유 태그(예: kernel-impl, verify, docs, research, infra).
 2. `{"ev":"outcome","ref":"<dispatch id>","result":"accepted|revised|refuted|no-go|lost","attr":"work|brief|harness","rework":<정수>,"note":"<한 줄>"}`
    — 이 구간에서 *판정이 난* 위임: 머지/수용됨(accepted), 수리 후 수용(revised, rework에
