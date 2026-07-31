@@ -1,12 +1,23 @@
 {
   "name": "hippo",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "hippo — your project's hippocampus: task registry, outcome ledger, and background clerks that give agents perception and memory — evidence over enforcement.",
-  "author": {"name": "Jahn", "email": "ajh508@naver.com"},
+  "author": {
+    "name": "Jahn",
+    "email": "ajh508@naver.com"
+  },
   "homepage": "https://github.com/Dev-Jahn/hippo",
   "repository": "https://github.com/Dev-Jahn/hippo",
   "license": "MIT",
-  "keywords": ["hippocampus", "memory", "task-registry", "ledger", "clerk", "evidence", "agentic-development"],
+  "keywords": [
+    "hippocampus",
+    "memory",
+    "task-registry",
+    "ledger",
+    "clerk",
+    "evidence",
+    "agentic-development"
+  ],
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",
   "interface": {
@@ -15,7 +26,11 @@
     "longDescription": "hippo records what you delegated, what was accepted or refuted, and which user directives are still alive — then hands that evidence back at session start. It records; it does not enforce.",
     "developerName": "Jahn",
     "category": "Developer Tools",
-    "capabilities": ["Interactive", "Read", "Write"],
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
     "defaultPrompt": [
       "Initialize hippo in this project.",
       "What is still open, and which directives are live?"

@@ -1,3 +1,12 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)"
+            srcset="https://raw.githubusercontent.com/Dev-Jahn/hippo/dev/.github/assets/logo-dark.png">
+    <img src="https://raw.githubusercontent.com/Dev-Jahn/hippo/dev/.github/assets/logo-light.png"
+         alt="hippo" width="220">
+  </picture>
+</p>
+
 # hippo
 
 A quiet project organ: hippo doesn't control agents, it gives them

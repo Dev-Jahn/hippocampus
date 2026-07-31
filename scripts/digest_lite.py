@@ -4,7 +4,7 @@
 Lightweight port of the 479MB-audit digest logic (see DESIGN.md §8): same
 line formats (USER/ASSIST/TOOL/RES/RES-ERR/COMPACTION), same "[N]" original-
 line-number prefix, same truncation rules. Dropped versus the audit tool:
-stats collection, INDEX generation, directory traversal, waystone detection.
+stats collection, INDEX generation, directory traversal, plugin detection.
 `thinking` blocks are still excluded.
 
 stdlib only. Usage: digest_lite.py <transcript.jsonl> [--since-line N] [--until-line M]
