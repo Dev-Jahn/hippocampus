@@ -32,8 +32,8 @@ BACKEND=${HIPPO_CLERK_BACKEND:-auto}
 MODEL=${HIPPO_CLERK_MODEL:-gpt-5.6-luna}
 TIMEOUT=${HIPPO_CLERK_TIMEOUT:-120}
 
-# 재귀 금지 (DESIGN §2): 아래 backend는 자기 훅을 가진 세션을 띄울 수 있다.
-# 이 표식이 환경에 있으면 hippo 훅들은 즉시 exit 0 한다 — clerk는 clerk를 낳지 않는다.
+# No recursion (DESIGN §2): the backends below can start sessions that carry their own hooks.
+# With this marker in the environment every hippo hook exits 0 at once — a clerk never spawns a clerk.
 export HIPPO_CLERK=1
 
 if [ "$BACKEND" = "auto" ]; then
@@ -107,8 +107,8 @@ case "$BACKEND" in
     if ! command -v codex >/dev/null 2>&1; then
       exit 3
     fi
-    # --disable hooks: clerk가 띄우는 codex 세션의 Stop 훅이 또 clerk를 낳지 않게.
-    # HIPPO_CLERK 가드와 이중 방어다 (env가 벗겨져도 재귀가 안 난다).
+    # --disable hooks: keep the Stop hook of the codex session this clerk starts from spawning
+    # another clerk. Belt and braces with the HIPPO_CLERK guard (survives a stripped environment).
     with_timeout "$TIMEOUT" codex exec \
       -m "$MODEL" \
       -c model_reasoning_effort="low" \
@@ -132,8 +132,9 @@ case "$BACKEND" in
     #   --strict-mcp-config   with no --mcp-config given, this loads no MCP servers.
     #   --setting-sources ""  load no user/project/local settings → no hooks,
     #                         no plugins of the host project inside the clerk.
-    # 모델 기본은 sonnet — haiku는 A/B 실측(2026-07-31)에서 수용 보류 상태의
-    # lane에 outcome:accepted를 발명해 강등됨 (스키마는 통과하는 의미 오류).
+    # Default model is sonnet. Haiku was demoted after a measured A/B (2026-07-31): it invented
+    # outcome:accepted for a lane whose acceptance was still pending — a semantic error that
+    # passes schema validation.
     with_timeout "$TIMEOUT" claude -p \
       --model "${HIPPO_CLAUDE_CLERK_MODEL:-sonnet}" \
       --tools "" \

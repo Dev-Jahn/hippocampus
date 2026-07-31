@@ -1,36 +1,37 @@
 ---
 name: dispatch
-description: 병렬 위임 웨이브 운영 규약 — 여러 작업을 외부 실행기(codex exec)·subagent에 동시 위임하고 main이 회수·검증·머지한다. 사용자가 "병렬로 launch", "함대", "wave", "나눠서 시켜", "가능한 task 전부 착수"를 지시하면 사용. 단일 위임이라도 호출 패턴·worktree 격리가 필요하면 참조.
+description: Operating contract for parallel delegation waves — hand several tasks to external executors (codex exec) and subagents at once while main collects, verifies and merges. Use when the user says "launch in parallel", "fleet", "wave", "split it up", or "start everything you can". Worth reading for a single delegation too, when the call pattern or worktree isolation matters.
 ---
 
-# hippo: dispatch — 병렬 위임 웨이브
+# hippo: dispatch — parallel delegation waves
 
-fleet-dispatch의 계승·개정판. 개정 근거는 전부 dogfooding 감사와 Opus 5 guide 실측이다.
+The successor to fleet-dispatch, revised. Every revision here comes from a dogfooding audit or a
+measurement against the Opus 5 guide.
 
-## 0. 발사 전 30초
+## 0. Thirty seconds before launch
 
-1. `hippo prior show` — 이 kind에 어떤 (모델·effort)가 실측으로 유리했는지 확인.
-   프라이어는 조언이다: 최종 라우팅은 지금 작업의 난이도·볼륨으로 main이 판단한다.
-2. `hippo directive list --active` — 살아있는 제약(GPU 범위, 보류 정책 등)을 브리프에
-   반영한다. **공용 브리프(COMMON)와 개별 브리프의 제약 조항이 충돌하는지 grep으로
-   사전 대조**(모순 조항이 fail-closed NO-GO를 만든 실사고).
-3. 자산 프리플라이트: 브리프가 지목하는 파일·모델·데이터가 실존하는지 main이 확인.
+1. `hippo prior show` — check which (model, effort) measured better for this kind. A prior is
+   advice: main still decides the final routing from the difficulty and volume of the work at hand.
+2. `hippo directive list --active` — fold the live constraints (GPU range, hold policies, …) into
+   the brief. **Grep the shared brief (COMMON) against the individual brief for conflicting
+   constraint clauses first** (contradictory clauses once produced a fail-closed NO-GO).
+3. Asset preflight: main verifies that the files, models and data the brief names actually exist.
 
-## 1. 역할 라우팅
+## 1. Role routing
 
-| 작업 성격 | 할당 |
+| Kind of work | Assigned to |
 |---|---|
-| 레지스트리·머지·게이트·push·수용 판정 | main 직접 |
-| 명령 하나로 끝나는 실험(soak/bench) | main의 `run_in_background` Bash |
-| 파일 편집 수반 구현·조사 | 외부 실행기 lane (전용 worktree) |
-| **타 실행기 산출물**의 경계 검증 | 검증 lane — 예산은 §4 |
-| 고도 설계 | 독립 duo 설계 → main synthesis |
+| Registry, merge, gate, push, acceptance verdict | main, directly |
+| An experiment that is one command (soak/bench) | main's `run_in_background` Bash |
+| Implementation or investigation that edits files | an external executor lane (own worktree) |
+| Boundary verification of **another executor's** output | a verification lane — budget in §4 |
+| Hard design work | an independent duo, then synthesis by main |
 
-- **자기 작업 재검증을 위한 subagent를 띄우지 마라** — 신형 모델은 스스로 검증한다.
-  검증 lane은 *다른* 실행기의 산출물(경계)에만 쓴다.
-- 소형 잡무는 위임하지 마라: 프롬프트 작성 비용이 직접 하는 비용을 넘으면 배보다 배꼽.
+- **Never spawn a subagent to re-verify your own work** — current models verify themselves. A
+  verification lane is for the boundary of a *different* executor's output.
+- Do not delegate small chores: when writing the prompt costs more than doing the work, it costs more.
 
-## 2. 발사 규약
+## 2. Launch contract
 
 ```bash
 hippo dispatch --kind kernel-impl --scope "pass2 tensorize" --task feat/x \
@@ -39,63 +40,76 @@ hippo dispatch --kind kernel-impl --scope "pass2 tensorize" --task feat/x \
   "$(cat prompts/COMMON.md prompts/<task>.md)"
 ```
 
-- 래퍼가 `ev:dispatch`를 자동 기록하고 dispatch id를 첫 줄에 찍는다.
-- Claude Code에서는 `hippo`가 PATH에 있다. **Codex에서는 플러그인 `bin/`이 PATH에 들어가지
-  않는다** — 이 SKILL.md 위치에서 `../../bin/hippo`를 절대경로로 해소해 부른다.
-- **cwd는 `.hippo/`를 위로 찾을 수 있는 곳**(보통 repo root), worktree는 `-C <worktree>`로
-  지정한다. worktree cwd에서 실행하면 기록이 유실된다(그 경우 경고가 나온다).
-- 래퍼가 `codex exec … < /dev/null`을 내장한다(stdin 미폐쇄 hang 방지). 명령 자체는
-  harness `run_in_background`로 발사 — nohup/disown 등 harness 밖 detach 금지(orphan 사고 이력).
-- codex 인자가 `--kind`/`--scope`처럼 래퍼 flag와 겹치면 `--` 뒤에 둔다.
-- 프롬프트는 scratchpad 파일로(COMMON + 개별 브리프 concat). 여러 기는 한 메시지에
-  묶어 병렬 발사.
-- **어휘 중립화**: GPU 메모리 겹침·오염·주입 같은 표현이 실행기 콘텐츠 필터에
-  cybersecurity 오탐된 실사고 10건 — 안전성 서술은 학술 중립어로 쓴다.
-- 중간 지시가 필요하면 kill 후 session-id 지정 resume(병렬 lane에서 `--last` 금지).
+- The wrapper records `ev:dispatch` automatically and prints the dispatch id on the first line.
+- In Claude Code `hippo` is on PATH. **In Codex the plugin's `bin/` is not on PATH** — resolve
+  `../../bin/hippo` relative to this SKILL.md into an absolute path and call that.
+- **cwd must be somewhere `.hippo/` is findable upward** (usually the repo root); point at the
+  worktree with `-C <worktree>`. Running from the worktree's cwd loses the record (you get a
+  warning when that happens).
+- The wrapper has `codex exec … < /dev/null` built in (an unclosed stdin hangs). Launch the
+  command itself through the harness's `run_in_background` — no nohup/disown or other detach
+  outside the harness (that produced orphans).
+- When a codex argument collides with a wrapper flag (`--kind`, `--scope`), put it after `--`.
+- Keep prompts in scratchpad files (COMMON concatenated with the individual brief). Launch several
+  lanes in parallel from a single message.
+- **Neutral vocabulary**: phrasing about GPU memory overlap, contamination or injection tripped the
+  executor's content filter as a cybersecurity false positive ten times — write safety statements
+  in neutral academic terms.
+- To steer a lane mid-flight, kill it and resume with an explicit session id (never `--last` when
+  lanes run in parallel).
 
-## 3. 브리프 계약
+## 3. Brief contract
 
-① 배경("착수 전 정독" 목록 — 실행기는 맥락 제로; 권위 원천은 **작업자 트리에 실재하는
-파일만** 지정 — gitignored 문서 지정은 열 수 없는 죽은 참조가 된 실사고) ② 범위/비-범위
-③ 검증 요구: RED 먼저, acceptance는 착수 전 pre-register하되 **구현 지시가 아니라
-성질(property)로**("이렇게 고쳐라"식 조항이 2 lane × 4회전 발산을 유발, 성질로 바꾸자
-수렴한 실사고) ④ 보고서 저장 경로 + stdout 요약 ⑤ 머지 주의(hot-file은 구획을 브리프에서
-사전 분할) ⑥ **전제가 재현되지 않으면 조기 NO-GO 보고**(연구 가설 기각은 흔하다)
-⑦ 장시간 실행은 background로 걸고 대기는 Monitor/통지로 — **포그라운드 sleep 폴링
-금지**(10분 하드타임아웃 연쇄 실사고) ⑧ **재위임 일체 금지 명시**("구현은 네가 직접.
-codex exec·subagent·프로젝트 내 하네스 재호출 금지" — 금지 조항이 없자 기체가 336k 토큰
-재위임 나선으로 커밋 0 종료한 실사고) ⑨ 검증 lane의 동적 재현은 **tempdir에서만** —
-실 repo 상태·문서 불가침("읽기 전용" 지시만으로는 오염을 못 막은 실사고).
+(1) Background — a "read before starting" list, since the executor has zero context; name only
+**files that actually exist in the worker's tree** (naming a gitignored document once produced a
+dead reference nobody could open). (2) Scope and non-scope. (3) Verification demands: RED first,
+and pre-register acceptance before starting — **as a property, not as an implementation
+instruction** ("fix it like this" clauses made two lanes diverge over four rounds; restating them
+as properties converged). (4) Where the report is saved plus a stdout summary. (5) Merge cautions
+(split hot files into sections in the brief, in advance). (6) **Report an early NO-GO when the
+premise does not reproduce** (a rejected research hypothesis is common). (7) Put long runs in the
+background and wait through Monitor or notification — **never poll with a foreground sleep** (that
+chained into 10-minute hard timeouts). (8) **State plainly that re-delegation is forbidden**
+("implement it yourself; no codex exec, no subagent, no re-entering the project's own harness" —
+without that clause one lane spiraled through 336k tokens of re-delegation and ended with zero
+commits). (9) A verification lane reproduces dynamically **in a tempdir only** — the real repo
+state and documents are untouchable ("read-only" as an instruction alone did not prevent
+contamination).
 
-## 4. 검증 예산 (고정 의례가 아니라 증거 비례)
+## 4. Verification budget (proportional to evidence, not a fixed ritual)
 
-- PRIORS의 executor별 반증률에 비례해서 배분: 반증률 높은 곳에 lane당 검증 1기,
-  낮은 곳(수용률 안정)은 spot-check나 생략. 근거가 없으면 첫 웨이브는 검증 붙이고
-  이후 데이터로 조정.
-- **검증자 브리프에 severity 상한·보수성 지시를 넣지 마라** — 문자적으로 순종해 실제로
-  덜 보고한다. "발견 전부 보고, 필터링은 회수 측에서"로 쓴다.
-- 검증 verdict를 근거로 outcome을 기록한다:
+- Allocate in proportion to each executor's refutation rate in PRIORS: one verification per lane
+  where the rate is high, a spot-check or nothing where it is low and acceptance is stable. With no
+  evidence yet, verify the first wave and adjust from the data.
+- **Never put a severity ceiling or a "be conservative" instruction in a verifier's brief** — a
+  literal-minded model obeys and genuinely reports less. Write "report every finding; filtering
+  happens on the collection side".
+- Record the outcome from the verifier's verdict:
   `hippo log outcome --ref <id> --result refuted --attr work --note "..."`.
-  귀속을 정직하게: 산출물 문제=work, 브리프 결함=brief, 인프라 유실=harness —
-  귀속이 틀리면 프라이어가 거짓말을 한다.
+  Attribute honestly — output problem = work, brief defect = brief, infrastructure loss = harness.
+  A wrong attribution makes the priors lie.
 
-## 5. 격리·회수·머지
+## 5. Isolation, collection, merge
 
-- 편집 lane은 전부 `{PROJECT_ROOT}/.claude/worktrees/<name>` + 전용 branch. 브리프에
-  base SHA를 박제하지 말고 "네 worktree의 시작 HEAD가 base"로.
-- 병렬 착수 전 disjoint 확인은 파일권만으로 부족하다 — **삭제·개명하는 심볼을 추출해
-  다른 lane·dev의 소비자까지 grep**(심볼 결합이 dev 전체를 깨뜨린 실사고).
-- 회수: 통지 순서대로 output tail + 보고서 + `git log --oneline <base>..HEAD` 검수 →
-  repo root에서 `git merge --squash` → **머지 후 표적 게이트 재실행** → green이면 push.
-- **게이트 확인과 push를 한 호출에 묶지 마라** — `tail …; git push` 체이닝이 실패
-  상태를 push한 실사고 2건. 게이트 rc를 확인한 *다음* 별도 호출로 push.
-- 권위 측정(성능표 등)이 도는 동안 main은 tracked 파일에 커밋하지 않는다(측정 폐기 실사고).
-- 수용 시: `hippo log outcome --ref <id> --result accepted`, task done, worktree/branch 정리.
-- "실행 중" 보고 전 실측: 프로세스 테이블(+GPU면 `nvidia-smi --query-compute-apps`)로
-  PID를 확인한다 — worktree 커밋 존재만으로 추정 금지(오보→사용자 정정 실사고 2건).
+- Every editing lane gets `{PROJECT_ROOT}/.claude/worktrees/<name>` and its own branch. Do not pin
+  a base SHA in the brief; say "the starting HEAD of your worktree is the base".
+- File ownership alone is not enough to call parallel lanes disjoint — **extract the symbols a lane
+  deletes or renames and grep for consumers in the other lanes and in dev** (symbol coupling once
+  broke all of dev).
+- Collection, in notification order: tail the output, read the report, review
+  `git log --oneline <base>..HEAD` → `git merge --squash` from the repo root → **re-run the targeted
+  gate after the merge** → push when green.
+- **Never put the gate check and the push in one call** — chaining `tail …; git push` pushed a
+  failing state twice. Check the gate's rc, *then* push in a separate call.
+- While an authoritative measurement (a performance table, say) is running, main does not commit to
+  tracked files (that discarded a measurement).
+- Before reporting "still running", measure it: confirm the PID in the process table (plus
+  `nvidia-smi --query-compute-apps` for GPU work). Never infer it from the existence of a worktree
+  commit (that produced two false reports the user had to correct).
 
-## 6. GPU 공유 (해당 시)
+## 6. Shared GPUs (where applicable)
 
-flock 실행기 경유(`gpu_run.sh`류, 프로젝트 고정 경로 — 세션 scratchpad에 두지 마라:
-세션별 분리로 상호배제가 깨진 실사고). CUDA_VISIBLE_DEVICES 직접 지정 금지, CPU 작업
-먼저·GPU 검증은 묶어서. 유휴 GPU가 있으면 main이 선제 배분한다(몰림 지적 실사고 2건).
+Go through a flock runner (a `gpu_run.sh`-style script at a fixed project path — never in a session
+scratchpad: per-session copies broke mutual exclusion). No setting CUDA_VISIBLE_DEVICES by hand;
+CPU work first, GPU verification batched. When a GPU sits idle, main assigns it proactively (twice
+the user had to point out lanes piling onto one device).

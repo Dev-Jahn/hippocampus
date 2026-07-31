@@ -50,7 +50,7 @@ jobs:
           git clone git@github.com:Dev-Jahn/jahns-cc-marketplace.git mp
           cd mp
           f=.claude-plugin/marketplace.json
-          # 대상 entry가 없으면 무음 성공(diff 없음 → "already in sync")으로 죽는다 — 크게 실패시킨다.
+          # A missing entry would die as a silent success (no diff → "already in sync") — fail loudly instead.
           jq -e '.plugins[] | select(.name=="hippo")' "$f" > /dev/null \
             || { echo "marketplace.json has no plugin entry named 'hippo' — nothing to pin"; exit 1; }
           tmp=$(mktemp)
