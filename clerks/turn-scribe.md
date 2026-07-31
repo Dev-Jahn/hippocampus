@@ -21,15 +21,48 @@ events: only the four kinds below are allowed, with exactly these field names.
    and the effort from the Bash command), an Agent/Task tool call (from its model and
    description), a Workflow launch. A dispatch the wrapper already recorded (you can see
    "hippo log dispatch" or a dispatch.sh trace in the digest) must **not be recorded twice**.
-   kind is a short free-form kebab-case tag (e.g. kernel-impl, verify, docs, research, infra).
+
+   `kind` is the **category of work, never its subject** — the subject belongs in scope. Pick one:
+
+   | tag | what it covers |
+   |---|---|
+   | `impl` | building something new |
+   | `fix` | correcting a defect |
+   | `perf` | making something faster or smaller |
+   | `verify` | adversarial check of another executor's output |
+   | `audit` | systematic sweep of existing state (assumptions, docs, coverage) |
+   | `design` | producing a design, not shipped code |
+   | `research` | reading and analysis to answer a question |
+   | `spike` | bounded exploration or measurement that ends in a decision |
+   | `docs` | documentation work |
+   | `infra` | tooling, CI, environment |
+   | `chore` | maintenance with no behavior change |
+
+   Invent a tag only when nothing above fits. A tag used once never becomes evidence: the priors
+   aggregate on (kind × exec), so `bwd-kfuse` or `audit-nvfp4` splits the sample into columns of
+   one. Those are scope, not kind.
+
+   `exec` is exactly three parts, `vehicle/model/effort`, with no spaces. vehicle is one of
+   `codex`, `claude`, `fork`, `workflow`, `background`. Read the model from `-m` and the effort
+   from `-c model_reasoning_effort=`. A wrapper's own path (`tools/dispatch`, `hippo dispatch`)
+   is **not** a vehicle — the vehicle is what actually ran the work. If a part is genuinely
+   absent from the digest write `unknown` for that part alone; never emit prose or the literal
+   placeholder `vehicle/model/effort` as a value.
 2. `{"ev":"outcome","ref":"<dispatch id>","result":"accepted|revised|refuted|no-go|lost","attr":"work|brief|harness","rework":<integer>,"note":"<one line>"}`
    — a delegation that reached a *verdict* in this window: merged/accepted (accepted), accepted
    after repair (revised, with the number of round trips in rework), refuted by verification
    (refuted), ended without starting because a premise did not hold (no-go), or the result itself
-   was lost (lost). ref is a dispatch id identifiable from this window's digest — only when you
-   are sure. How to attribute: a quality problem in the output = work, a defect or contradiction
-   in the instruction or brief = brief, a harness/infrastructure loss (a missed notification, a
-   schema failure, a session limit) = harness.
+   was lost (lost). **`ref` must be a dispatch id you can literally see in this digest.** A task
+   id (`feat/x`) is not a dispatch id. Never reconstruct one from memory or invent one that
+   merely looks right: the writer rejects a ref naming no known dispatch, and a fabricated one
+   is dropped from every aggregate.
+
+   `attr` answers *whose* problem it was, and nothing else. Ask in order: did the instruction or
+   brief say something wrong or contradictory? → `brief`. Did the harness lose the work (a missed
+   notification, a schema failure, a session limit)? → `harness`. Otherwise, was the output itself
+   wrong? → `work`. **If the digest does not say which, omit `attr` entirely** — an absent
+   attribution is a gap, but a reflexive `work` is a lie that blames the executor for the brief's
+   defect, and every routing decision built on it inherits that lie.
 3. `{"ev":"directive","id":"<short kebab id>","text":"<the gist of what was said>","scope":"turn|phase|durable","state":"active"}`
    or `{"ev":"directive","id":"<existing id>","state":"retracted"}`
    — **only operating constraints or instructions spoken by the user (USER: lines)**. Choosing
