@@ -76,8 +76,9 @@ done
 
 exec_field="codex/${model:-unset}/${effort:-unset}"
 
-# 8-char dispatch id: d + 7 hex chars.
-id="d$(printf '%03x%03x%03x' $((RANDOM % 4096)) $((RANDOM % 4096)) $((RANDOM % 4096)) | cut -c1-7)"
+# 128-bit dispatch id. Keep the established d+hex shape while making collisions
+# negligible even for ledgers with many thousands of dispatches.
+id="d$(LC_ALL=C od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
 
 # Resolve bin/hippo relative to this script's real location.
 src="${BASH_SOURCE[0]}"
