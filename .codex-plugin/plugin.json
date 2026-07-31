@@ -1,13 +1,13 @@
 {
   "name": "hippo",
-  "version": "1.4.1",
-  "description": "hippo — your project's hippocampus: task registry, outcome ledger, and background clerks that give agents perception and memory — evidence over enforcement.",
+  "version": "1.4.2",
+  "description": "hippocampus — perception and memory for coding agents: task registry, outcome ledger, and background clerks that turn transcripts into evidence. Records; never enforces. CLI and slash commands are `hippo`.",
   "author": {
     "name": "Jahn",
     "email": "ajh508@naver.com"
   },
-  "homepage": "https://github.com/Dev-Jahn/hippo",
-  "repository": "https://github.com/Dev-Jahn/hippo",
+  "homepage": "https://github.com/Dev-Jahn/hippocampus",
+  "repository": "https://github.com/Dev-Jahn/hippocampus",
   "license": "MIT",
   "keywords": [
     "hippocampus",
@@ -21,9 +21,9 @@
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",
   "interface": {
-    "displayName": "hippo",
+    "displayName": "hippocampus",
     "shortDescription": "Perception and memory for coding agents",
-    "longDescription": "hippo records what you delegated, what was accepted or refuted, and which user directives are still alive — then hands that evidence back at session start. It records; it does not enforce.",
+    "longDescription": "hippocampus records what you delegated, what was accepted or refuted, and which user directives are still alive — then hands that evidence back at session start. It records; it does not enforce.",
     "developerName": "Jahn",
     "category": "Developer Tools",
     "capabilities": [

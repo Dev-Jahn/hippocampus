@@ -1,18 +1,19 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)"
-            srcset="https://raw.githubusercontent.com/Dev-Jahn/hippo/dev/.github/assets/logo-dark.png">
-    <img src="https://raw.githubusercontent.com/Dev-Jahn/hippo/dev/.github/assets/logo-light.png"
+            srcset="https://raw.githubusercontent.com/Dev-Jahn/hippocampus/dev/.github/assets/logo-dark.png">
+    <img src="https://raw.githubusercontent.com/Dev-Jahn/hippocampus/dev/.github/assets/logo-light.png"
          alt="hippo" width="220">
   </picture>
 </p>
 
-# hippo
+# hippocampus
 
-A quiet project organ: hippo doesn't control agents, it gives them
+A quiet project organ: hippocampus doesn't control agents, it gives them
 perception and memory — a task registry, an append-only outcome ledger, and
 background clerks that turn transcripts into evidence. Judgment stays with
-the model; hippo just makes sure it happens on top of good evidence.
+the model; it just makes sure that happens on top of good evidence.
+The plugin, its slash commands, and the CLI are all named `hippo`.
 
 ## Execution surface (4 layers)
 
@@ -91,6 +92,6 @@ Every subcommand supports `-h/--help`; errors print usage to stderr.
 ## Design
 
 Full rationale, ledger schema, clerk guardrails, and the explicit NOT-list
-live in [`DESIGN.md`](https://github.com/Dev-Jahn/hippo/blob/dev/DESIGN.md)
+live in [`DESIGN.md`](https://github.com/Dev-Jahn/hippocampus/blob/dev/DESIGN.md)
 (development branch — not shipped with the plugin). Read it before changing behavior here —
 this README only describes what the code already does.
