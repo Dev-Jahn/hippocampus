@@ -33,15 +33,19 @@ fleet-dispatch의 계승·개정판. 개정 근거는 전부 dogfooding 감사�
 ## 2. 발사 규약
 
 ```bash
-scripts/dispatch.sh --kind kernel-impl --scope "pass2 tensorize" --task feat/x \
+"${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.sh" \
+  --kind kernel-impl --scope "pass2 tensorize" --task feat/x \
   -m gpt-5.6-sol -c model_reasoning_effort=high \
   -C <worktree> --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
-  "$(cat prompts/COMMON.md prompts/<task>.md)" < /dev/null
+  "$(cat prompts/COMMON.md prompts/<task>.md)"
 ```
 
 - 래퍼가 `ev:dispatch`를 자동 기록하고 dispatch id를 첫 줄에 찍는다.
-- **`< /dev/null` 필수**(stdin 미폐쇄 hang). 명령 자체는 harness `run_in_background`로
-  발사 — nohup/disown 등 harness 밖 detach 금지(orphan 사고 이력).
+- `${CLAUDE_PLUGIN_ROOT}`를 쓸 수 없는 소비 프로젝트에서는 위 plugin 경로를 해소한
+  프로젝트 shim(예: `tools/dispatch`)을 두고 그 shim을 호출한다.
+- 래퍼가 `codex exec … < /dev/null`을 내장한다(stdin 미폐쇄 hang 방지). call-site에서
+  `< /dev/null`을 중복해도 무해하다. 명령 자체는 harness `run_in_background`로 발사 —
+  nohup/disown 등 harness 밖 detach 금지(orphan 사고 이력).
 - 프롬프트는 scratchpad 파일로(COMMON + 개별 브리프 concat). 여러 기는 한 메시지에
   묶어 병렬 발사.
 - **어휘 중립화**: GPU 메모리 겹침·오염·주입 같은 표현이 실행기 콘텐츠 필터에

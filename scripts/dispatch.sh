@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # dispatch.sh — codex exec wrapper that auto-records ev:dispatch (DESIGN §3.6).
 #
-# Usage: dispatch.sh --kind <kind> --scope <scope> [--task <task-id>] <codex exec args...>
+# Usage: dispatch.sh --kind <kind> --scope <scope> [--task <task-id>] [--] <codex exec args...>
 #
 # --kind/--scope/--task are dispatch.sh's own flags and are stripped. Every
-# other argument is forwarded to `codex exec` byte-for-byte. -m <model> and
+# argument after --, and every other argument without --, is forwarded to
+# `codex exec` byte-for-byte. -m <model> and
 # a -c model_reasoning_effort=<effort> found among those remaining args are
 # read (not removed) to build the ledger's exec field "codex/<model>/<effort>".
 set -u
 
 usage() {
-  echo "Usage: dispatch.sh --kind <kind> --scope <scope> [--task <task-id>] <codex exec args...>" >&2
+  echo "Usage: dispatch.sh --kind <kind> --scope <scope> [--task <task-id>] [--] <codex exec args...>" >&2
+  echo "       -- 이후 인자는 wrapper flag와 같은 형태여도 모두 codex exec로 전달됩니다" >&2
 }
 
 kind=""
@@ -37,6 +39,14 @@ while [ "$#" -gt 0 ]; do
     --scope=*) scope=${1#--scope=}; shift ;;
     --task) need_value --task "$#"; task=$2; shift 2 ;;
     --task=*) task=${1#--task=}; shift ;;
+    --)
+      shift
+      while [ "$#" -gt 0 ]; do
+        rest+=("$1")
+        shift
+      done
+      break
+      ;;
     *) rest+=("$1"); shift ;;
   esac
 done
@@ -76,8 +86,9 @@ done
 
 exec_field="codex/${model:-unset}/${effort:-unset}"
 
-# 8-char dispatch id: d + 7 hex chars.
-id="d$(printf '%03x%03x%03x' $((RANDOM % 4096)) $((RANDOM % 4096)) $((RANDOM % 4096)) | cut -c1-7)"
+# 128-bit dispatch id. Keep the established d+hex shape while making collisions
+# negligible even for ledgers with many thousands of dispatches.
+id="d$(LC_ALL=C od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
 
 # Resolve bin/hippo relative to this script's real location.
 src="${BASH_SOURCE[0]}"
@@ -94,16 +105,36 @@ if [ -n "$task" ]; then
   log_args+=(--task "$task")
 fi
 
+# The CLI is intentionally a silent no-op outside initialized projects. The
+# wrapper must still tell its caller that this dispatch was not recorded.
+dir="$(pwd -P)"
+hippo_project=""
+while :; do
+  if [ -d "$dir/.hippo" ]; then
+    hippo_project="$dir"
+    break
+  fi
+  if [ -e "$dir/.git" ]; then
+    break
+  fi
+  [ -n "${HOME:-}" ] && [ "$dir" = "$HOME" ] && break
+  parent="$(dirname "$dir")"
+  [ "$parent" = "$dir" ] && break
+  dir="$parent"
+done
+
 # The ledger line goes to stderr, not stdout: DESIGN §3.6 reserves stdout's
 # first line for the dispatch id.
-if [ -x "$hippo_bin" ]; then
+if [ -z "$hippo_project" ]; then
+  echo "dispatch: .hippo/ 없음 — dispatch 기록을 생략합니다" >&2
+elif [ -x "$hippo_bin" ]; then
   HIPPO_SRC=wrapper "$hippo_bin" "${log_args[@]}" >&2
   log_status=$?
+  if [ "$log_status" -ne 0 ]; then
+    echo "dispatch: hippo log dispatch 기록 실패 (exit $log_status) — 위임은 계속 진행합니다" >&2
+  fi
 else
-  log_status=127
-fi
-if [ "$log_status" -ne 0 ]; then
-  echo "dispatch: hippo log dispatch 기록 실패 (exit $log_status) — 위임은 계속 진행합니다" >&2
+  echo "dispatch: hippo log dispatch 기록 실패 (exit 127) — 위임은 계속 진행합니다" >&2
 fi
 
 echo "dispatch:$id"
