@@ -335,8 +335,8 @@ def test_m1_scribe_may_still_emit_directives(
 
 
 def test_m1_inject_truncates_long_directive_text(tmp_project, run_hippo):
-    """--inject is a resident surface fed by untrusted transcript text: one
-    line, capped, so a directive cannot blow past the ≤6-line ceiling."""
+    """--inject is a resident surface fed by untrusted transcript text: a
+    directive is folded to one capped line so it cannot blow the surface up."""
     long_text = "A" * 300 + "\n두 번째 줄\n세 번째 줄"
     proc = run_hippo(
         [
@@ -360,7 +360,6 @@ def test_m1_inject_truncates_long_directive_text(tmp_project, run_hippo):
     inject = run_hippo(["status", "--inject"], cwd=tmp_project)
     assert inject.returncode == 0, inject.stderr
     lines = inject.stdout.splitlines()
-    assert len(lines) <= 6
     live = [ln for ln in lines if ln.startswith("· live(")]
     assert len(live) == 1
     body = live[0].split(": ", 1)[1]

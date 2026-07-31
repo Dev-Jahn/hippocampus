@@ -116,7 +116,7 @@ def one_line(text, limit):
     """주입 표면(§6)에 들어가는 문자열을 한 줄로 접고 자른다.
 
     directive의 text는 scribe가 untrusted transcript에서 읽어 쓴 값이다 —
-    여러 줄이거나 아주 길면 ≤6줄 상주 표면 자체를 밀어낼 수 있다."""
+    여러 줄이거나 아주 길면 상주 표면 자체를 밀어낼 수 있다."""
     s = " ".join(str(text or "").split())
     return s if len(s) <= limit else s[: limit - 1] + "…"
 
@@ -307,8 +307,11 @@ def cmd_init(_args):
     print(f"생성: {hp}")
 
 
+DIRECTIVE_BUDGET = 1600  # 주입 표면의 directive 블록 글자 예산 (DESIGN §6)
+
+
 def status_lines(hp):
-    """DESIGN §6 상주 표면 (≤6줄)."""
+    """DESIGN §6 상주 표면 (헤더 + 살아있는 지시 + last)."""
     data = tasks_load(hp)
     n_open = sum(1 for t in data["tasks"] if t.get("status") in OPEN_STATUSES)
     live = [d for d in directives(hp).values() if d.get("state") == "active"]
@@ -327,11 +330,24 @@ def status_lines(hp):
             f"· priors {stamp('PRIORS.md')} · worklog {stamp('worklog.md')}"
         )
     ]
-    show = live if len(live) <= 4 else live[:3]
-    for d in show:
-        lines.append(f"· live({d.get('scope', '?')}): {one_line(d.get('text', ''), 80)}")
-    if len(live) > 4:
-        lines.append(f"· (+{len(live) - 3} more live directives)")
+    # durable 먼저, 그리고 절대 phase/turn에 밀려 접히지 않는다: 수명이 없는 지시가
+    # 세션 시작에 안 보이면 그 지시는 사실상 없는 것이다 (원칙 9의 반대 방향 사고).
+    # 상한은 줄 수가 아니라 글자 예산 — 긴 지시 한 줄과 짧은 지시 한 줄이 같은 비용일
+    # 이유가 없다.
+    ordered = [d for d in live if d.get("scope") == "durable"] + [
+        d for d in live if d.get("scope") != "durable"
+    ]
+    used, shown = 0, 0
+    for d in ordered:
+        durable = d.get("scope") == "durable"
+        line = f"· live({d.get('scope', '?')}): {one_line(d.get('text', ''), 200 if durable else 80)}"
+        if shown and used + len(line) > DIRECTIVE_BUDGET:
+            break
+        lines.append(line)
+        used += len(line)
+        shown += 1
+    if shown < len(ordered):
+        lines.append(f"· (+{len(ordered) - shown} more — `hippo directive` 로 전문)")
     p = hp / "worklog.md"
     if p.exists():
         # 마지막 날짜 섹션 안에서, scribe가 쓴 "- HH:MM …" 항목만 본다.
@@ -762,7 +778,7 @@ def build_parser():
 
     s = sub.add_parser("status", help="한 덩어리 요약")
     s.add_argument(
-        "--inject", action="store_true", help="SessionStart 훅용 ≤6줄 주입 형식"
+        "--inject", action="store_true", help="SessionStart 훅 주입 형식 (§6)"
     )
     s.set_defaults(fn=cmd_status)
 

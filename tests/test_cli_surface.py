@@ -273,3 +273,46 @@ def test_prior_distill_regenerates_priors_md(tmp_project, run_hippo, tmp_path):
     show = run_hippo(["prior", "show"], cwd=tmp_project)
     assert show.returncode == 0
     assert "mock 증류 결과" in show.stdout
+
+
+# --------------------------------------------------------------------------
+# 주입 표면: durable 지시는 접히지 않는다 (§6)
+# --------------------------------------------------------------------------
+
+def _add_directive(run_hippo, cwd, did, text, scope):
+    proc = run_hippo(
+        ["directive", "add", "--id", did, "--text", text, "--scope", scope], cwd=cwd
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_inject_never_folds_durable_directives(tmp_project, run_hippo):
+    """durable은 수명이 없는 사용자 ruling이다 — 세션 시작에 안 보이면 없는 것과 같다.
+    phase/turn 지시가 아무리 많아도 durable을 밀어내지 못한다."""
+    for i in range(6):
+        _add_directive(run_hippo, tmp_project, f"dur-{i}", f"영구 지시 {i}", "durable")
+    for i in range(20):
+        _add_directive(
+            run_hippo, tmp_project, f"ph-{i}", f"국면 지시 {i} " + "잡음" * 40, "phase"
+        )
+
+    out = run_hippo(["status", "--inject"], cwd=tmp_project)
+    assert out.returncode == 0, out.stderr
+    live = [ln for ln in out.stdout.splitlines() if ln.startswith("· live(")]
+    assert sum(1 for ln in live if ln.startswith("· live(durable)")) == 6
+    for i in range(6):
+        assert f"영구 지시 {i}" in out.stdout
+    # 접힌 것이 있으면 전문을 볼 명령을 알려준다 ("+N more"만으로는 행동이 안 나온다).
+    folded = [ln for ln in out.stdout.splitlines() if "more" in ln]
+    assert folded and "hippo directive" in folded[0]
+
+
+def test_inject_keeps_durable_text_readable(tmp_project, run_hippo):
+    """durable 한 줄은 80자에서 잘리면 작동 조항이 사라진다 — 200자까지 살린다."""
+    text = "가" * 150 + " 꼬리조항"
+    _add_directive(run_hippo, tmp_project, "long-dur", text, "durable")
+    out = run_hippo(["status", "--inject"], cwd=tmp_project)
+    body = [ln for ln in out.stdout.splitlines() if ln.startswith("· live(durable)")][0]
+    body = body.split(": ", 1)[1]
+    assert len(body) > 80 and len(body) <= 200
+    assert "꼬리조항" in body

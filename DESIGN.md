@@ -59,7 +59,7 @@ clerk 가드레일(불변):
 ```
 런타임(얇게):  bin/hippo(shim) + cli/hippo_cli.py + hooks 2개 + scripts/{clerk_run,digest_lite,dispatch}
 인지(텍스트):  clerks/{turn-scribe,distiller}.md + skills/{hippo,checkup,dispatch}
-상주(≤6줄):   SessionStart 주입 한 덩어리 (아래 §6)
+상주(작게):   SessionStart 주입 한 덩어리 (아래 §6)
 강제:         없음
 ```
 
@@ -143,7 +143,7 @@ hippo scribe --transcript P --session S     # Stop 훅이 detached로 부르는 
 
 `hooks/hooks.json`:
 - **SessionStart** (startup·resume·clear·compact): `hooks/session_start.sh`
-  → `.hippo/` 없으면 무음 exit 0. 있으면 `hippo status --inject` (§6 형식, ≤6줄).
+  → `.hippo/` 없으면 무음 exit 0. 있으면 `hippo status --inject` (§6 형식).
   compact 후 재주입이 곧 **context keeper**다: 살아있는 directive가 compaction을 넘어
   생존한다(compaction 86회 실측 유실 문제의 해법).
 - **Stop**: `hooks/stop.sh` — stdin JSON에서 `transcript_path`·`session_id`·`cwd` 파싱,
@@ -206,7 +206,7 @@ stdout 첫 줄에 찍은 뒤 `codex exec … < /dev/null`을 그대로 실행한
 | delegate 표면·역할 바인딩 config | 라우팅은 main의 판단 + PRIORS의 증거로. config 고정은 stale 지시 사고의 원천 |
 | brief 타입 사실·assurance DAG | 의도는 짧은 문서와 대화로. drift는 통제가 아니라 가시화로 |
 | PreToolUse/PostToolUse/UserPromptSubmit 훅 | 매 호출 지연 + 무출력 훅 실증. 훅은 2개가 상한 |
-| OPERATING CONTRACT류 상주 주입 | 8–14KB 재주입 실측. 상주는 §6의 ≤6줄뿐 |
+| OPERATING CONTRACT류 상주 주입 | 8–14KB 재주입 실측. 상주는 §6의 한 덩어리뿐 |
 | 손으로 쓰는 PROGRESS.md | 낡는다. worklog(생성) + ledger(사실) + PRIORS(증류)로 대체 |
 | typed refusal 게이트·frozen sidecar·remote verify | 기록하되 강제하지 않는다(원칙 3) |
 | codex 호스트 플러그인(hippo-codex) | MVP 범위 밖. CLI는 어차피 호스트 무관 |
@@ -223,10 +223,19 @@ stdout 첫 줄에 찍은 뒤 `codex exec … < /dev/null`을 그대로 실행한
 
 ```
 [hippo] tasks 3 open · directives 2 live · priors 07-31 · worklog 07-31
-· live(phase): GPU 0,1만 사용
 · live(durable): 리뷰 회신은 컨텍스트 유지, 파일 저장 금지
+· live(phase): GPU 0,1만 사용
 · last: v2 Pareto duo 머지, full gate green(1421)
 ```
+
+지시 블록의 규칙 두 개:
+
+- **durable은 접지 않는다.** 수명이 없는 사용자 ruling이 세션 시작에 안 보이면 그 지시는
+  사실상 없는 것이다. 항상 먼저, 전부 나온다 (줄당 200자). phase/turn이 아무리 많아도
+  durable을 밀어내지 못한다.
+- 상한은 줄 수가 아니라 **글자 예산**(1600자)이다 — 긴 지시 한 줄과 짧은 지시 한 줄이 같은
+  비용일 이유가 없다. 접힐 때는 `+N more` 로 끝내지 않고 전문을 볼 명령
+  (`hippo directive`)을 같이 찍는다. 개수가 아니라 행동을 알려주는 것이 접힘의 목적이다.
 
 ## 7. 테스트 방침
 
