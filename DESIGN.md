@@ -187,7 +187,8 @@ hippo directive list [--active] [--json]
 hippo directive add [typed flags…]          # auto-id derived from text when --id is omitted
 hippo directive withdraw <directive-id>
 hippo prior show
-hippo prior distill [--days N]              # run the distiller clerk → regenerate PRIORS.md
+hippo prior distill [--days N]              # compute the scorecard, then have the distiller
+                                            #   clerk write PRIORS.md around it
 hippo dispatch --kind K --scope S [--task T] [--] <codex exec args…>   # §3.6
 hippo scribe --transcript P --session S     # internal surface the Stop hook calls detached
 ```
@@ -268,6 +269,28 @@ This surface is the one exception to the silent no-op rule: with no `.hippo/` it
 **launches anyway**. Its real job is running codex, and swallowing the launch because the record
 failed would make it a trap rather than a wrapper. The remaining arguments — including everything
 after `--` — are passed through without interpretation; that is codex's grammar, not this CLI's.
+
+### 3.6b The distiller split — the clerk writes the page, the code does the sums
+
+`hippo prior distill` computes the whole scorecard itself — the dispatch ⋈ outcome join, the
+first-pass rate per `kind × exec`, the refuted+revised share per exec, attribution, unjoined
+outcomes, stale dispatches, open reviews, clerk overhead — and hands the clerk a fact sheet
+instead of the ledger. The clerk writes every sentence of PRIORS.md; it writes no number that is
+not already on the sheet.
+
+This is not a style preference. Measured on a consuming project (293 events): **all seven cells
+the clerk produced disagreed with the ledger**, in both directions, and against the formula the
+clerk's own prompt states. Two of the errors changed the advice — `no-go` outcomes counted as
+failures invented a worst-performing cell (`perf × xhigh` reported 5/8, actually 2/2, below the
+sample threshold entirely), and two verify cells read 100% while each hid a refutation, which is
+precisely the number the verification-budget advice is derived from. The join is deterministic, so
+a model was the wrong instrument (principles 4 and 6), and PRIORS is read as evidence — a page
+whose digits cannot be trusted is worse than no page.
+
+Cells under n=4 get no rate but are still named with their n: a percentage over n=1 reads as
+evidence and is not one, while dropping it silently leaves the reader unable to tell a suppressed
+cell from an absent one. The raw ledger is deliberately not sent — everything the page needs is on
+the sheet, and shipping 300 JSONL lines only offers something to recompute from, badly.
 
 ### 3.7 Skills (three)
 

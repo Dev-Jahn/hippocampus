@@ -5,6 +5,7 @@
 """hippo CLI — ledger/task/directive recording and the clerk pipeline (DESIGN.md §3.2, §3.3, §3.5)."""
 
 import argparse
+import collections
 import contextlib
 import fcntl
 import hashlib
@@ -708,27 +709,135 @@ def cmd_prior_show(args):
     )
 
 
+PRIOR_MIN_SAMPLE = 4
+
+
+def event_time(e):
+    try:
+        return datetime.strptime(e.get("t", ""), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
+
+
+def prior_facts(rows, now):
+    """Every number in PRIORS.md, computed here instead of by the clerk.
+
+    Measured on a consuming project (293 events): all seven cells the clerk produced disagreed
+    with the ledger, in both directions, and against the formula the clerk prompt itself states.
+    Two of the errors changed the advice — `no-go` counted as failure invented a worst-performing
+    cell that was really 2/2, and two verify cells read 100% while each hid a refutation. The join
+    is deterministic (dispatch ⋈ outcome on ref, then count), so a model was the wrong instrument
+    for it: principles 4 and 6. The clerk still writes every sentence of the page; it no longer
+    does the sums, and it is no longer handed the raw ledger to do them from."""
+    disp = [e for e in rows if e.get("ev") == "dispatch"]
+    outs = [e for e in rows if e.get("ev") == "outcome"]
+    first = {}
+    for e in outs:  # the ledger is append-only, so file order is chronological
+        first.setdefault(e.get("ref"), e)
+    known = {e.get("id") for e in disp}
+
+    cells, per_exec = {}, {}
+    for d in disp:
+        f = first.get(d.get("id"))
+        if not f:
+            continue
+        for bucket, key in ((cells, (d.get("kind"), d.get("exec"))), (per_exec, d.get("exec"))):
+            b = bucket.setdefault(key, {"judged": 0, "accepted": 0, "revised": 0, "refuted": 0,
+                                        "no-go": 0, "lost": 0, "rework": 0})
+            b["judged"] += 1
+            b[f.get("result")] = b.get(f.get("result"), 0) + 1
+            b["rework"] += int(f.get("rework") or 0)
+
+    def rate(b):
+        return b["judged"] - b["no-go"] - b["lost"]
+
+    # Cells under the threshold are named but never given a rate: a percentage over n=1 reads as
+    # evidence and is not one. Naming them keeps the omission visible instead of silent.
+    lines = ["## routing — accepted / (judged − no-go − lost), per kind × exec", "",
+             "| kind | exec | n | first-pass | revised | rework | verdicts |",
+             "|---|---|---:|---:|---:|---:|---|"]
+    thin = []
+    for (kind, ex), b in sorted(cells.items(), key=lambda kv: -rate(kv[1])):
+        n = rate(b)
+        if n < PRIOR_MIN_SAMPLE:
+            thin.append(f"{kind}×{ex} (n={n})")
+            continue
+        verdicts = ", ".join(f"{k} {b[k]}" for k in ("accepted", "revised", "refuted", "no-go",
+                                                     "lost") if b[k])
+        lines.append(f"| {kind} | {ex} | {n} | {b['accepted']}/{n} "
+                     f"({100 * b['accepted'] / n:.1f}%) | {b['revised']} | {b['rework']} "
+                     f"| {verdicts} |")
+    if thin:
+        lines += ["", f"below the n={PRIOR_MIN_SAMPLE} threshold, no rate reported "
+                      f"({len(thin)}): " + ", ".join(thin)]
+
+    lines += ["", "## verification signal — refuted+revised share of judged, per exec", "",
+              "| exec | judged | refuted+revised | rate |", "|---|---:|---:|---:|"]
+    thin_exec = []
+    for ex, b in sorted(per_exec.items(), key=lambda kv: -kv[1]["judged"]):
+        bad = b["refuted"] + b["revised"]
+        if b["judged"] < PRIOR_MIN_SAMPLE:
+            thin_exec.append(f"{ex} (n={b['judged']})")
+            continue
+        lines.append(f"| {ex} | {b['judged']} | {bad} | {100 * bad / b['judged']:.1f}% |")
+    if thin_exec:
+        lines += ["", f"below the n={PRIOR_MIN_SAMPLE} threshold, no rate reported "
+                      f"({len(thin_exec)}): " + ", ".join(thin_exec)]
+
+    attr = collections.Counter(e.get("attr") for e in outs if e.get("result") != "accepted")
+    unjoined = sum(1 for e in outs if e.get("ref") not in known)
+    lines += ["", "## attribution of non-accepted outcomes", "",
+              f"work {attr['work']} / brief {attr['brief']} / harness {attr['harness']} "
+              f"/ unattributed {attr[None]}", "",
+              f"## unjoined outcomes\n\n{unjoined}", "", "## open items — no outcome, launched "
+              "more than 24h ago", ""]
+    stale = []
+    for d in disp:
+        t = event_time(d)
+        if d.get("id") in first or not t or (now - t) < timedelta(hours=24):
+            continue
+        h, m = divmod(int((now - t).total_seconds()) // 60, 60)
+        stale.append(f"- {d.get('id')} ({h}h{m:02d}m)")
+    lines += stale or ["(none)"]
+
+    status = {}
+    for e in rows:
+        if e.get("ev") == "review-status":
+            status[e.get("ref")] = e.get("addressed")
+    open_reviews = [f"- {e.get('id')} base={e.get('base')} addressed={status.get(e.get('id'), 'none')}"
+                    for e in rows if e.get("ev") == "review" and status.get(e.get("id")) != "full"]
+    lines += ["", "## reviews not fully addressed", ""] + (open_reviews or ["(none)"])
+
+    clerks = [e for e in rows if e.get("ev") == "clerk"]
+    fails = sum(1 for e in clerks if e.get("ok") is False)
+    tokens = sum(int(e.get("tokens") or 0) for e in clerks)
+    lines += ["", "## clerk overhead", "",
+              f"{len(clerks)} runs, {fails} failures, ~{tokens} tokens"]
+    return "\n".join(lines)
+
+
 def cmd_distill(args):
     hp = args.hp
-    cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=args.days)
     kept = []
     for e in read_ledger(hp):
-        try:
-            t = datetime.strptime(e.get("t", ""), "%Y-%m-%dT%H:%M:%SZ").replace(
-                tzinfo=timezone.utc
-            )
-        except ValueError:
-            continue
-        if t >= cutoff:
-            kept.append(json.dumps(e, ensure_ascii=False))
+        t = event_time(e)
+        if t and t >= cutoff:
+            kept.append(e)
     priors = (
         (hp / "PRIORS.md").read_text(encoding="utf-8")
         if (hp / "PRIORS.md").exists()
         else "(none)"
     )
+    # The raw ledger is deliberately not sent: everything the page needs is in the fact sheet,
+    # and handing over 300 JSONL lines only offers something to compute from — badly — and to
+    # quote from.
     payload = (
-        f"# ledger events (last {args.days} days, {len(kept)})\n\n"
-        + "\n".join(kept)
+        f"# computed facts (window: {args.days} days, {len(kept)} events)\n\n"
+        + prior_facts(kept, now)
         + "\n\n# current PRIORS.md\n\n"
         + priors
         + "\n"
