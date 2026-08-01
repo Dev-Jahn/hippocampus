@@ -387,8 +387,39 @@ def directive_volume_notes(hp):
     return notes
 
 
+IN_FLIGHT_WINDOW_H = 24
+
+
+def in_flight(hp):
+    """Delegations launched but not yet judged — the one part of "where was I" that is a fact.
+
+    Only launcher-written dispatches count (`wrapper`/`cli`): those are the ones somebody chose to
+    launch and will come back to. Scribe-inferred rows would swamp it — measured on a consuming
+    project, the same query over all writers returned 16 where three lanes were actually flying,
+    and restricting it to the launcher returned exactly those three, matching by hand the list the
+    project was maintaining in a file.
+
+    A dispatch older than a day is not in flight, it is forgotten; `prior distill` already reports
+    those as open items, which is the right place for them."""
+    rows = read_ledger(hp)
+    judged = {e.get("ref") for e in rows if e.get("ev") == "outcome"}
+    now = datetime.now(timezone.utc)
+    out = []
+    for e in rows:
+        if e.get("ev") != "dispatch" or e.get("src") not in ("wrapper", "cli"):
+            continue
+        if e.get("id") in judged:
+            continue
+        t = event_time(e)
+        if not t or (now - t) > timedelta(hours=IN_FLIGHT_WINDOW_H):
+            continue
+        mins = int((now - t).total_seconds()) // 60
+        out.append(f"{one_line(e.get('scope', ''), 44)} ({mins // 60}h{mins % 60:02d}m)")
+    return out
+
+
 def status_lines(hp):
-    """DESIGN §6 resident surface (header + live directives + last)."""
+    """DESIGN §6 resident surface (header + live directives + in flight + last)."""
     data = tasks_load(hp)
     n_open = sum(1 for t in data["tasks"] if t.get("status") in OPEN_STATUSES)
     live = [d for d in directives(hp).values() if d.get("state") == "active"]
@@ -416,6 +447,10 @@ def status_lines(hp):
     ]
     for d in ordered:
         lines.append(f"· live({d.get('lifetime') or '?'}): {one_line(d.get('text', ''))}")
+    # Nothing flying → no line. The capsule only spends a line on a question that has an answer.
+    flying = in_flight(hp)
+    if flying:
+        lines.append(f"· in flight: {', '.join(flying)}")
     p = hp / "worklog.md"
     if p.exists():
         # Within the latest date section, only look at the "- HH:MM …" entries the scribe wrote.

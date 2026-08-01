@@ -400,8 +400,22 @@ Constraints specific to codex (0.144.6):
 [hippo] tasks 3 open · directives 2 live · priors 07-31 · worklog 07-31
 · live(durable): keep review replies in context, never save them to a file
 · live(phase): use GPUs 0 and 1 only
+· in flight: NVFP4 factor-rebasing 6-part (0h42m), r2 UNCERTAIN 4건 (0h12m)
 · last: merged the v2 Pareto duo, full gate green (1421)
 ```
+
+`in flight` is delegations launched and not yet judged, within 24h, **counting only what a
+launcher wrote** (`src` `wrapper`/`cli`). It is the one part of "where was I" that is a fact rather
+than a plan, and it is the reason it belongs here instead of in a hand-kept file: measured on a
+consuming project, this query returned exactly the three lanes that project was listing by hand,
+while the same query over every writer returned 16 — scribe-inferred rows swamp it. With nothing
+flying the line is absent; a dispatch older than a day is not in flight but forgotten, and
+`prior distill` already reports those as open items.
+
+Everything else such a file carries has a home already: the current phase is a `phase` directive,
+what shipped is the worklog, ordering is `task deps`, and a merge hazard belongs in the brief for
+the lane that will cause it (dispatch skill §5). A re-entry document is what appears when those
+surfaces go unused — not a gap in this design.
 
 Two rules govern the directive block:
 
