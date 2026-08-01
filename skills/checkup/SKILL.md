@@ -9,6 +9,16 @@ The project-level `/doctor`. Diagnose everything read-only, report, and apply cl
 confirmation. With no `.hippo/`, answer in one line — "hippo is not initialized — run `hippo init`"
 — and stop.
 
+## Calling the tools
+
+In Claude Code `hippo` is on PATH. **In Codex it is not** — resolve `../../bin/hippo` relative
+to this SKILL.md into an absolute path and call that. The transcript compressor is
+`../../scripts/digest_lite.py` (same resolution; stdlib-only):
+`python3 <plugin>/scripts/digest_lite.py <transcript.jsonl> [--since-line N]`.
+Transcripts live under `~/.claude/projects/<project cwd with "/" replaced by "-">/` (Claude
+Code) or `~/.codex/sessions/` in dated subdirectories (Codex) — take the newest few by mtime.
+`.hippo/cursors.json` maps session id → the last transcript line the scribe has read.
+
 ## Ground rules (inherited from the doctor contract)
 
 - **Propose → confirm → apply, at most two questions.** (1) One cleanup bundle, with the

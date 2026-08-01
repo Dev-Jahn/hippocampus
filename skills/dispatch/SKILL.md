@@ -12,10 +12,12 @@ measurement against the Opus 5 guide.
 
 1. `hippo prior show` — check which (model, effort) measured better for this kind. A prior is
    advice: main still decides the final routing from the difficulty and volume of the work at hand.
-2. `hippo directive list --active` — fold the live constraints (GPU range, hold policies, …) into
+2. `hippo task` — what can start now: a lane whose task shows a `waiting on:` line still has an
+   unfinished dep and belongs in a later wave.
+3. `hippo directive list --active` — fold the live constraints (GPU range, hold policies, …) into
    the brief. **Grep the shared brief (COMMON) against the individual brief for conflicting
    constraint clauses first** (contradictory clauses once produced a fail-closed NO-GO).
-3. Asset preflight: main verifies that the files, models and data the brief names actually exist.
+4. Asset preflight: main verifies that the files, models and data the brief names actually exist.
 
 ## 1. Role routing
 
@@ -111,7 +113,8 @@ contamination).
   `hippo log outcome --ref <id> --result refuted --attr work --note "..."` — or
   `--ref task:<task-id>` when only one dispatch for that task is still awaiting a verdict.
   Attribute honestly — output problem = work, brief defect = brief, infrastructure loss = harness.
-  A wrong attribution makes the priors lie.
+  A wrong attribution makes the priors lie. When acceptance came only after repair, record
+  `--result revised --rework <round-trips>` — the rework sum is a column PRIORS reports.
 
 ## 5. Isolation, collection, merge
 

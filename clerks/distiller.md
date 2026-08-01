@@ -21,7 +21,10 @@ imperatives ("you must use X"); write findings with their numbers, in the form "
 ## Structure (in this order)
 
 1. Header: generation time and the aggregation window (days, event count). Add
-   `> generated document — do not edit by hand; regenerate with hippo prior distill`.
+   `> generated document — do not edit by hand; regenerate with hippo prior distill. A
+   hand-added '## Pinned notes' section survives regeneration.`
+   (That second sentence is how the page's readers learn pinning exists — this prompt is the
+   only other place it is written down.)
 2. **Routing priors**: the routing table from the fact sheet, reproduced. Keep the cells marked
    "insufficient sample" marked as such — a low-n cell that reads like a rate is worse than no
    cell. Below it, one or two sentences on what stands out.
