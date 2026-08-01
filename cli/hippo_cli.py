@@ -547,6 +547,27 @@ def cmd_task_drop(args):
     print(f"dropped {args.id}")
 
 
+def unmet_deps(tasks, t):
+    """The deps of `t` that are not finished — i.e. why it cannot be started yet.
+
+    `deps` was write-only until this existed: two writers, no reader, no output that mentioned it.
+    Measured on a consuming project, 4 of 98 tasks used it — which is the rational response to a
+    field that does nothing, not a sign nobody wanted ordering. That project was keeping its
+    ordering in a hand-written re-entry document instead, with the reasons attached.
+
+    A dep naming no task is marked `?` rather than passed over: it is the same silent shape as a
+    dangling `ref` — it validates, it sits there, and it quietly stops meaning anything."""
+    by_id = {x.get("id"): x for x in tasks}
+    out = []
+    for d in t.get("deps") or []:
+        dep = by_id.get(d)
+        if dep is None:
+            out.append(f"{d}?")
+        elif dep.get("status") not in ("done", "dropped"):
+            out.append(d)
+    return out
+
+
 def cmd_task_list(args):
     tasks = tasks_load(args.hp)["tasks"]
     if not args.all:
@@ -562,8 +583,14 @@ def cmd_task_list(args):
     if args.json:
         print(json.dumps(tasks, ensure_ascii=False, indent=2))
         return
+    everything = tasks_load(args.hp)["tasks"]
     for t in tasks:
         print(f"{t.get('id')}  [{t.get('status', '?')}]  {t.get('title', '')}")
+        # A second line only when there is something to say — the same rule the directive notes
+        # follow. A task with nothing in its way should read as one line.
+        waiting = unmet_deps(everything, t)
+        if waiting:
+            print(f"    waiting on: {', '.join(waiting)}")
 
 
 def cmd_task_show(args):

@@ -182,6 +182,8 @@ hippo task add <id> --title T [--status pending] [--notes N] [--deps a,b]
 hippo task set <id> <field> <value>
 hippo task done <id> [--note N]
 hippo task list [--status s1,s2] [--all] [--json]   # comma multi-filter (fixes a 0.x request)
+                                                    #   prints "waiting on: …" under any task
+                                                    #   whose deps are not all done
 hippo task show <id> [--json] | task drop <id>
 hippo log <ev> [typed flags…]               # dispatch|outcome|review|review-status
 hippo log raw '<json>'                      # validate, then append
@@ -203,6 +205,15 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
   views recomputed from the ledger every time.
 - Task states: `pending|active|done|dropped`. tasks.yaml may be edited by hand and the CLI always
   re-parses it. No acrobatics such as comment preservation (a lesson from 0.x).
+- `deps` answers one question — *what can I start now* — and `task list` is where it answers it:
+  a task with an unfinished dep gets a `waiting on:` line under it, nothing otherwise. A dep naming
+  no task is printed with a `?`, because that is the same silent shape as a dangling `ref`.
+  Status is never derived from it: a manual `blocked`-like state would mean "waiting on something
+  outside the registry" and that is a different fact, so the two are kept apart (principle 4 —
+  derive the mechanical part, store only what cannot be derived). Until 1.7.2 nothing read this
+  field at all, and a consuming project used it in 4 of 98 tasks while keeping its real ordering in
+  a hand-written document — the rational response to a field that does nothing, not evidence that
+  ordering was unwanted.
 - **Identifiers** (conventions, not enforced — recording beats refusing):
   a task id reads `<type>/<kebab-slug>` (`feat/stream-carry`, `fix/cursor-gap`) so it is
   self-explanatory in a commit, a branch name and a ledger line at once. A task type is *not* a
