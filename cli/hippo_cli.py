@@ -346,12 +346,38 @@ def cmd_init(_args):
 
 
 # Nudge thresholds for the directive block (DESIGN §6). None of these is enforced: every active
-# directive is injected in full, whatever the totals say. They exist so that `hippo directive add`
-# can name the cost at the moment the author can still do something about it — silently folding a
-# ruling away is the failure mode principle 9 is about, and a cap is just a quieter way to lose it.
+# directive is injected in full, whatever the totals say. They exist so the surfaces that touch
+# directives can name the cost while the author can still do something about it — silently folding
+# a ruling away is the failure mode principle 9 is about, and a cap is just a quieter way to lose it.
 DIRECTIVE_TEXT_NUDGE = 200  # one directive this long is asking to be compressed
 DIRECTIVE_COUNT_NUDGE = 8  # this many live at once is asking for a hygiene pass
 DIRECTIVE_TOTAL_NUDGE = 1600  # total characters resident in every session from here on
+
+
+def directive_volume_notes(hp):
+    """Notes about what the live directive set currently costs, or [] when it costs little.
+
+    Measured against the set as it stands, not against the one directive being written: the
+    expensive ones are usually the ones already resident, and warning only at write time leaves
+    them permanently unmentioned — every session pays and nobody is ever told."""
+    live = [d for d in directives(hp).values() if d.get("state") == "active"]
+    sized = [(d["id"], len(one_line(d.get("text", "")))) for d in live]
+    total = sum(n for _, n in sized)
+    long = sorted([(i, n) for i, n in sized if n > DIRECTIVE_TEXT_NUDGE], key=lambda x: -x[1])
+    notes = []
+    if long:
+        listed = ", ".join(f"{i} ({n})" for i, n in long)
+        notes.append(
+            f"note: {len(long)} directive(s) over {DIRECTIVE_TEXT_NUDGE} chars — {listed}. "
+            "Compress and re-add under the same --id."
+        )
+    if len(live) >= DIRECTIVE_COUNT_NUDGE or total >= DIRECTIVE_TOTAL_NUDGE:
+        notes.append(
+            f"note: {len(live)} live directives, {total} chars — all of it is injected into every "
+            "session from here on. Compress them, or withdraw the stale ones "
+            "(`hippo directive withdraw <id>`)."
+        )
+    return notes
 
 
 def status_lines(hp):
@@ -580,26 +606,14 @@ def cmd_log(args):
             e["text"] = args.text
         if args.lifetime:
             e["lifetime"] = args.lifetime
-        # Nudges, not rules: the write goes through either way (principle 3).
-        n = len(one_line(args.text))
-        if n > DIRECTIVE_TEXT_NUDGE:
-            print(
-                f"note: this directive is {n} chars and every session pays for it. "
-                "Consider compressing it and re-adding under the same --id.",
-                file=sys.stderr,
-            )
+        # Length is not warned about here: the set-wide notes emitted after the write name every
+        # oversized directive by id and size, including this one. Saying it twice trains the
+        # reader to skim the notes.
     log_and_print(args.hp, e)
     if args.ev == "directive":
-        # Measured after the write, so the totals include what was just added.
-        live = [d for d in directives(args.hp).values() if d.get("state") == "active"]
-        total = sum(len(one_line(d.get("text", ""))) for d in live)
-        if len(live) >= DIRECTIVE_COUNT_NUDGE or total >= DIRECTIVE_TOTAL_NUDGE:
-            print(
-                f"note: {len(live)} live directives, {total} chars — all of it is injected into "
-                "every session from here on. Compress them, or withdraw the stale ones "
-                "(`hippo directive` to review, `hippo directive withdraw <id>`).",
-                file=sys.stderr,
-            )
+        # After the write, so the notes describe the set the next session will actually carry.
+        for note in directive_volume_notes(args.hp):
+            print(note, file=sys.stderr)
 
 
 def cmd_log_raw(args):
@@ -628,6 +642,10 @@ def cmd_directive_list(args):
         print(
             f"{d['id']}  [{d.get('state', '?')}/{d.get('lifetime', '?')}]  {d.get('text', '')}"
         )
+    # Reviewing the set is the other moment the author can act on what it costs. On stderr, so
+    # the listing itself stays a clean, pipeable record of the directives.
+    for note in directive_volume_notes(args.hp):
+        print(note, file=sys.stderr)
 
 
 def cmd_log_tail(args):
