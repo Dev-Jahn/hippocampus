@@ -5,7 +5,9 @@
 # headless low-cost model backend, and prints the model's raw response to
 # stdout. Backend resolution: $HIPPO_CLERK_BACKEND (auto|codex|claude|mock,
 # default auto). auto picks codex if the codex CLI is installed, else claude,
-# else exits 3. The whole call is bounded to $HIPPO_CLERK_TIMEOUT seconds
+# else exits 3. $HIPPO_CLERK_MODEL overrides the model on either backend; unset,
+# each backend falls back to its own default (codex: gpt-5.6-luna, claude: sonnet).
+# The whole call is bounded to $HIPPO_CLERK_TIMEOUT seconds
 # (default 120; exit 124 on timeout). Backend stderr is discarded.
 set -u
 
@@ -29,7 +31,11 @@ for f in "$PROMPT_FILE" "$INPUT_FILE"; do
 done
 
 BACKEND=${HIPPO_CLERK_BACKEND:-auto}
-MODEL=${HIPPO_CLERK_MODEL:-gpt-5.6-luna}
+# One override for both backends. The default is per-backend because the two name their
+# models differently — a single default would be an invalid id on the other backend.
+# Set this only when the backend is also pinned; a value meant for one backend is
+# nonsense to the other, and the backend is what `auto` resolves, not what you asked for.
+MODEL=${HIPPO_CLERK_MODEL:-}
 TIMEOUT=${HIPPO_CLERK_TIMEOUT:-120}
 
 # No recursion (DESIGN §2): the backends below can start sessions that carry their own hooks.
@@ -110,7 +116,7 @@ case "$BACKEND" in
     # --disable hooks: keep the Stop hook of the codex session this clerk starts from spawning
     # another clerk. Belt and braces with the HIPPO_CLERK guard (survives a stripped environment).
     with_timeout "$TIMEOUT" codex exec \
-      -m "$MODEL" \
+      -m "${MODEL:-gpt-5.6-luna}" \
       -c model_reasoning_effort="low" \
       -c service_tier="fast" \
       -s read-only \
@@ -136,7 +142,7 @@ case "$BACKEND" in
     # outcome:accepted for a lane whose acceptance was still pending — a semantic error that
     # passes schema validation.
     with_timeout "$TIMEOUT" claude -p \
-      --model "${HIPPO_CLAUDE_CLERK_MODEL:-sonnet}" \
+      --model "${MODEL:-sonnet}" \
       --tools "" \
       --strict-mcp-config \
       --setting-sources "" \

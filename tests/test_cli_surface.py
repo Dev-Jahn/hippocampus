@@ -3,11 +3,11 @@ subcommands, removed surfaces.
 
 New shape (spec):
   log [dispatch|outcome|review|review-status|raw|tail]   (bare -> tail)
-  directive [list|add|retract]                           (bare -> list)
+  directive [list|add|withdraw]                          (bare -> list)
   prior [show|distill]                                   (bare -> show)
   task [...]                                             (bare -> list)
 
-Removed: top-level `retract`, `ledger`, `distill`, and `log directive`.
+Removed: top-level `withdraw`, `ledger`, `distill`, and `log directive`.
 The silent-no-op rule outside a project is unchanged: removed surfaces are
 plain argparse errors, so inside a project they are loud (rc!=0, stderr) and
 outside a project they stay byte-silent rc 0 — same order of checks as before.
@@ -18,7 +18,7 @@ import re
 from conftest import read_ledger
 
 REMOVED_SURFACES = (
-    ["retract", "gpu-01"],
+    ["withdraw", "gpu-01"],
     ["ledger", "tail"],
     ["distill"],
     ["log", "directive", "--id", "x", "--text", "t", "--lifetime", "phase"],
@@ -110,7 +110,7 @@ def test_bare_noun_with_flag_gets_default_sub(tmp_project, run_hippo):
 
 
 # --------------------------------------------------------------------------
-# ② directive add (incl. auto-id) -> list --active -> retract roundtrip
+# ② directive add (incl. auto-id) -> list --active -> withdraw roundtrip
 # --------------------------------------------------------------------------
 
 def test_directive_add_autoid_roundtrip(tmp_project, run_hippo):
@@ -129,8 +129,8 @@ def test_directive_add_autoid_roundtrip(tmp_project, run_hippo):
     assert active.returncode == 0, active.stderr
     assert did in {d["id"] for d in json.loads(active.stdout)}
 
-    retract = run_hippo(["directive", "retract", did], cwd=tmp_project)
-    assert retract.returncode == 0, retract.stderr
+    withdraw = run_hippo(["directive", "withdraw", did], cwd=tmp_project)
+    assert withdraw.returncode == 0, withdraw.stderr
 
     after = run_hippo(["directive", "list", "--active", "--json"], cwd=tmp_project)
     assert after.returncode == 0, after.stderr
@@ -157,8 +157,8 @@ def test_directive_add_without_text_and_id_rejected(tmp_project, run_hippo):
     assert proc.stderr.strip() != ""
 
 
-def test_directive_retract_unknown_id_rejected(tmp_project, run_hippo):
-    proc = run_hippo(["directive", "retract", "no-such-id"], cwd=tmp_project)
+def test_directive_withdraw_unknown_id_rejected(tmp_project, run_hippo):
+    proc = run_hippo(["directive", "withdraw", "no-such-id"], cwd=tmp_project)
     assert proc.returncode != 0
     assert proc.stderr.strip() != ""
 
@@ -231,7 +231,7 @@ def test_noun_help_lists_subcommands_even_outside_project(
     for noun, marker in (
         ("task", "{add,set,done,list,show,drop}"),
         ("log", "tail"),
-        ("directive", "{add,list,retract}"),
+        ("directive", "{add,list,withdraw}"),
         ("prior", "{show,distill}"),
     ):
         for flag in ("-h", "--help"):
@@ -286,9 +286,10 @@ def _add_directive(run_hippo, cwd, did, text, lifetime):
     assert proc.returncode == 0, proc.stderr
 
 
-def test_inject_never_folds_durable_directives(tmp_project, run_hippo):
-    """A durable directive is a user ruling with no lifetime — invisible at session start is the
-    same as absent. No number of phase/turn directives may push one out."""
+def test_inject_shows_every_live_directive_durable_first(tmp_project, run_hippo):
+    """A directive that is invisible at session start is the same as absent, and that is as true
+    of the twenty-sixth as of the first. Nothing is dropped for volume; durable simply reads
+    first. Volume is answered by a warning at add time, not by a cap here."""
     for i in range(6):
         _add_directive(run_hippo, tmp_project, f"dur-{i}", f"durable directive {i}", "durable")
     for i in range(20):
@@ -299,24 +300,23 @@ def test_inject_never_folds_durable_directives(tmp_project, run_hippo):
     out = run_hippo(["status", "--inject"], cwd=tmp_project)
     assert out.returncode == 0, out.stderr
     live = [ln for ln in out.stdout.splitlines() if ln.startswith("· live(")]
-    assert sum(1 for ln in live if ln.startswith("· live(durable)")) == 6
+    assert len(live) == 26
+    assert all(ln.startswith("· live(durable)") for ln in live[:6])
     for i in range(6):
         assert f"durable directive {i}" in out.stdout
-    # When something is folded, name the command that shows the full text ("+N more" alone
-    # tells the reader nothing to do).
-    folded = [ln for ln in out.stdout.splitlines() if "more" in ln]
-    assert folded and "hippo directive" in folded[0]
+    for i in range(20):
+        assert f"phase directive {i}" in out.stdout
+    assert not [ln for ln in out.stdout.splitlines() if "more" in ln]
 
 
-def test_inject_keeps_durable_text_readable(tmp_project, run_hippo):
-    """Cutting a durable line at 80 chars would drop its operative clause — keep up to 200."""
-    text = "x" * 150 + " tail clause"
+def test_inject_keeps_the_whole_text_of_a_long_directive(tmp_project, run_hippo):
+    """Cutting the line would drop the operative clause — which is exactly the part a user puts
+    at the end."""
+    text = "x" * 250 + " tail clause"
     _add_directive(run_hippo, tmp_project, "long-dur", text, "durable")
     out = run_hippo(["status", "--inject"], cwd=tmp_project)
     body = [ln for ln in out.stdout.splitlines() if ln.startswith("· live(durable)")][0]
-    body = body.split(": ", 1)[1]
-    assert len(body) > 80 and len(body) <= 200
-    assert "tail clause" in body
+    assert body.split(": ", 1)[1] == text
 
 
 # --------------------------------------------------------------------------

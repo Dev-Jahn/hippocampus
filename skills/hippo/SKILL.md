@@ -25,8 +25,12 @@ records, `hippo directive` = the live instructions, `hippo prior` = the routing 
 - While delegating: `hippo log dispatch --id <new id> --kind <tag> --exec <executor/model/effort> --scope "<one line>"`
   (a codex exec launched as `hippo dispatch --kind … --scope … -- <codex args>` records itself)
 - When a delegation gets a verdict: `hippo log outcome --ref <id> --result accepted|revised|refuted|no-go|lost --attr work|brief|harness`
-- When the user gives a standing instruction: `hippo directive add --text "…" --lifetime turn|phase|durable`,
-  and when it is over, `hippo directive retract <id>`
+- When the user gives a standing instruction: `hippo directive add --text "…" --lifetime turn|phase|durable`
+  (`turn` expires by itself after the next turn; `phase` and `durable` stay until
+  `hippo directive withdraw <id>`). To *change* an existing one, re-add it with the same `--id` —
+  a new id forks the instruction instead of updating it. Ids are lowercase kebab ascii
+  (`gpu-pinning`), whatever language the text is in; the derived id is refused when the text has
+  no ascii letters to build one from.
 - When an external review reply arrives: `hippo log review --id <new id> --base <sha> --source <where> --findings <n>`
 - Before deciding delegation routing: `hippo prior` — which model and effort measured better
 - To see where things stand: `hippo status`

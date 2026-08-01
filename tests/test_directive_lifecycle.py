@@ -1,15 +1,15 @@
-"""Item (3): directive lifecycle — active -> retract -> gone from
+"""Item (3): directive lifecycle — active -> withdraw -> gone from
 `directive list --active`.
 
 DESIGN.md §3.2: the last event for an id is its current state; derived views are never stored
 (principles 4 and 5). 1.0 surface: `hippo directive add [flags]`,
-`hippo directive retract <directive-id>`,
+`hippo directive withdraw <directive-id>`,
 `hippo directive list [--active] [--json]`.
 """
 import json
 
 
-def test_directive_active_then_retract_disappears_from_active_list(
+def test_directive_active_then_withdraw_disappears_from_active_list(
     tmp_project, run_hippo
 ):
     log_proc = run_hippo(
@@ -34,8 +34,8 @@ def test_directive_active_then_retract_disappears_from_active_list(
     ids = {d["id"] for d in json.loads(active.stdout)}
     assert "gpu-01" in ids
 
-    retract = run_hippo(["directive", "retract", "gpu-01"], cwd=tmp_project)
-    assert retract.returncode == 0, retract.stderr
+    withdraw = run_hippo(["directive", "withdraw", "gpu-01"], cwd=tmp_project)
+    assert withdraw.returncode == 0, withdraw.stderr
 
     after = run_hippo(["directive", "list", "--active", "--json"], cwd=tmp_project)
     assert after.returncode == 0, after.stderr
@@ -46,7 +46,7 @@ def test_directive_active_then_retract_disappears_from_active_list(
 def test_directive_state_resolution_uses_last_event_not_history(
     tmp_project, run_hippo
 ):
-    """Same id logged active -> retracted -> active again must resolve to
+    """Same id logged active -> withdrawed -> active again must resolve to
     active (last event wins; no derived/cached view)."""
     run_hippo(
         [
@@ -63,8 +63,8 @@ def test_directive_state_resolution_uses_last_event_not_history(
         ],
         cwd=tmp_project,
     )
-    retract = run_hippo(["directive", "retract", "dur-01"], cwd=tmp_project)
-    assert retract.returncode == 0, retract.stderr
+    withdraw = run_hippo(["directive", "withdraw", "dur-01"], cwd=tmp_project)
+    assert withdraw.returncode == 0, withdraw.stderr
 
     mid = run_hippo(["directive", "list", "--active", "--json"], cwd=tmp_project)
     mid_ids = {d["id"] for d in json.loads(mid.stdout)}

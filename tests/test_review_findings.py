@@ -338,9 +338,10 @@ def test_m1_scribe_may_still_emit_directives(
     assert directives[0]["src"] == "scribe"
 
 
-def test_m1_inject_truncates_long_directive_text(tmp_project, run_hippo):
-    """--inject is a resident surface fed by untrusted transcript text: a
-    directive is folded to one capped line so it cannot blow the surface up."""
+def test_m1_inject_flattens_directive_text_but_never_truncates_it(tmp_project, run_hippo):
+    """--inject is a resident surface fed by untrusted transcript text, so the newlines have to
+    go — one directive is one line. The text itself is never cut: dropping the tail of a ruling
+    is the silent loss principle 9 is about. Length is handled by warning the author instead."""
     long_text = "A" * 300 + "\nsecond line\nthird line"
     proc = run_hippo(
         [
@@ -367,8 +368,7 @@ def test_m1_inject_truncates_long_directive_text(tmp_project, run_hippo):
     live = [ln for ln in lines if ln.startswith("· live(")]
     assert len(live) == 1
     body = live[0].split(": ", 1)[1]
-    assert len(body) <= 80, body
-    assert "second line" not in inject.stdout
+    assert body == "A" * 300 + " second line third line", body
 
 
 # --------------------------------------------------------------------------

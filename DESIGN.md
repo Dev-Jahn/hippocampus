@@ -114,7 +114,7 @@ optional `src` (`scribe|cli|wrapper`).
 {"t":"…","ev":"review","id":"r007","base":"abc123f","source":"chatgpt-web","findings":4}
 {"t":"…","ev":"review-status","ref":"r007","addressed":"partial","at":"def4567"}
 {"t":"…","ev":"directive","id":"gpu-01","text":"use GPUs 0 and 1 only","lifetime":"phase","state":"active"}
-{"t":"…","ev":"directive","id":"gpu-01","state":"retracted"}
+{"t":"…","ev":"directive","id":"gpu-01","state":"withdrawn"}
 {"t":"…","ev":"clerk","name":"turn-scribe","ms":8100,"ok":true,"tokens":1400}
 ```
 
@@ -122,10 +122,22 @@ optional `src` (`scribe|cli|wrapper`).
   (recommended whenever the result is not accepted — a failure count with no attribution produces a
   lying prior. Measured: the run of REFUTEDs was work, the NO-GO from contradictory GPU clauses was
   brief, and the vanished StructuredOutput was harness).
-- `directive.lifetime ∈ {turn, phase, durable}`, `state ∈ {active, retracted, expired}`. The last
+- `directive.lifetime ∈ {turn, phase, durable}`, `state ∈ {active, withdrawn, expired}`. The last
   event for an `id` is its current state (a derived view is never stored — principles 4 and 5).
   It is `lifetime` rather than `scope` because `dispatch.scope` already means *what a delegation
   covers* — one key with two unrelated meanings is how a schema teaches the wrong thing.
+  `withdrawn` is the user changing their mind; `expired` is the clock running out, which today
+  only `turn` does. A `turn` directive is live until the **first Stop that begins after it was
+  recorded**, and the scribe expires it there before writing the current turn's events — so the
+  ones it is about to record get their turn, and main's mid-turn ones get the rest of theirs.
+- `directive.id` is lowercase kebab ascii (`[a-z0-9]` joined by `-`) — fail-closed. It is the only
+  handle for *superseding* a directive, so it has to be typeable from memory in a project whose
+  prose is in any language. For the same reason the scribe is handed the live ids alongside the
+  digest (§3.5.5): a clerk that invents a fresh id for an existing subject does not update it, it
+  silently forks it. `hippo directive add` derives the id from `--text` and **refuses** when that
+  leaves nothing (text with no ascii letters) rather than falling back to a meaningless `directive-<hash>`.
+  Derived ids carry a 4-char hash of the full text, so they never collide across different text —
+  which makes them content fingerprints, not subject handles. To supersede, pass `--id` yourself.
 - `dispatch.exec` is exactly `executor/model/effort`, no whitespace, and `outcome.ref` /
   `review-status.ref` must name an event that exists in this ledger — both fail-closed. These two
   fields are the axes PRIORS aggregates on, so a free-form value is not a small mess, it is a
@@ -166,7 +178,7 @@ hippo log raw '<json>'                      # validate, then append
 hippo log tail [-n N] [--ev TYPE]           # read recent records
 hippo directive list [--active] [--json]
 hippo directive add [typed flags…]          # auto-id derived from text when --id is omitted
-hippo directive retract <directive-id>
+hippo directive withdraw <directive-id>
 hippo prior show
 hippo prior distill [--days N]              # run the distiller clerk → regenerate PRIORS.md
 hippo dispatch --kind K --scope S [--task T] [--] <codex exec args…>   # §3.6
@@ -204,13 +216,19 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
 
 1. Non-blocking flock on `.hippo/scribe.lock` — if it is held, just exit (the cursor covers the gap
    on the next run automatically).
+1b. Expire every live `turn` directive — before the prefilter, because a turn ended whether or not
+   this window was worth a model call, and before the clerk writes, because that is what gives the
+   turn directives it is about to record their one turn.
 2. Load this session's cursor from `cursors.json` → compress only the lines after it with
    `digest_lite.py` (a light port of the digest logic proven on the 479MB audit).
 3. **Deterministic prefilter**: if the digest has no TOOL or USER line, update the cursor and exit
    (zero model calls).
 4. Resolve the backend: `config.yaml > $HIPPO_CLERK_BACKEND > automatic (codex/gpt-5.6-luna/low when
-   codex exists, otherwise claude -p sonnet) > mock` (for tests). 120s timeout.
-5. Prompt = `clerks/turn-scribe.md` + the digest. Expected output = strict JSON:
+   codex exists, otherwise claude -p sonnet) > mock` (for tests). 120s timeout. `$HIPPO_CLERK_MODEL`
+   overrides the model on whichever backend is resolved; it is one variable for both, so pin the
+   backend when you set it — a model id for one backend is invalid on the other.
+5. Prompt = `clerks/turn-scribe.md` + the live directive roster + the digest. Expected output =
+   strict JSON:
    `{"worklog": "…", "events": [ …ledger events without t… ]}`.
 6. Validation, **per event**: check each event by the same rules as `hippo log` (per-ev key
    whitelist — unknown keys rejected; `t` and `src` are always stamped by the writer; exec shape
@@ -323,13 +341,14 @@ Constraints specific to codex (0.144.6):
 
 Two rules govern the directive block:
 
-- **durable is never folded.** A user ruling with no lifetime that is invisible at session start is
-  effectively not there. Durable directives come first and all of them appear (up to 200 chars per
-  line). No number of phase/turn directives may push one out.
-- The cap is a **character budget** (1600), not a line count — there is no reason a long directive
-  and a short one should cost the same. When something is folded, do not stop at `+N more`: print
-  the command that shows the full text (`hippo directive`) alongside it. The point of folding is to
-  name an action, not a count.
+- **Nothing is folded away.** Every active directive is injected, in full, durable first. A user
+  ruling that is invisible at session start is effectively not there, and a cap does not fix that
+  problem — it makes it quiet. Newlines are collapsed (a multi-line value would break the
+  one-per-line shape); the text itself is never cut.
+- **Volume is a warning, never a limit** (principle 3). `hippo directive add` writes whatever it is
+  given and then says what it costs: over 200 chars in one directive → compress it and re-add under
+  the same `--id`; 8 or more live, or 1600 characters in total → compress, or withdraw the stale
+  ones. The author is the one who can act on that, and the moment of writing is when they can.
 
 ## 7. Testing policy
 

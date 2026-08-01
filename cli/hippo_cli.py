@@ -73,8 +73,12 @@ ENUMS = {
     ("outcome", "result"): {"accepted", "revised", "refuted", "no-go", "lost"},
     ("outcome", "attr"): {"work", "brief", "harness"},
     ("directive", "lifetime"): {"turn", "phase", "durable"},
-    ("directive", "state"): {"active", "retracted", "expired"},
+    ("directive", "state"): {"active", "withdrawn", "expired"},
 }
+# A directive id is a handle the scribe and the user both have to type from memory, so it is
+# kebab ASCII or nothing. An id derived from non-ASCII text collapses to the empty string, and
+# an id that is empty (or spelled differently every time) cannot supersede anything.
+DIRECTIVE_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 INT_FIELDS = ("findings", "rework", "ms", "tokens")
 
 
@@ -97,10 +101,16 @@ def validate_event(e):
     for f in REQUIRED[ev]:
         if e.get(f) is None or (isinstance(e[f], str) and not e[f].strip()):
             return f"ev={ev}: required field missing: {f}"
-    if ev == "directive" and e["state"] == "active":
-        for f in ("text", "lifetime"):
-            if not e.get(f):
-                return f"ev=directive state=active: required field missing: {f}"
+    if ev == "directive":
+        if not DIRECTIVE_ID_RE.match(str(e["id"])):
+            return (
+                f"ev=directive: id must be lowercase kebab ascii ([a-z0-9] joined by '-'): "
+                f"{e['id']!r}"
+            )
+        if e["state"] == "active":
+            for f in ("text", "lifetime"):
+                if not e.get(f):
+                    return f"ev=directive state=active: required field missing: {f}"
     for (evn, field), allowed in ENUMS.items():
         if ev == evn and field in e and e[field] not in allowed:
             return f"ev={ev}: {field}={e[field]!r} — allowed: {', '.join(sorted(allowed))}"
@@ -130,13 +140,16 @@ def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def one_line(text, limit):
-    """Fold a string onto one line and cap it for the resident surface (§6).
+def one_line(text, limit=None):
+    """Fold a string onto one line, and cap it when a limit is given (§6).
 
-    A directive's text is written by the scribe from an untrusted transcript — multi-line
-    or very long text would otherwise push the resident surface out of shape."""
+    A directive's text is written by the scribe from an untrusted transcript, so the newlines
+    always have to go — a multi-line value would break the one-directive-per-line shape of the
+    resident surface. Length is a different matter: truncating a directive silently drops the
+    tail the author cared about, so directives are folded but never cut (principle 3, record
+    rather than enforce). `hippo directive add` warns about length instead."""
     s = " ".join(str(text or "").split())
-    return s if len(s) <= limit else s[: limit - 1] + "…"
+    return s if limit is None or len(s) <= limit else s[: limit - 1] + "…"
 
 
 ACTIVE_PARSER = None  # usage to attach to errors (m7 — main() fills it in after parsing)
@@ -332,7 +345,13 @@ def cmd_init(_args):
     )
 
 
-DIRECTIVE_BUDGET = 1600  # character budget for the directive block of the injected surface (DESIGN §6)
+# Nudge thresholds for the directive block (DESIGN §6). None of these is enforced: every active
+# directive is injected in full, whatever the totals say. They exist so that `hippo directive add`
+# can name the cost at the moment the author can still do something about it — silently folding a
+# ruling away is the failure mode principle 9 is about, and a cap is just a quieter way to lose it.
+DIRECTIVE_TEXT_NUDGE = 200  # one directive this long is asking to be compressed
+DIRECTIVE_COUNT_NUDGE = 8  # this many live at once is asking for a hygiene pass
+DIRECTIVE_TOTAL_NUDGE = 1600  # total characters resident in every session from here on
 
 
 def status_lines(hp):
@@ -355,24 +374,15 @@ def status_lines(hp):
             f"· priors {stamp('PRIORS.md')} · worklog {stamp('worklog.md')}"
         )
     ]
-    # durable first, and never folded away by phase/turn ones: a directive with no lifetime
-    # that is invisible at session start is effectively not there (principle 9, read backwards).
-    # The cap is a character budget rather than a line count — there is no reason a long and a
-    # short directive should cost the same.
+    # durable first — a standing ruling should be read before the situational ones. Every active
+    # directive appears in full: a directive that is invisible at session start is effectively not
+    # there (principle 9, read backwards), and that is as true of the ninth one as of the first.
+    # Volume is handled by warning the author at `directive add` time, not by dropping text here.
     ordered = [d for d in live if d.get("lifetime") == "durable"] + [
         d for d in live if d.get("lifetime") != "durable"
     ]
-    used, shown = 0, 0
     for d in ordered:
-        lt = d.get("lifetime")
-        line = f"· live({lt or '?'}): {one_line(d.get('text', ''), 200 if lt == 'durable' else 80)}"
-        if shown and used + len(line) > DIRECTIVE_BUDGET:
-            break
-        lines.append(line)
-        used += len(line)
-        shown += 1
-    if shown < len(ordered):
-        lines.append(f"· (+{len(ordered) - shown} more — run `hippo directive` for the full text)")
+        lines.append(f"· live({d.get('lifetime') or '?'}): {one_line(d.get('text', ''))}")
     p = hp / "worklog.md"
     if p.exists():
         # Within the latest date section, only look at the "- HH:MM …" entries the scribe wrote.
@@ -555,14 +565,41 @@ def cmd_log(args):
         if not did:
             if args.state != "active" or not args.text:
                 die("directive: --id may be omitted only for a new (active) directive that carries --text")
-            slug = re.sub(r"[^a-z0-9]+", "-", args.text.lower()).strip("-")[:20]
-            did = f"{slug or 'directive'}-{hashlib.sha1(args.text.encode()).hexdigest()[:4]}"
+            slug = re.sub(r"[^a-z0-9]+", "-", args.text.lower()).strip("-")[:20].strip("-")
+            if not slug:
+                # Text with no ascii letters (Korean, for one) slugs to the empty string, and the
+                # old fallback turned every such directive into "directive-<hash>" — an id nobody
+                # can recall or reuse. Refusing is the honest move: name it yourself.
+                die(
+                    "directive: --text has no [a-z0-9] to build an id from — pass --id explicitly "
+                    "(lowercase kebab ascii, e.g. --id gpu-pinning)"
+                )
+            did = f"{slug}-{hashlib.sha1(args.text.encode()).hexdigest()[:4]}"
         e.update(id=did, state=args.state)
         if args.text:
             e["text"] = args.text
         if args.lifetime:
             e["lifetime"] = args.lifetime
+        # Nudges, not rules: the write goes through either way (principle 3).
+        n = len(one_line(args.text))
+        if n > DIRECTIVE_TEXT_NUDGE:
+            print(
+                f"note: this directive is {n} chars and every session pays for it. "
+                "Consider compressing it and re-adding under the same --id.",
+                file=sys.stderr,
+            )
     log_and_print(args.hp, e)
+    if args.ev == "directive":
+        # Measured after the write, so the totals include what was just added.
+        live = [d for d in directives(args.hp).values() if d.get("state") == "active"]
+        total = sum(len(one_line(d.get("text", ""))) for d in live)
+        if len(live) >= DIRECTIVE_COUNT_NUDGE or total >= DIRECTIVE_TOTAL_NUDGE:
+            print(
+                f"note: {len(live)} live directives, {total} chars — all of it is injected into "
+                "every session from here on. Compress them, or withdraw the stale ones "
+                "(`hippo directive` to review, `hippo directive withdraw <id>`).",
+                file=sys.stderr,
+            )
 
 
 def cmd_log_raw(args):
@@ -573,11 +610,11 @@ def cmd_log_raw(args):
     log_and_print(args.hp, e)
 
 
-def cmd_directive_retract(args):
+def cmd_directive_withdraw(args):
     d = directives(args.hp).get(args.id)
     if not d:
         die(f"no such directive id: {args.id}")
-    log_and_print(args.hp, {"ev": "directive", "id": args.id, "state": "retracted"})
+    log_and_print(args.hp, {"ev": "directive", "id": args.id, "state": "withdrawn"})
 
 
 def cmd_directive_list(args):
@@ -589,7 +626,7 @@ def cmd_directive_list(args):
         return
     for d in ds:
         print(
-            f"{d['id']}  [{d.get('state', '?')}/{d.get('scope', '?')}]  {d.get('text', '')}"
+            f"{d['id']}  [{d.get('state', '?')}/{d.get('lifetime', '?')}]  {d.get('text', '')}"
         )
 
 
@@ -803,6 +840,39 @@ def run_dispatch(argv):
         die(f"dispatch: could not run codex: {err}", 127)
 
 
+def expire_turn_directives(hp):
+    """A turn directive is live until the first Stop that *begins* after it was recorded.
+
+    Running this before the scribe writes is the whole mechanism: the turn directives it is
+    about to record are not in this sweep, so they survive to be injected into the next turn
+    and are expired by the next Stop. One turn of life, for both writers — the scribe records
+    at Stop (live through the following turn), main records mid-turn (live for the rest of it).
+    `expired` rather than `withdrawn`: nobody changed their mind, the clock simply ran out."""
+    n = 0
+    for d in directives(hp).values():
+        if d.get("state") == "active" and d.get("lifetime") == "turn":
+            append_event(
+                hp, {"ev": "directive", "id": d["id"], "state": "expired"}, src="scribe"
+            )
+            n += 1
+    return n
+
+
+def directive_roster(hp):
+    """The live directive ids handed to the scribe with the digest.
+
+    Without it the clerk coins a fresh id for an instruction that already has one, and the two
+    sit in the ledger as unrelated directives — the update never lands. Reading the ledger from
+    inside the clerk would cost a tool call and a lot of latency for what is a short list."""
+    live = [d for d in directives(hp).values() if d.get("state") == "active"]
+    if not live:
+        return "(none yet)"
+    return "\n".join(
+        f"- {d['id']} ({d.get('lifetime', '?')}): {one_line(d.get('text', ''), 100)}"
+        for d in live
+    )
+
+
 def cmd_scribe(args):
     hp = args.hp
     lock = (hp / "scribe.lock").open("w")
@@ -817,6 +887,10 @@ def cmd_scribe(args):
             if time.monotonic() >= deadline:
                 return
             time.sleep(0.1)
+
+    # Before anything else, and before the prefilter can return: a turn ended whether or not
+    # this window had enough in it to be worth a model call.
+    expire_turn_directives(hp)
 
     transcript = Path(args.transcript)
     if not transcript.exists():
@@ -861,8 +935,11 @@ def cmd_scribe(args):
         save_cursor()
         return
 
+    payload = (
+        f"# live directives\n\n{directive_roster(hp)}\n\n# transcript digest\n\n{digest}"
+    )
     out, err, rc, ms, tokens = run_clerk(
-        hp, CLERKS / "turn-scribe.md", digest, SCRIBE_TIMEOUT
+        hp, CLERKS / "turn-scribe.md", payload, SCRIBE_TIMEOUT
     )
     meter = {"ev": "clerk", "name": "turn-scribe", "ms": ms, "tokens": tokens}
 
@@ -1013,9 +1090,9 @@ def build_parser():
     a.add_argument("--active", action="store_true")
     a.add_argument("--json", action="store_true")
     a.set_defaults(fn=cmd_directive_list)
-    a = d.add_parser("retract", help="retract a directive")
+    a = d.add_parser("withdraw", help="withdraw a directive the user is done with")
     a.add_argument("id")
-    a.set_defaults(fn=cmd_directive_retract, writes=True)
+    a.set_defaults(fn=cmd_directive_withdraw, writes=True)
 
     pr = sub.add_parser("prior", help="the distilled surface").add_subparsers(dest="sub")
     pr.add_parser("show", help="print PRIORS.md").set_defaults(fn=cmd_prior_show)

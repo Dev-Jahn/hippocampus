@@ -34,7 +34,7 @@ confirmation. With no `.hippo/`, answer in one line — "hippo is not initialize
 ## Check 2 — directive hygiene (first priority — an obedient model executes a stale instruction)
 
 - List the active directives from `hippo directive list` oldest first: a phase directive alive for
-  more than two weeks is a candidate — "the phase may be over; keep or retract?".
+  more than two weeks is a candidate — "the phase may be over; keep or withdraw?".
 - Cross-check active directives against CLAUDE.md and the memory files for **contradictions and
   duplication** (by meaning, not by string). Quote both sides of a contradiction and take a
   position on which one survives. Edit only after confirmation, local files first.
