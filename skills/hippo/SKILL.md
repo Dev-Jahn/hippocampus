@@ -25,6 +25,8 @@ records, `hippo directive` = the live instructions, `hippo prior` = the routing 
 - While delegating: `hippo log dispatch --id <new id> --kind <tag> --exec <executor/model/effort> --scope "<one line>"`
   (a codex exec launched as `hippo dispatch --kind … --scope … -- <codex args>` records itself)
 - When a delegation gets a verdict: `hippo log outcome --ref <id> --result accepted|revised|refuted|no-go|lost --attr work|brief|harness`
+  (`--ref task:<task-id>` resolves to that task's dispatch still awaiting an outcome, so you do not
+  have to go find the hash; the ledger still stores the dispatch id)
 - When the user gives a standing instruction: `hippo directive add --text "…" --lifetime turn|phase|durable`
   (`turn` expires by itself after the next turn; `phase` and `durable` stay until
   `hippo directive withdraw <id>`). To *change* an existing one, re-add it with the same `--id` —

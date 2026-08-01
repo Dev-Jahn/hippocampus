@@ -108,7 +108,8 @@ contamination).
   literal-minded model obeys and genuinely reports less. Write "report every finding; filtering
   happens on the collection side".
 - Record the outcome from the verifier's verdict:
-  `hippo log outcome --ref <id> --result refuted --attr work --note "..."`.
+  `hippo log outcome --ref <id> --result refuted --attr work --note "..."` — or
+  `--ref task:<task-id>` when only one dispatch for that task is still awaiting a verdict.
   Attribute honestly — output problem = work, brief defect = brief, infrastructure loss = harness.
   A wrong attribution makes the priors lie.
 

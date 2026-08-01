@@ -27,7 +27,9 @@ imperatives ("you must use X"); write findings with their numbers, in the form "
    not an executor problem — say so explicitly: "brief defects n / harness losses n: exclude these
    from routing judgment".
 5. **Open items**: dispatches with no outcome (only those launched more than 24h ago, with id and
-   elapsed time) — candidates for orphans.
+   elapsed time) — candidates for orphans. Ids and elapsed times only: this is a list, and a
+   remark about it ("duplicates excluded", "mostly stale") is an interpretation the reader did not
+   ask for and cannot check. Emit nothing you cannot point at a row for.
 6. **Review status**: reviews whose addressed is not full (with their base sha).
 7. **Clerk overhead**: one line aggregating ev:clerk (runs, failures, approximate tokens).
 
