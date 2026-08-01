@@ -329,6 +329,8 @@ Constraints specific to codex (0.144.6):
   deterministic).
 - Fold a read-oriented exposure of the distilled result (the habit of running `prior show` right
   before delegating) into the dispatch skill.
+- Let delegated executors read and write the same `.hippo/` main does, so a brief carries the work
+  and not the whole context — drafted in full in §9.
 
 ## 6. The capsule (in full — anything larger is a regression)
 
@@ -369,3 +371,136 @@ malformed JSON isolated into failures), and digest_lite basics. Around twenty of
 - The body of the fleet-dispatch skill → the revised `skills/dispatch`
 - Everything else from 0.x → retired to the `legacy` branch. Audit report:
   `~/workspace/b200-2-research-cc-audit/`
+
+## 9. The shared brain (draft for 2.0 — nothing here is built)
+
+Today a delegated executor starts blind. Everything it needs — the live directives, the task it
+serves, what has already been tried — is re-typed by hand into a brief, which is why `COMMON.md`
+exists and why briefs keep growing. The abstract *intent* behind an instruction does not survive
+that transcription at all; only the instruction does.
+
+The proposal is to let executors read and write the same `.hippo/` main does. Hierarchy is kept —
+main still decides — but the memory is one memory.
+
+### 9.1 The plumbing already exists
+
+`.hippo/` is found by walking **up** from cwd (§3.3), and an editing lane's worktree is
+`{repo}/.claude/worktrees/<name>` — inside the repo. So an executor invoking `hippo` from its
+worktree already resolves the project's real `.hippo/`. Nothing needs to be wired. What is missing
+is entirely policy, which is the reason this is worth writing down before building it.
+
+### 9.2 Observation and verdict, not read and write
+
+An access-control list is the wrong instrument, and would be the first thing in this project to
+break principle 3. It also would not work: an executor has a shell, and `>> .hippo/ledger.jsonl`
+costs it nothing. Pretending to prevent what cannot be prevented is the failure this repo keeps
+declining.
+
+The distinction that does hold is not read/write but **what kind of statement is being made**:
+
+| An executor may record | Why |
+|---|---|
+| what it observed — what it did, what broke, that the premise did not reproduce | it is the only witness; today that reaches main only through a report file |
+| — but not that its own work is accepted, or that a task is done | it cannot be the judge of its own output (constitution: main owns acceptance) |
+
+This is a statement about honesty, not permission. An executor saying "it works" *is* a claim, not
+a fact, and hippo only has to render it as one.
+
+Mechanism: `src` gains a fourth value, `executor` — "the agent that did the work wrote this",
+using §3.2's existing term rather than coining one. One environment variable carries it, set by the
+dispatch wrapper into the child's environment:
+
+```
+HIPPO_DISPATCH=d041     # ⇒ src=executor, and `ref` defaults to d041
+```
+
+A self-reported outcome (`src=executor`, `ref` = the writer's own dispatch) is therefore
+distinguishable forever from main's judgment on the same dispatch (`src=cli`), and derived views
+fold only the latter into acceptance. Two keys, no enforcement. An executor that forges `src=cli`
+succeeds — and has now lied in an append-only file, which is a far better place to be than a
+blocked write.
+
+### 9.3 The real risk is belief propagation, not writes
+
+Executor A records "implemented"; thirty minutes later executor B is injected with the shared
+capsule and reads it. **An unverified claim has become the network's shared fact**, and no
+verification gate sits between them. Today this cannot happen because lanes cannot talk to each
+other; the isolation that costs so much is also carrying a safety property nobody wrote down.
+
+So the injected capsule must never render an executor-sourced statement as a flat assertion. The
+subject has to survive: `· d041 claims: pass2 tensorize lands`. Principle 5 is what makes this
+cheap — the view is generated on every read, so one rendering rule changes what the whole network
+believes.
+
+### 9.4 Directives need an audience axis
+
+`lifetime` is a **time** axis. The missing one is **audience**, and it is invisible until directives
+start reaching executors. Of this repo's own live set: "answer in Korean" governs how main speaks
+to the user and is noise or worse to an executor; "every file in the repo is written in English"
+is something an executor must know and is today hand-copied into COMMON.md; "bump patch only"
+concerns a release an executor never performs.
+
+Injecting all of it into six parallel executors multiplies principle 9 rather than repeating it:
+an executor is **more** obedient than main — a cheap model, no context, and no channel to say "this
+constraint does not fit what I am looking at". A directive like `no-premature-surrender` (324 chars,
+measured on a consuming project) handed to a literal-minded worker is a token fire.
+
+`directive --audience main|executor|all`, defaulting to `all`. A narrow default fails by silently
+hiding a constraint from the worker that needed it; a wide default fails by noise, which the
+existing volume nudges (§6) already surface.
+
+### 9.5 Depth, so the spiral is visible instead of forbidden
+
+Some work is one task and simultaneously the size of a whole session. Such a dispatch should be
+allowed to orchestrate: main becomes the orchestrator of orchestrators.
+
+This directly inverts the dispatch skill's "no re-delegation" clause, which exists because of a
+measured loss (one lane spiralled through 336k tokens and produced zero commits). The clause should
+not be deleted — it should be indexed:
+
+- `--depth 0` (default) — unchanged. The brief carries the no-re-delegation clause automatically.
+- `--depth 1` — may spawn. Its children are depth 0 and receive that clause.
+
+Recording depth makes an unintended depth 2 an event in the ledger rather than a prohibition nobody
+can check. Model routing for such a dispatch (the reason to pin a strong model at the top and a
+cheap one underneath) belongs in a visible `.hippo/routing.yaml`, not compiled into the CLI: it is a
+claim about *prices*, and prices go stale between releases.
+
+### 9.6 PRIORS has no cost axis, and that is the actual blocker
+
+PRIORS aggregates quality — refutation and acceptance rates — over `kind × exec`. That was the
+right question while every dispatch cost roughly the same. It stops being the right question in two
+ways at once: a depth-1 dispatch is a *fleet*, not a lane, and filing it beside a single cheap
+dispatch under the same `kind` makes the prior lie; and once a cheap tier is genuinely cheap, the
+question changes from
+
+> which exec performs best → **what is the cheapest exec that clears the bar**
+
+which the current schema cannot answer at all. `codex exec` reports its usage and the wrapper
+already reads that stream, so recording tokens on the outcome is collection at the point that
+already knows (principle 6). Cost per *accepted* outcome is then derivable, and §9.5's routing stops
+being a guess. It also composes with §9.2 for free: children writing to the same ledger under a
+parent's dispatch id means a fleet's cost sums itself.
+
+### 9.7 Consequences to settle before building
+
+- **The executor gets no scribe.** Running the Stop hook per lane multiplies clerk cost by the wave
+  width, and the hook cap is two (§3.4). If a depth-1 orchestrator's reasoning is worth keeping, the
+  distillation belongs in the dispatch wrapper at lane exit — not in a third hook.
+- **A discarded lane's events survive in the ledger while its code does not.** This is a feature —
+  "this approach was tried and failed" is recorded nowhere today — but it requires the dispatch to
+  carry an ending (merged / discarded / killed), or a derived view will present abandoned work as
+  done.
+- **Concurrent writers.** Short appends are atomic; whole-file rewrites are not. `tools/ledger_edit.py`
+  guards on the scribe lock plus a size re-check, and the size re-check is the one that still holds
+  when the writers are executors rather than the scribe.
+- **The surface handed to an executor should be two commands** — `hippo status --inject` and
+  `hippo log outcome`. Not `task`, not `directive add`, not `prior`. A small surface is a small
+  policy; most of §9.2 is unnecessary if there is nothing to misuse.
+
+### 9.8 Order
+
+§9.2–9.4 are the data plane and stand alone; §9.5–9.6 are the control plane on top of it and are
+half-blind without it (an orchestrated fleet with no shared memory starves its own children). Build
+the data plane first. Its minimum is two things — the `executor` src value and the audience axis —
+which is small enough that it may not need a major version at all.
