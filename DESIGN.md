@@ -121,7 +121,15 @@ optional `src` (`scribe|cli|wrapper`).
 - `outcome.result ∈ {accepted, revised, refuted, no-go, lost}`; `attr ∈ {work, brief, harness}`
   (recommended whenever the result is not accepted — a failure count with no attribution produces a
   lying prior. Measured: the run of REFUTEDs was work, the NO-GO from contradictory GPU clauses was
-  brief, and the vanished StructuredOutput was harness).
+  brief, and the vanished StructuredOutput was harness). A second outcome for one dispatch is
+  legal from main — a deliberate re-verdict after rework is main's call — but it gets a stderr
+  note, because the routing table is a *first-pass* rate and keeps reading the first verdict.
+  From the scribe a second outcome is rejected outright (§3.5.6b).
+- `review-status.addressed ∈ {full, partial, none}` — closed like `result`, because it is the one
+  field reviews are folded on ("not fully addressed"): a free-form "fully" would read as open
+  forever. `hippo log review` prints a one-line stderr reminder to record the closing
+  `review-status` when the findings are dealt with — without it, the loop's second half had no
+  surface that ever mentioned it.
 - `directive.lifetime ∈ {turn, phase, durable}`, `state ∈ {active, withdrawn, expired}`. The last
   event for an `id` is its current state (a derived view is never stored — principles 4 and 5).
   It is `lifetime` rather than `scope` because `dispatch.scope` already means *what a delegation
@@ -263,10 +271,16 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
    call itself* (no JSON, wrong envelope, nonzero rc) is still all-or-nothing and records
    `ev:clerk ok:false`. Either way the ledger is never contaminated and **the cursor advances**
    (never re-bill the same input forever). **Never fill a gap by inventing content.**
-6b. **Two extra rules, on the clerk's output only.** A scribe `dispatch` is rejected when its
+6b. **Three extra rules, on the clerk's output only.** A scribe `dispatch` is rejected when its
    executor is `codex`, or when either closed slot of `exec` is outside its vocabulary
-   (`codex|claude|fork|subagent|workflow` / `low|medium|high|xhigh|ultra|inherit`). Main's writes
-   are not checked this way and should not be.
+   (`codex|claude|fork|subagent|workflow` / `low|medium|high|xhigh|ultra|inherit`). A scribe
+   `outcome` is rejected when its `ref` already has a verdict: "at most one outcome per
+   dispatch" was in the prompt and the roster marked the judged ids, and the clerk re-judged
+   anyway — measured on this repo's own ledger, one dispatch judged `revised` was re-judged
+   `accepted` by two later scribe runs, and a verdict main had recorded through the CLI was
+   restated by the scribe 26 seconds later. A prompt cannot hold a rule its writer does not
+   check. Main's writes are not checked either way and should not be (a deliberate re-verdict
+   is main's call; it gets a stderr note, §3.2).
 
    The line is *who observed the value*, not who is trusted. The launcher builds `exec` from its
    own argv and a handed vocabulary holds — measured, 0 malformed in 110, and `kind` has held the

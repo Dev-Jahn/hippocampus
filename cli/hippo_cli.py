@@ -81,6 +81,9 @@ ENUMS = {
     ("outcome", "attr"): {"work", "brief", "harness"},
     ("directive", "lifetime"): {"turn", "phase", "durable"},
     ("directive", "state"): {"active", "withdrawn", "expired"},
+    # addressed is the one field reviews are folded on ("not fully addressed" in the fact
+    # sheet), so it is closed like result: a free-form "fully" would read as open forever.
+    ("review-status", "addressed"): {"full", "partial", "none"},
 }
 # A directive id is a handle the scribe and the user both have to type from memory, so it is
 # kebab ASCII or nothing. An id derived from non-ASCII text collapses to the empty string, and
@@ -187,8 +190,9 @@ def find_hippo():
 
 
 def resolve_src(src=None):
-    """src ∈ scribe|cli|wrapper (DESIGN §3.2). Only scripts/dispatch.sh declares itself a
-    wrapper through HIPPO_SRC — and even that value dies loudly if it is off the whitelist."""
+    """src ∈ scribe|cli|wrapper (DESIGN §3.2). The built-in surfaces pass it programmatically
+    (`hippo dispatch` stamps wrapper itself); HIPPO_SRC exists so an *external* launch wrapper
+    can declare itself one — and even that value dies loudly if it is off the whitelist."""
     v = src or os.environ.get("HIPPO_SRC") or "cli"
     if v not in SRC_VALUES:
         die(f"src must be one of {'|'.join(SRC_VALUES)}: {v!r} (check HIPPO_SRC)")
@@ -349,6 +353,10 @@ def cmd_init(_args):
     print(
         "next: `hippo directive add --text \"…\" --lifetime durable` for a standing instruction, "
         "`hippo task add <type>/<slug> --title …` for work, `hippo status` to see both.",
+    )
+    print(
+        ".hippo/ is this project's memory (ledger, tasks, worklog) — most projects gitignore "
+        "it; commit it only if collaborators should share one memory.",
     )
 
 
@@ -700,6 +708,26 @@ def validate_scribe_event(e):
     return None
 
 
+def check_scribe_outcome(hp, e):
+    """Scribe-only, like validate_scribe_event: a second verdict for a dispatch is rejected.
+
+    The prompt has always said "at most one outcome per dispatch", and the roster marks the
+    judged ones — and the clerk re-judged anyway, measured on this repo's own ledger: one
+    dispatch judged `revised` was re-judged `accepted` by two later scribe runs, and a verdict
+    main had recorded through the CLI was restated by the scribe 26 seconds later. Same lesson
+    as the dispatch roster (§3.5.5): a prompt cannot hold a rule its writer does not check.
+
+    Main is different on purpose. A deliberate re-verdict (say, `revised` upgraded after
+    rework) is main's call to make; it gets a stderr note, never a refusal — and the priors
+    read the first verdict either way (the routing table is a first-pass rate)."""
+    if e.get("ev") != "outcome":
+        return None
+    if any(x.get("ev") == "outcome" and x.get("ref") == e.get("ref") for x in read_ledger(hp)):
+        return (f"ev=outcome: ref={e.get('ref')!r} already has a verdict — the scribe does not "
+                "re-judge (at most one outcome per dispatch; a second verdict belongs to main)")
+    return None
+
+
 def log_and_print(hp, e):
     err = validate_event(e) or check_ref(hp, e)
     if err:
@@ -710,6 +738,7 @@ def log_and_print(hp, e):
 
 def cmd_log(args):
     e = {"ev": args.ev}
+    prior_verdicts = []
     if args.ev == "dispatch":
         e.update(id=args.id, kind=args.kind, exec=args.exec, scope=args.scope)
         if args.task:
@@ -719,6 +748,10 @@ def cmd_log(args):
         for k in ("attr", "rework", "by", "note"):
             if getattr(args, k) is not None:
                 e[k] = getattr(args, k)
+        prior_verdicts = [
+            x for x in read_ledger(args.hp)
+            if x.get("ev") == "outcome" and x.get("ref") == e["ref"]
+        ]
     elif args.ev == "review":
         e.update(id=args.id, base=args.base, source=args.source, findings=args.findings)
     elif args.ev == "review-status":
@@ -753,6 +786,25 @@ def cmd_log(args):
         # After the write, so the notes describe the set the next session will actually carry.
         for note in directive_volume_notes(args.hp):
             print(note, file=sys.stderr)
+    # Write-time notes (never refusals — the record always went through, principle 3):
+    elif args.ev == "outcome" and prior_verdicts:
+        # A deliberate re-verdict is legal for main; what it must not be is invisible. The
+        # routing table is a *first-pass* rate, so a second verdict changes nothing there.
+        first = prior_verdicts[0]
+        print(
+            f"note: {e['ref']} already had a verdict ({first.get('result')} at "
+            f"{first.get('t')}) — recorded as a second one; priors read the first "
+            "(first-pass rate).",
+            file=sys.stderr,
+        )
+    elif args.ev == "review":
+        # The one moment the closing half of the loop is on the caller's mind. Without this,
+        # a recorded review stays "not fully addressed" in every distill, forever.
+        print(
+            f"note: when its findings are addressed, record `hippo log review-status "
+            f"--ref {e['id']} --addressed full|partial|none [--at <sha>]`.",
+            file=sys.stderr,
+        )
 
 
 def cmd_log_raw(args):
@@ -1264,7 +1316,8 @@ def cmd_scribe(args):
     # is preserved in failures/ — which is what "the dump is the record" means.
     events = obj.get("events", [])
     for e in events:
-        verr = validate_event(e) or validate_scribe_event(e) or check_ref(hp, e)
+        verr = (validate_event(e) or validate_scribe_event(e) or check_ref(hp, e)
+                or check_scribe_outcome(hp, e))
         if verr:
             dump_failure(hp, "scribe", f"{verr}\n\n{json.dumps(e, ensure_ascii=False, indent=2)}\n")
             continue
@@ -1345,9 +1398,14 @@ def build_parser():
     a.add_argument(
         "--result", required=True, choices=sorted(ENUMS[("outcome", "result")])
     )
-    a.add_argument("--attr", choices=sorted(ENUMS[("outcome", "attr")]))
-    a.add_argument("--rework", type=int)
-    a.add_argument("--by")
+    a.add_argument(
+        "--attr",
+        choices=sorted(ENUMS[("outcome", "attr")]),
+        help="whose problem a non-accepted result was: work=the output itself, "
+             "brief=the instructions, harness=infrastructure loss",
+    )
+    a.add_argument("--rework", type=int, help="repair round-trips before this verdict")
+    a.add_argument("--by", help="who judged it, as executor/model (e.g. verify/opus)")
     a.add_argument("--note")
     a.set_defaults(fn=cmd_log, writes=True)
     a = lsub.add_parser("review", help="an external review reply")
@@ -1357,8 +1415,10 @@ def build_parser():
     a.add_argument("--findings", required=True, type=int)
     a.set_defaults(fn=cmd_log, writes=True)
     a = lsub.add_parser("review-status", help="how far the findings were addressed")
-    a.add_argument("--ref", required=True)
-    a.add_argument("--addressed", required=True, help="e.g. full|partial|none")
+    a.add_argument("--ref", required=True, help="the review id this closes out")
+    a.add_argument(
+        "--addressed", required=True, choices=sorted(ENUMS[("review-status", "addressed")])
+    )
     a.add_argument("--at", help="sha of the commit that addressed it")
     a.set_defaults(fn=cmd_log, writes=True)
     a = lsub.add_parser("raw", help="validate one JSON line, then append")

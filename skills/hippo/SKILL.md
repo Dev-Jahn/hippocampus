@@ -22,6 +22,9 @@ records, `hippo directive` = the live instructions, `hippo prior` = the routing 
 
 ## When to reach for what
 
+- When work lands that will outlive this turn: `hippo task add <type>/<slug> --title "…"`
+  (`--deps a,b` when order matters), `hippo task done <id>` when it ships. Bare `hippo task`
+  answers *what can I start now* — a task whose deps are unfinished shows a `waiting on:` line.
 - While delegating: `hippo log dispatch --id <new id> --kind <tag> --exec <executor/model/effort> --scope "<one line>"`
   (a codex exec launched as `hippo dispatch --kind … --scope … -- <codex args>` records itself)
 - When a delegation gets a verdict: `hippo log outcome --ref <id> --result accepted|revised|refuted|no-go|lost --attr work|brief|harness`
@@ -34,6 +37,9 @@ records, `hippo directive` = the live instructions, `hippo prior` = the routing 
   (`gpu-pinning`), whatever language the text is in; the derived id is refused when the text has
   no ascii letters to build one from.
 - When an external review reply arrives: `hippo log review --id <new id> --base <sha> --source <where> --findings <n>`
+  — and when its findings are dealt with, close the loop:
+  `hippo log review-status --ref <review-id> --addressed full|partial|none [--at <sha>]`
+  (a review with no review-status stays "not fully addressed" in every distill)
 - Before deciding delegation routing: `hippo prior` — which model and effort measured better
 - To see where things stand: `hippo status`
 
@@ -45,3 +51,8 @@ so nothing has to retype an absolute scratchpad prefix. `/hippo:dispatch` has th
 Every turn, a background clerk reads the transcript and infers most of the events above on its
 own. Recording through the CLI only raises the certainty. Nothing breaks if you skip a record —
 this organ does not enforce.
+
+The clerk's backend resolves automatically (codex if installed, else headless claude). When a
+project needs a different one, set `clerk: {backend: codex|claude}` in `.hippo/config.yaml`, or
+export `$HIPPO_CLERK_BACKEND` / `$HIPPO_CLERK_MODEL` (pin the backend when you pin the model —
+a model id for one backend is invalid on the other).

@@ -1,7 +1,9 @@
-"""The two rules that apply to the clerk's output and to nothing else (DESIGN §3.5.6b).
+"""The rules that apply to the clerk's output and to nothing else (DESIGN §3.5.6b).
 
 The clerk infers `exec` from a transcript; the launcher reads its own argv. That is the whole
-reason these live on one side only — main's writes stay as permissive as they were."""
+reason these live on one side only — main's writes stay as permissive as they were. The same
+line holds for outcomes: the clerk re-judging a judged dispatch is rejected, main's deliberate
+re-verdict is not."""
 
 import json
 import sys
@@ -112,6 +114,41 @@ def test_one_rejected_event_does_not_erase_the_turn(tmp_project, run_hippo, fake
     assert [e["id"] for e in rows if e.get("ev") == "dispatch"] == ["dgood"]
     assert any("a turn happened" in (tmp_project / ".hippo" / "worklog.md").read_text()
                for _ in [0])
+
+
+def test_the_scribe_does_not_rejudge(tmp_project, run_hippo, fake_transcript, tmp_path):
+    """Measured on this repo's own ledger: a dispatch judged `revised` was re-judged `accepted`
+    by two later scribe runs, roster marker notwithstanding. The writer is where the rule holds."""
+    run_hippo(["log", "dispatch", "--id", "d9", "--kind", "impl",
+               "--exec", "fork/fable/inherit", "--scope", "x"], cwd=tmp_project)
+    run_hippo(["log", "outcome", "--ref", "d9", "--result", "revised"], cwd=tmp_project)
+
+    mock = _scribe_output(tmp_path, "rejudge",
+                          [{"ev": "outcome", "ref": "d9", "result": "accepted"}])
+    proc = _run_scribe(run_hippo, tmp_project, mock)
+    assert proc.returncode == 0, proc.stderr
+
+    outs = [e for e in read_ledger(tmp_project)
+            if e.get("ev") == "outcome" and e.get("ref") == "d9"]
+    assert [e["result"] for e in outs] == ["revised"]
+    dumps = list((tmp_project / ".hippo" / "failures").glob("*"))
+    assert "does not re-judge" in "".join(p.read_text() for p in dumps)
+
+
+def test_one_verdict_per_dispatch_holds_within_a_batch(tmp_project, run_hippo, fake_transcript,
+                                                       tmp_path):
+    """Two verdicts for one ref in a single clerk reply: the first lands, the second is the
+    same re-judgment with less distance."""
+    mock = _scribe_output(tmp_path, "batch", [
+        _dispatch("fork/fable/inherit", "dtwice"),
+        {"ev": "outcome", "ref": "dtwice", "result": "accepted"},
+        {"ev": "outcome", "ref": "dtwice", "result": "refuted"},
+    ])
+    proc = _run_scribe(run_hippo, tmp_project, mock)
+    assert proc.returncode == 0, proc.stderr
+    outs = [e for e in read_ledger(tmp_project)
+            if e.get("ev") == "outcome" and e.get("ref") == "dtwice"]
+    assert [e["result"] for e in outs] == ["accepted"]
 
 
 # --------------------------------------------------------------------------

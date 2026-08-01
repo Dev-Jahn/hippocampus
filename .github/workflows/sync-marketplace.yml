@@ -1,6 +1,6 @@
 name: Sync marketplace pin
 
-# When main moves (a release pushed by release-to-main.sh), mirror this repo's main sha and the
+# When main moves (a release pushed by release.sh), mirror this repo's main sha and the
 # plugin.json version + description into Dev-Jahn/jahns-cc-marketplace's marketplace.json, so the
 # marketplace always pins the latest release and never drifts from plugin.json's description. Cross-
 # repo write uses a deploy key scoped to the marketplace repo only (private key in the

@@ -80,8 +80,9 @@ events: only the four kinds below are allowed, with exactly these field names.
    — a delegation that reached a *verdict* in this window: merged/accepted (accepted), accepted
    after repair (revised, with the number of round trips in rework), refuted by verification
    (refuted), ended without starting because a premise did not hold (no-go), or the result itself
-   was lost (lost). **`ref` must be an id from `# dispatches already recorded`** — most usefully
-   one marked `[no outcome yet]` — **or one you can literally see in this digest.** A task id
+   was lost (lost). **`ref` must be an id marked `[no outcome yet]` in
+   `# dispatches already recorded`, or one you can literally see in this digest.** An id *not*
+   marked `[no outcome yet]` is already judged — the writer rejects a second verdict. A task id
    (`feat/x`) is not a dispatch id. Never reconstruct one from memory or invent one that merely
    looks right: the writer rejects a ref naming no known dispatch, and a fabricated one is
    dropped from every aggregate.
@@ -131,5 +132,6 @@ events: only the four kinds below are allowed, with exactly these field names.
   to a delegation still in flight. **A completion report is not acceptance** — if the output
   exists but acceptance is explicitly held back ("we decide on merge once we see the numbers"),
   do not record an outcome; wait for the next turn's signal.
-- At most one outcome per dispatch. Do not re-judge what already has a verdict.
+- At most one outcome per dispatch. Do not re-judge what already has a verdict — the writer
+  rejects the second one.
 - The worklog summarizes the digest; it does not evaluate it. No praise, no interpretation, no advice.
