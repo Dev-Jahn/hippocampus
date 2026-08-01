@@ -200,7 +200,9 @@ def valid_mock_output(tmp_path) -> Path:
                 "ev": "dispatch",
                 "id": "d100",
                 "kind": "docs",
-                "exec": "codex/gpt-5.6-luna/low",
+                # A fork arm: the kind of launch only the scribe can see, and so the kind it is
+                # still allowed to record. A codex dispatch here would be rejected by §3.5.6b.
+                "exec": "fork/fable/inherit",
                 "scope": "scribe pipeline test dispatch",
             }
         ],

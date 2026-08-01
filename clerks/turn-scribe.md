@@ -27,10 +27,16 @@ events: only the four kinds below are allowed, with exactly these field names.
 1. `{"ev":"dispatch","id":"<new id, 8 chars or fewer>","kind":"<work-type tag>","exec":"<executor/model/effort>","scope":"<one line>"}`
    — a delegation that was *launched* in this window: a codex exec run (read the model from -m
    and the effort from the Bash command), an Agent/Task tool call (from its model and
-   description), a Workflow launch. **A launch listed under `# dispatches already recorded` is
-   done — do not record it again**, not under its own id and not under a new one. The launcher
-   writes its own dispatch event, so most codex runs in the digest are already on that list;
-   check the list before writing a dispatch, and only record what is missing from it.
+   description), a Workflow launch.
+
+   **Never record a `codex` launch.** `hippo dispatch` writes those itself, from the argv it was
+   given, at the moment it ran — you would only be restating it from a paraphrase. If a codex run
+   in the digest has no record, that gap is the honest record of a launch that bypassed the
+   wrapper; do not fill it. What you record is what the wrapper cannot see: `fork`, `subagent`,
+   `workflow`, `claude`. The writer rejects a codex dispatch from you.
+
+   `# dispatches already recorded` is there so that your **outcomes** can name a real id (rule 2),
+   not so that you can check for duplicates.
 
    `kind` is the **category of work, never its subject** — the subject belongs in scope. Pick one:
 
@@ -57,18 +63,19 @@ events: only the four kinds below are allowed, with exactly these field names.
 
    | executor | what it is |
    |---|---|
-   | `codex` | an external `codex exec` process, no inherited context |
+   | `codex` | an external `codex exec` process — **never yours to record; see above** |
    | `claude` | a headless `claude -p` process |
    | `fork` | a subagent that inherits this session's context (effort is `inherit`) |
    | `subagent` | an anonymous subagent, no inherited context |
    | `workflow` | a subagent orchestrated by the Workflow tool |
 
-   `background`, `bash`, `tools/dispatch`, `hippo dispatch` are launch mechanisms, not executors:
-   a codex run started in the background is still `codex`, and splitting it by how it was
-   launched scatters the sample. Read the model from `-m` and the effort from
-   `-c model_reasoning_effort=`. If a part is genuinely absent from the digest write `unknown`
-   for that part alone; never emit prose or a placeholder word as a value. Work with no agent at
-   all (a command the main session simply ran) is not a delegation — do not record a dispatch.
+   `background`, `bash`, `hippo dispatch` are launch mechanisms, not executors: splitting a
+   delegation by how it was started scatters the sample. `effort` is one of `low`, `medium`,
+   `high`, `xhigh`, `ultra`, or `inherit` — use `inherit` when the executor takes its setting from
+   the session that spawned it, which is the usual case for `fork`. Both slots are closed sets and
+   the writer rejects anything else, so if you cannot tell which value applies, **record no
+   dispatch at all** rather than guessing: a missing row costs less than a row that dilutes the
+   priors. Work with no agent (a command the main session simply ran) is not a delegation either.
 2. `{"ev":"outcome","ref":"<dispatch id>","result":"accepted|revised|refuted|no-go|lost","attr":"work|brief|harness","rework":<integer>,"note":"<one line>"}`
    — a delegation that reached a *verdict* in this window: merged/accepted (accepted), accepted
    after repair (revised, with the number of round trips in rework), refuted by verification

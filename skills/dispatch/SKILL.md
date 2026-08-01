@@ -48,7 +48,7 @@ Filling the three groups of arguments:
   The vocabulary, shared with the scribe: `impl` `fix` `perf` `verify` `audit` `design`
   `research` `spike` `docs` `infra` `chore`. kind is the **category**; the subject goes in
   `--scope`, one line a human can read a month later. `--task` links a registry id.
-- **Routing** — `-m <model>` and `-c model_reasoning_effort=<low|medium|high|xhigh>`; together
+- **Routing** — `-m <model>` and `-c model_reasoning_effort=<low|medium|high|xhigh|ultra>`; together
   with the executor these form `exec = executor/model/effort`, the second PRIORS axis. The
   executor is the agent that did the work (`codex` `claude` `fork` `subagent` `workflow`),
   never how it was launched — a codex run started in the background is still `codex`. Read

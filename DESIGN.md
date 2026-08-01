@@ -157,7 +157,10 @@ optional `src` (`scribe|cli|wrapper`).
 - The **executor** is the agent that did the work (`codex`, `claude`, `fork`, `subagent`,
   `workflow`), not how it was launched: a codex run started in the background is still `codex`,
   and splitting it by launch mechanism scatters the sample the priors depend on. Work with no
-  agent — a command main simply ran — is not a delegation and gets no dispatch event.
+  agent — a command main simply ran — is not a delegation and gets no dispatch event. `effort` is
+  `low|medium|high|xhigh|ultra|inherit`; `inherit` is for an executor that takes its setting from
+  the session that spawned it. **Neither vocabulary is validated on main's writes** — see §3.5.6b
+  for why, and for where they are.
 - `review.base` is the reviewed commit (`^[0-9a-f]{7,40}$`) — **this is the whole of SHA pinning**
   (principle 3). Without a known sha, do not record the review event at all.
 - Validation: `hippo log` checks the required fields per ev, fail-closed. An unknown `ev` is rejected.
@@ -249,6 +252,32 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
    call itself* (no JSON, wrong envelope, nonzero rc) is still all-or-nothing and records
    `ev:clerk ok:false`. Either way the ledger is never contaminated and **the cursor advances**
    (never re-bill the same input forever). **Never fill a gap by inventing content.**
+6b. **Two extra rules, on the clerk's output only.** A scribe `dispatch` is rejected when its
+   executor is `codex`, or when either closed slot of `exec` is outside its vocabulary
+   (`codex|claude|fork|subagent|workflow` / `low|medium|high|xhigh|ultra|inherit`). Main's writes
+   are not checked this way and should not be.
+
+   The line is *who observed the value*, not who is trusted. The launcher builds `exec` from its
+   own argv and a handed vocabulary holds — measured, 0 malformed in 110, and `kind` has held the
+   same way with no validation at all. The scribe infers `exec` from a transcript, and that is
+   where a vocabulary stops working: 12 malformed in 45, every one scribe-written
+   (`background/CPU/sol-high`, `unknown/GPT-5.6/unknown`, `bash/unknown/unknown`).
+
+   A codex launch belongs to the wrapper, which was present when it happened. The scribe writing
+   one yields either a duplicate — every confirmed pair measured was scribe-vs-launcher, 27–167s
+   apart — or a record of a launch that bypassed the wrapper, which is a gap better seen as a gap
+   than filled with an inferred row that then dilutes the priors. What only the scribe can see, and
+   must keep recording, is what the wrapper cannot cover: `fork`, `subagent`, `workflow`, `claude`
+   (measured: one `fork` arm of a design duo existed in no other record).
+
+   This is not the enforcement principle 3 refuses. The clerk is a component hippo spawns with its
+   tools disabled and whose every event it already parses and may reject; it is not a party whose
+   work is being constrained, and §9.2's argument against access lists is about writers hippo does
+   *not* control. Two earlier attempts to fix this in the prompt alone both failed, because both
+   asked the clerk to **compare** — to spot the launcher's trace in a digest, then to match a
+   paraphrased scope against a verbose one (similarity of confirmed pairs ran as low as 0.46 while
+   unrelated pairs reached 0.35, so no threshold exists). This rule asks it only to classify the
+   single event in front of it.
 7. On success → append the events (`src:scribe`), append one line to today's date section of
    worklog.md, update the cursor, and append the `ev:clerk` self-metering event.
 
