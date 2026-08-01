@@ -22,6 +22,31 @@ A `ref` that names nothing is the failure worth knowing about. It is not an erro
 event validates, it writes, it sits in the file, and it is quietly missing from every aggregate
 that groups by dispatch. Nothing tells you except this.
 
+## Finding a launch that was recorded twice
+
+The launcher writes `ev:dispatch` from its own argv; a scribe running an older contract could also
+infer the same launch from the transcript and write a second record. Both validate. The pair
+inflates the PRIORS denominator and leaves a twin that can never be judged.
+
+**Match on Δt, not on scope text.** The launcher's scope carries the argv detail the scribe's
+paraphrase drops, so string similarity is structurally low even when the subject is identical —
+measured on a real ledger, confirmed pairs scored as low as 0.46 while unrelated pairs reached
+0.35. There is no threshold that separates them. Time does: every confirmed pair sat 27–167s
+apart, because a duplicate is minted while the launch is still going by.
+
+`ledger_check.py` reports candidates and refuses to resolve them, because two things it cannot
+settle change the answer:
+
+- **A different executor family beside a launch is usually a parallel arm, not a copy.** `hippo
+  dispatch` wraps codex exec only, so a `fork` or `subagent` arm has no launcher record by
+  construction. One `fork/...` dispatch 63s after its codex sibling was the second half of a
+  design duo — its twin's own outcome said "duo 착지: codex(…)". Dropping it would have erased a
+  real delegation.
+- **Parallel waves put several launches inside the window.** With a burst, more than one launcher
+  record is within Δt of the same scribe record and only one is the twin. The report prints both
+  scopes side by side so this takes a glance to settle: on a real ledger, 4 of 5 surviving
+  candidates turned out to be unrelated launches that merely started at the same moment.
+
 ## Writing a transform
 
 ```python
