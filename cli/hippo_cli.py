@@ -70,6 +70,12 @@ EXEC_RE = re.compile(r"^[^/\s]+/[^/\s]+/[^/\s]+$")
 # The placeholder words themselves showed up as values ("vehicle/gpt-5.6-sol/high"): the
 # shape was right, so only naming them catches it.
 EXEC_PLACEHOLDERS = {"executor", "vehicle", "model", "effort"}
+# The two closed slots of exec. They are checked only on the scribe's own output (§3.5.6b), never
+# on what main writes: a vocabulary holds where the writer *has* the value and fails where it has
+# to infer one. Measured on a consuming project — the wrapper, which reads its own argv, produced
+# 0 malformed exec in 110 dispatches; the scribe, reading a transcript, produced 12 in 45.
+EXECUTORS = {"codex", "claude", "fork", "subagent", "workflow"}
+EFFORTS = {"low", "medium", "high", "xhigh", "ultra", "inherit"}
 ENUMS = {
     ("outcome", "result"): {"accepted", "revised", "refuted", "no-go", "lost"},
     ("outcome", "attr"): {"work", "brief", "harness"},
@@ -593,6 +599,43 @@ def resolve_ref(hp, ref):
     listed = "\n".join(f"  {e.get('id')}  {one_line(e.get('scope', ''), 60)}" for e in open_)
     die(f"--ref {ref}: task {task!r} has {len(open_)} dispatches awaiting an outcome — "
         f"name one explicitly:\n{listed}")
+
+
+def validate_scribe_event(e):
+    """Extra rules for the clerk's own output. Main's writes never see these.
+
+    The line is not "who is trusted" — it is who *observed* the value. The launcher builds `exec`
+    from its own argv, so a vocabulary it is handed holds (0 malformed in 110, and `kind` has held
+    the same way with no validation at all). The scribe infers `exec` from a transcript, and
+    inference is where a vocabulary stops working: 12 malformed in 45, every one of them
+    scribe-written — `background/CPU/sol-high`, `unknown/GPT-5.6/unknown`, `bash/unknown/unknown`.
+
+    Constraining the clerk is not enforcement in the sense principle 3 guards against. The clerk is
+    a component hippo spawns with its tools disabled and whose every event it already parses and
+    can reject; it is not a party whose work is being restricted. Rejected events land in
+    `failures/` like any other, so nothing disappears quietly.
+
+    A codex launch belongs to the wrapper, which was there when it happened. The scribe recording
+    one produces either a duplicate (measured: every confirmed pair was scribe-vs-launcher) or a
+    record of a launch that bypassed the wrapper — and that is a gap worth seeing as a gap, not
+    worth filling with an inferred row that then dilutes the priors. What the scribe alone can
+    see, and must keep recording, is everything the wrapper cannot cover: fork, subagent,
+    workflow, claude."""
+    if e.get("ev") != "dispatch":
+        return None
+    # validate_event has already guaranteed the three-slot shape by the time this runs.
+    parts = str(e.get("exec", "")).split("/")
+    executor, effort = parts[0], parts[-1]
+    if executor == "codex":
+        return ("ev=dispatch: the scribe does not record codex launches — `hippo dispatch` "
+                "records those when it runs them. If it did not run, the gap is the record.")
+    if executor not in EXECUTORS:
+        return (f"ev=dispatch: executor must be one of {'|'.join(sorted(EXECUTORS))}: "
+                f"{executor!r} (it is the agent that did the work, not how it was launched)")
+    if effort not in EFFORTS:
+        return (f"ev=dispatch: effort must be one of {'|'.join(sorted(EFFORTS))}: {effort!r} "
+                "(use `inherit` when the executor takes its setting from its parent)")
+    return None
 
 
 def log_and_print(hp, e):
@@ -1159,7 +1202,7 @@ def cmd_scribe(args):
     # is preserved in failures/ — which is what "the dump is the record" means.
     events = obj.get("events", [])
     for e in events:
-        verr = validate_event(e) or check_ref(hp, e)
+        verr = validate_event(e) or validate_scribe_event(e) or check_ref(hp, e)
         if verr:
             dump_failure(hp, "scribe", f"{verr}\n\n{json.dumps(e, ensure_ascii=False, indent=2)}\n")
             continue

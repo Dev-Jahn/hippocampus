@@ -1,6 +1,6 @@
 {
   "name": "hippo",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "description": "hippocampus — perception and memory for coding agents: task registry, outcome ledger, and background clerks that turn transcripts into evidence. Records; never enforces. CLI and slash commands are `hippo`.",
   "author": {
     "name": "Jahn",
