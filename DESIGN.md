@@ -345,10 +345,14 @@ Two rules govern the directive block:
   ruling that is invisible at session start is effectively not there, and a cap does not fix that
   problem — it makes it quiet. Newlines are collapsed (a multi-line value would break the
   one-per-line shape); the text itself is never cut.
-- **Volume is a warning, never a limit** (principle 3). `hippo directive add` writes whatever it is
-  given and then says what it costs: over 200 chars in one directive → compress it and re-add under
-  the same `--id`; 8 or more live, or 1600 characters in total → compress, or withdraw the stale
-  ones. The author is the one who can act on that, and the moment of writing is when they can.
+- **Volume is a warning, never a limit** (principle 3). The write always goes through; what follows
+  it, on stderr, is what the live set now costs: any directive over 200 chars, named by id and
+  size → compress it and re-add under the same `--id`; 8 or more live, or 1600 characters in total
+  → compress, or withdraw the stale ones.
+  The notes describe the **whole live set, not the text just written**, and both `directive add`
+  and `directive list` emit them. Warning only at write time is the failure this fixes: the
+  expensive directives are usually the ones already resident, so the one moment they were
+  mentionable had already passed and every session went on paying in silence.
 
 ## 7. Testing policy
 

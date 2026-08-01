@@ -198,8 +198,31 @@ def test_roster_hands_the_scribe_the_live_ids(tmp_project, run_hippo):
 def test_long_directive_is_written_and_warned_about(tmp_project, run_hippo):
     proc = _add(run_hippo, tmp_project, "x" * 250, "phase", "long-01")
     assert proc.returncode == 0, proc.stderr
-    assert "250 chars" in proc.stderr
+    assert "long-01 (250)" in proc.stderr
     assert "long-01" in _active_ids(run_hippo, tmp_project)
+
+
+def test_an_already_registered_long_directive_is_named_when_listing(tmp_project, run_hippo):
+    """The expensive directives are the ones already resident. Warning only at write time leaves
+    them permanently unmentioned — every session pays and nobody is ever told."""
+    _add(run_hippo, tmp_project, "x" * 250, "durable", "long-01")
+
+    listing = run_hippo(["directive", "list"], cwd=tmp_project)
+    assert listing.returncode == 0, listing.stderr
+    assert "long-01 (250)" in listing.stderr
+    # the listing itself stays a clean record — the note goes to stderr
+    assert "note:" not in listing.stdout
+    assert len(listing.stdout.splitlines()) == 1
+
+    # and adding an unrelated short directive still surfaces the resident one
+    later = _add(run_hippo, tmp_project, "short and fine", "phase", "short-01")
+    assert "long-01 (250)" in later.stderr
+
+
+def test_listing_a_tidy_directive_set_says_nothing(tmp_project, run_hippo):
+    _add(run_hippo, tmp_project, "short and fine", "durable", "short-01")
+    listing = run_hippo(["directive", "list"], cwd=tmp_project)
+    assert listing.stderr.strip() == ""
 
 
 def test_short_directive_warns_about_nothing(tmp_project, run_hippo):
