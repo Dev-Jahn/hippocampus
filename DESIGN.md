@@ -146,7 +146,14 @@ optional `src` (`scribe|cli|wrapper`).
   category errors, mostly a *launch mechanism* (`background`, `bash`, the wrapper's own path)
   where the agent belonged. And **54% of outcomes joined to no dispatch at all** — half from a
   caller passing a task id, half from ids the scribe invented in the right shape. All of it
-  looked like data.
+  looked like data. Both halves are answered without loosening the join: the scribe is handed the
+  recent dispatch ids (§3.5.5) instead of being asked to find them in a digest, and a caller may
+  write `--ref task:<task-id>`, which resolves at write time to that task's dispatch still awaiting
+  an outcome and **stores the dispatch id**. Two open dispatches for one task is a real ambiguity
+  between parallel lanes, so it lists them and fails rather than guessing. Measured afterwards on a
+  consuming project that had the no-double-record rule but not the roster: of 66 scribe-written
+  dispatches, 30 restated a wrapper launch under a fresh id and 6 reused the wrapper's id exactly,
+  inflating the PRIORS denominator ~1.4x — a prompt cannot enforce what its inputs do not contain.
 - The **executor** is the agent that did the work (`codex`, `claude`, `fork`, `subagent`,
   `workflow`), not how it was launched: a codex run started in the background is still `codex`,
   and splitting it by launch mechanism scatters the sample the priors depend on. Work with no
@@ -227,7 +234,10 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
    codex exists, otherwise claude -p sonnet) > mock` (for tests). 120s timeout. `$HIPPO_CLERK_MODEL`
    overrides the model on whichever backend is resolved; it is one variable for both, so pin the
    backend when you set it — a model id for one backend is invalid on the other.
-5. Prompt = `clerks/turn-scribe.md` + the live directive roster + the digest. Expected output =
+5. Prompt = `clerks/turn-scribe.md` + the live directive roster + the recent dispatch roster + the
+   digest. Both rosters exist for one reason: an id the clerk coins for a subject that already has
+   one forks it instead of updating it, and the digest cannot be relied on to contain the existing
+   id. The dispatch roster is also the set an outcome may legally `ref`. Expected output =
    strict JSON:
    `{"worklog": "…", "events": [ …ledger events without t… ]}`.
 6. Validation, **per event**: check each event by the same rules as `hippo log` (per-ev key

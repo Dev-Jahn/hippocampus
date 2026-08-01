@@ -537,7 +537,8 @@ def cmd_task_show(args):
 # ev -> the ev its `ref` must point at.
 REF_TARGET = {"outcome": "dispatch", "review-status": "review"}
 REF_HINT = {
-    "outcome": " — a task id is not a dispatch id; the launcher prints the id as `dispatch:<id>`",
+    "outcome": " — a task id is not a dispatch id; the launcher prints the id as `dispatch:<id>`, "
+               "or pass `--ref task:<task-id>` to have it resolved",
     "review-status": "",
 }
 
@@ -561,6 +562,38 @@ def check_ref(hp, e):
     )
 
 
+def resolve_ref(hp, ref):
+    """`task:<task-id>` → the dispatch id it stands for. Anything else is passed through.
+
+    What lands in the ledger is still a dispatch id — the contract of §3.2 is untouched. This only
+    removes the grep: a task id is what an operator actually remembers, while a dispatch id is a
+    hash they have to go find, and the old answer to that friction was to pass the task id *as* the
+    ref, which stored a join that silently never resolved (half of the measured 54% of unjoined
+    outcomes). Resolving at write time keeps the join real and lets the caller say what they know.
+
+    Resolution is over the task's dispatches that have no outcome yet, because that is the one an
+    outcome is about. Two candidates is a genuine ambiguity between parallel lanes, so it lists
+    them and fails rather than guessing."""
+    if not isinstance(ref, str) or not ref.startswith("task:"):
+        return ref
+    task = ref[len("task:"):]
+    rows = read_ledger(hp)
+    judged = {e.get("ref") for e in rows if e.get("ev") == "outcome"}
+    hits = [e for e in rows if e.get("ev") == "dispatch" and e.get("task") == task]
+    if not hits:
+        die(f"--ref {ref}: no dispatch recorded for task {task!r}")
+    open_ = [e for e in hits if e.get("id") not in judged]
+    if len(open_) == 1:
+        return open_[0]["id"]
+    if not open_:
+        listed = ", ".join(str(e.get("id")) for e in hits)
+        die(f"--ref {ref}: every dispatch for task {task!r} already has an outcome ({listed}). "
+            "Pass the dispatch id explicitly to record a second one.")
+    listed = "\n".join(f"  {e.get('id')}  {one_line(e.get('scope', ''), 60)}" for e in open_)
+    die(f"--ref {ref}: task {task!r} has {len(open_)} dispatches awaiting an outcome — "
+        f"name one explicitly:\n{listed}")
+
+
 def log_and_print(hp, e):
     err = validate_event(e) or check_ref(hp, e)
     if err:
@@ -576,7 +609,7 @@ def cmd_log(args):
         if args.task:
             e["task"] = args.task
     elif args.ev == "outcome":
-        e.update(ref=args.ref, result=args.result)
+        e.update(ref=resolve_ref(args.hp, args.ref), result=args.result)
         for k in ("attr", "rework", "by", "note"):
             if getattr(args, k) is not None:
                 e[k] = getattr(args, k)
@@ -891,6 +924,33 @@ def directive_roster(hp):
     )
 
 
+DISPATCH_ROSTER_N = 12
+
+
+def dispatch_roster(hp):
+    """The recent dispatches handed to the scribe with the digest.
+
+    The clerk is told not to record a launch the wrapper already recorded, and until now its only
+    way to tell was spotting the wrapper's trace in the digest — which is not something a digest
+    guarantees. Measured on a real ledger (361 events): of 66 scribe-written dispatches, 30
+    restated a wrapper launch under a *new* id and 6 reused the wrapper's id exactly. The rule was
+    not so much broken as unanswerable, and it inflated the PRIORS denominator by ~1.4x.
+
+    Same remedy as directive_roster: hand over the short list instead of asking it to go looking.
+    It doubles as the set of ids an outcome may legally ref, which the digest also could not
+    guarantee."""
+    rows = read_ledger(hp)
+    judged = {e.get("ref") for e in rows if e.get("ev") == "outcome"}
+    disp = [e for e in rows if e.get("ev") == "dispatch"][-DISPATCH_ROSTER_N:]
+    if not disp:
+        return "(none yet)"
+    return "\n".join(
+        f"- {e.get('id')} ({e.get('kind', '?')}): {one_line(e.get('scope', ''), 80)}"
+        + ("" if e.get("id") in judged else "  [no outcome yet]")
+        for e in disp
+    )
+
+
 def cmd_scribe(args):
     hp = args.hp
     lock = (hp / "scribe.lock").open("w")
@@ -954,7 +1014,9 @@ def cmd_scribe(args):
         return
 
     payload = (
-        f"# live directives\n\n{directive_roster(hp)}\n\n# transcript digest\n\n{digest}"
+        f"# live directives\n\n{directive_roster(hp)}\n\n"
+        f"# dispatches already recorded\n\n{dispatch_roster(hp)}\n\n"
+        f"# transcript digest\n\n{digest}"
     )
     out, err, rc, ms, tokens = run_clerk(
         hp, CLERKS / "turn-scribe.md", payload, SCRIBE_TIMEOUT
@@ -1061,7 +1123,11 @@ def build_parser():
     a.add_argument("--task")
     a.set_defaults(fn=cmd_log, writes=True)
     a = lsub.add_parser("outcome", help="verdict on a delegation")
-    a.add_argument("--ref", required=True)
+    a.add_argument(
+        "--ref",
+        required=True,
+        help="dispatch id, or task:<task-id> for its dispatch still awaiting an outcome",
+    )
     a.add_argument(
         "--result", required=True, choices=sorted(ENUMS[("outcome", "result")])
     )

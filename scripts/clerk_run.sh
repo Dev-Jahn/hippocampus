@@ -106,6 +106,8 @@ case "$BACKEND" in
     if [ -z "${HIPPO_MOCK_OUTPUT:-}" ] || [ ! -r "${HIPPO_MOCK_OUTPUT:-/nonexistent}" ]; then
       exit 4
     fi
+    # Tests assert on what the backend was actually handed, not on what the caller meant to send.
+    [ -n "${HIPPO_MOCK_CAPTURE:-}" ] && printf '%s' "$COMBINED" > "$HIPPO_MOCK_CAPTURE"
     with_timeout "$TIMEOUT" cat "$HIPPO_MOCK_OUTPUT"
     exit $?
     ;;
