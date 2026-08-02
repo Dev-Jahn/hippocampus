@@ -106,7 +106,7 @@ It is a convention, not a requirement: a path anywhere else still launches.
 ### 3.2 Ledger schema (a contract — exactly this)
 
 One line = one JSON object. Common fields: `t` (ISO8601, stamped by the writer), `ev`, and the
-optional `src` (`scribe|cli|wrapper`).
+optional `src` (`scribe|cli|wrapper|executor`).
 
 ```jsonl
 {"t":"…","ev":"dispatch","id":"d041","kind":"kernel-impl","exec":"codex/gpt-5.6-sol/high","scope":"pass2 SS-UMMA tensorize","task":"feat/x"}
@@ -130,6 +130,20 @@ optional `src` (`scribe|cli|wrapper`).
   forever. `hippo log review` prints a one-line stderr reminder to record the closing
   `review-status` when the findings are dealt with — without it, the loop's second half had no
   surface that ever mentioned it.
+- `src=executor` is "the agent that did the work wrote this" (§9.2, built in 1.8.0): the wrapper
+  plants `HIPPO_DISPATCH=<dispatch id>` in the lane's environment, every hippo write from there
+  arrives as executor, and `log outcome` defaults its `ref` to that id. A self-reported outcome
+  is a **claim, not a verdict**: it joins no priors cell, pays no attribution, does not land the
+  in-flight entry (which renders it as `· claims accepted`, subject visible, latest claim wins —
+  §9.3), does not trip the scribe's re-judge rule, and draws no second-verdict note when main
+  then judges it. The same line holds for directives: a lane's directive events are recorded
+  but never fold into the live set — a lane may propose, not rule. Both are one rendering rule
+  in a generated view (principle 5), not a blocked write.
+- `directive.audience ∈ {main, executor, all}` (absent = all — §9.4, built in 1.8.0): `lifetime`
+  is *when* a directive holds, audience is *who* it binds. `status --inject` filters by reader —
+  inside a lane (HIPPO_DISPATCH set) the capsule carries `executor|all`, everywhere else
+  `main|all`. A re-add that omits the flag keeps the stored value, like every directive field
+  (update semantics).
 - `directive.lifetime ∈ {turn, phase, durable}`, `state ∈ {active, withdrawn, expired}`. The last
   event for an `id` is its current state (a derived view is never stored — principles 4 and 5).
   It is `lifetime` rather than `scope` because `dispatch.scope` already means *what a delegation
@@ -179,6 +193,12 @@ optional `src` (`scribe|cli|wrapper`).
 
 - Implementation: a single Python file (PEP 723 inline metadata, deps: PyYAML); `bin/hippo` is a
   `uv run --script` shim (falling back to python3 when uv is absent, with a clear error on failure).
+- `.hippo/` is found by walking up from cwd. A `.git` *directory* is the ceiling (never adopt a
+  project from beyond a real repo root); a `.git` *file* — a linked worktree — is walked through,
+  so a lane calling hippo from its worktree resolves the project's real `.hippo/` (§9.1, wired
+  in 1.8.0). The two hooks keep the old conservative walk: a Claude session opened *inside* a
+  worktree gets no capsule and no scribe while the CLI there still resolves — lanes are
+  processes, not sessions, so the asymmetry costs nothing by design.
 - **Every subcommand has `-h/--help`, and errors attach the usage to stderr** (a direct fix for the
   largest source of friction in 0.x).
 - The surface:
@@ -311,8 +331,10 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
 A codex exec wrapper: the point that already knows the model and effort from its own argv is
 exactly the point to collect them automatically (principle 6). It takes the `--kind`, `--scope` and
 `--task` labels, records `ev:dispatch`, prints the dispatch id on stdout's first line, and then runs
-`codex exec … < /dev/null` unchanged. It does not record an outcome — the acceptance judgment
-belongs to main (through the CLI directly) or to the scribe (by inference).
+`codex exec … < /dev/null` unchanged. It also plants `HIPPO_DISPATCH=<id>` in the child's
+environment — the whole of the executor data plane's wiring (§9.2). It does not record an
+outcome — the acceptance judgment belongs to main (through the CLI directly) or to the scribe
+(by inference); what the lane itself records under that id is a claim, never the verdict.
 
 Why it is a CLI subcommand: a plugin puts only `bin/` on PATH, and `${CLAUDE_PLUGIN_ROOT}` is empty
 in an ordinary Bash call. Leaving it in `scripts/` means every consuming project grows its own shim
@@ -430,7 +452,9 @@ Constraints specific to codex (0.144.6):
 ```
 
 `in flight` is delegations launched and not yet judged, within 24h, **counting only what a
-launcher wrote** (`src` `wrapper`/`cli`). It is the one part of "where was I" that is a fact rather
+launcher wrote** (`src` `wrapper`/`cli`). A lane's self-report does not land an entry — it rides
+it, subject visible (`pass2 tensorize (0h42m · claims accepted)`): an executor-sourced statement
+never renders as a flat fact (§9.3), and only main's verdict clears the line. It is the one part of "where was I" that is a fact rather
 than a plan, and it is the reason it belongs here instead of in a hand-kept file: measured on a
 consuming project, this query returned exactly the three lanes that project was listing by hand,
 while the same query over every writer returned 16 — scribe-inferred rows swamp it. With nothing
@@ -444,7 +468,9 @@ surfaces go unused — not a gap in this design.
 
 Three rules govern the directive block:
 
-- **Nothing is folded away.** Every active directive is injected, in full, durable first. A user
+- **Nothing is folded away.** Every active directive addressed to the reader is injected, in
+  full, durable first (audience §9.4: a lane's capsule carries `executor|all`, main's carries
+  `main|all`). A user
   ruling that is invisible at session start is effectively not there, and a cap does not fix that
   problem — it makes it quiet. Newlines are collapsed (a multi-line value would break the
   one-per-line shape); the text itself is never cut.
@@ -481,7 +507,7 @@ malformed JSON isolated into failures), and digest_lite basics. Around twenty of
 - Everything else from 0.x → retired to the `legacy` branch. Audit report:
   `~/workspace/b200-2-research-cc-audit/`
 
-## 9. The shared brain (draft for 2.0 — nothing here is built)
+## 9. The shared brain (data plane §9.2–9.4 shipped in 1.8.0; §9.5–9.6 remain drafts)
 
 Today a delegated executor starts blind. Everything it needs — the live directives, the task it
 serves, what has already been tried — is re-typed by hand into a brief, which is why `COMMON.md`
@@ -494,9 +520,11 @@ main still decides — but the memory is one memory.
 ### 9.1 The plumbing already exists
 
 `.hippo/` is found by walking **up** from cwd (§3.3), and an editing lane's worktree is
-`{repo}/.claude/worktrees/<name>` — inside the repo. So an executor invoking `hippo` from its
-worktree already resolves the project's real `.hippo/`. Nothing needs to be wired. What is missing
-is entirely policy, which is the reason this is worth writing down before building it.
+`{repo}/.claude/worktrees/<name>` — inside the repo. One thing did need wiring (found while
+building 1.8.0): the walk used to stop at the worktree's own `.git` *file*, exactly the boundary
+this section assumed it crossed. It now walks through a `.git` file and stops only at a `.git`
+directory — a real repo root. Everything else was policy, which is why it was worth writing
+down before building.
 
 ### 9.2 Observation and verdict, not read and write
 
