@@ -12,6 +12,10 @@ ver=$(jq -r .version .claude-plugin/plugin.json)
 echo "== gate: tests =="
 tests/run.sh
 
+# Not a gate (record, never enforce): the price sheet is refreshed by hand each release,
+# and the one moment to notice it went stale is right here.
+echo "== prices.yaml: $(grep '^as_of:' prices.yaml) — refresh from the vendor pages if stale =="
+
 # Only what an installed plugin needs (dev-only excluded: tests/ DESIGN.md CLAUDE.md .claude/ ci.yml).
 # The README logos live in .github/assets/ — absent here, so they never reach the distribution.
 SHIP=(
@@ -26,6 +30,7 @@ SHIP=(
   cli
   clerks
   hooks
+  prices.yaml
   scripts
   skills
 )

@@ -120,6 +120,7 @@ optional `src` (`scribe|cli|wrapper|executor`).
 {"t":"…","ev":"directive","id":"gpu-01","text":"use GPUs 0 and 1 only","lifetime":"phase","state":"active"}
 {"t":"…","ev":"directive","id":"gpu-01","state":"withdrawn"}
 {"t":"…","ev":"clerk","name":"turn-scribe","ms":8100,"ok":true,"tokens":1400}
+{"t":"…","ev":"usage","ref":"d041","tokens":1100000,"tin":1000000,"tcached":400000,"tout":100000,"model":"gpt-5.6-sol"}
 ```
 
 - `outcome.result ∈ {accepted, revised, refuted, no-go, lost}`; `attr ∈ {work, brief, harness}`
@@ -143,6 +144,14 @@ optional `src` (`scribe|cli|wrapper|executor`).
   then judges it. The same line holds for directives: a lane's directive events are recorded
   but never fold into the live set — a lane may propose, not rule. Both are one rendering rule
   in a generated view (principle 5), not a blocked write.
+- `ev:usage` (§9.6, built in 1.10.0) is what a lane actually cost — written by the wrapper at
+  lane exit from what it observed (the rollout's cumulative token count with billing breakdown;
+  the "tokens used" footer as total-only fallback; nothing → no event, a gap is a gap).
+  `ref` joins a dispatch fail-closed. Dollars are computed at read time from the shipped
+  `prices.yaml` (USD per 1M, refreshed each release, `as_of` printed by PRIORS so staleness is
+  visible); a model off the sheet renders as unpriced and named, never guessed. PRIORS' routing
+  table carries tokens, $ and $/accepted per cell — the question it unlocks is "the cheapest
+  exec that clears the bar". A fleet's total is derivable by summing children over `parent`.
 - `dispatch.depth` (int, absent = 0) and `dispatch.parent` (§9.5, built in 1.9.0): depth is how
   far a lane may re-delegate — 0 is a leaf whose capsule says so, 1 may spawn children that
   start at 0. `parent` is stamped by the wrapper from `HIPPO_DISPATCH` when a launch happens
@@ -308,7 +317,8 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
    call itself* (no JSON, wrong envelope, nonzero rc) is still all-or-nothing and records
    `ev:clerk ok:false`. Either way the ledger is never contaminated and **the cursor advances**
    (never re-bill the same input forever). **Never fill a gap by inventing content.**
-6b. **Three extra rules, on the clerk's output only.** A scribe `dispatch` is rejected when its
+6b. **Four extra rules, on the clerk's output only.** A scribe `usage` is rejected — the
+   wrapper observed the cost and was there when the lane ran. A scribe `dispatch` is rejected when its
    executor is `codex`, or when either closed slot of `exec` is outside its vocabulary
    (`codex|claude|fork|subagent|workflow` / `low|medium|high|xhigh|ultra|inherit`). A scribe
    `outcome` is rejected when its `ref` already has a verdict: "at most one outcome per
@@ -348,9 +358,13 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
 A codex exec wrapper: the point that already knows the model and effort from its own argv is
 exactly the point to collect them automatically (principle 6). It takes the `--kind`, `--scope` and
 `--task` labels, records `ev:dispatch`, prints the dispatch id on stdout's first line, and then runs
-`codex exec … < /dev/null` unchanged. It also plants `HIPPO_DISPATCH=<id>` and `HIPPO_DEPTH`
+`codex exec … < /dev/null`, forwarding every line unmodified. It also plants
+`HIPPO_DISPATCH=<id>` and `HIPPO_DEPTH`
 in the child's environment — the whole of the executor data plane's wiring (§9.2, §9.5). A
-launch made from inside a lane records that lane as `parent`. It does not record an
+launch made from inside a lane records that lane as `parent`. Since 1.10.0 the wrapper is a
+pass-through rather than an exec: it stays alive to *read* (never rewrite) the stream — the
+banner's session id and model, the "tokens used" footer — and at lane exit records `ev:usage`
+from the rollout or the footer (§9.6). It does not record an
 outcome — the acceptance judgment belongs to main (through the CLI directly) or to the scribe
 (by inference); what the lane itself records under that id is a claim, never the verdict.
 
@@ -543,7 +557,7 @@ malformed JSON isolated into failures), and digest_lite basics. Around twenty of
 - Everything else from 0.x → retired to the `legacy` branch. Audit report:
   `~/workspace/b200-2-research-cc-audit/`
 
-## 9. The shared brain (§9.2–9.4 shipped in 1.8.0, §9.5 depth in 1.9.0; §9.6 remains a draft)
+## 9. The shared brain (§9.2–9.4 shipped in 1.8.0, §9.5 depth in 1.9.0, §9.6 cost in 1.10.0; routing.yaml remains a draft)
 
 Today a delegated executor starts blind. Everything it needs — the live directives, the task it
 serves, what has already been tried — is re-typed by hand into a brief, which is why `COMMON.md`
@@ -651,8 +665,10 @@ question changes from
 
 > which exec performs best → **what is the cheapest exec that clears the bar**
 
-which the current schema cannot answer at all. `codex exec` reports its usage and the wrapper
-already reads that stream, so recording tokens on the outcome is collection at the point that
+which the schema before 1.10.0 could not answer at all. (One premise here was optimism, like
+§9.1's: the wrapper *exec'd* codex and read no stream — becoming a pass-through observer was
+the wiring this section needed, built with `ev:usage` in 1.10.0.) `codex exec` reports its
+usage, so recording it at lane exit is collection at the point that
 already knows (principle 6). Cost per *accepted* outcome is then derivable, and §9.5's routing stops
 being a guess. It also composes with §9.2 for free: children writing to the same ledger under a
 parent's dispatch id means a fleet's cost sums itself.

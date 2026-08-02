@@ -215,3 +215,60 @@ def test_junk_depth_dies_with_usage(tmp_project, tmp_path):
                     ["--kind", "impl", "--scope", "x", "--depth", "much"])
     assert proc.returncode == 2
     assert "--depth must be an integer" in proc.stderr
+
+
+# --------------------------------------------------------------------------
+# usage collection (§9.6, 1.10.0) — the wrapper observes what the lane cost
+# --------------------------------------------------------------------------
+
+UUID = "01234567-abcd-7000-8000-0123456789ab"
+BANNER_BODY = (
+    '#!/bin/sh\n'
+    'printf "OpenAI Codex stub\\n--------\\n"\n'
+    f'printf "model: gpt-5.6-luna\\nsession id: {UUID}\\n--------\\n"\n'
+    'printf "codex\\nOK\\ntokens used\\n18,169\\n"\n'
+)
+
+
+def _fake_rollout(home, uuid=UUID):
+    d = home / ".codex" / "sessions" / "2026" / "08" / "02"
+    d.mkdir(parents=True)
+    row = {"type": "event_msg", "payload": {"type": "token_count", "info": {
+        "total_token_usage": {"input_tokens": 1000000, "cached_input_tokens": 400000,
+                              "output_tokens": 90000, "reasoning_output_tokens": 10000,
+                              "total_tokens": 1100000}}}}
+    (d / f"rollout-2026-08-02T00-00-00-{uuid}.jsonl").write_text(
+        json.dumps(row) + "\n", encoding="utf-8")
+
+
+def test_wrapper_records_usage_from_the_rollout(tmp_project, tmp_path):
+    home = tmp_path / "home"
+    _fake_rollout(home)
+    proc = _wrapper(tmp_project, tmp_path, ["--kind", "impl", "--scope", "cost"],
+                    env={"HOME": str(home)}, body=BANNER_BODY)
+    assert proc.returncode == 0, proc.stderr
+    assert "OK" in proc.stdout  # pass-through is intact
+    (u,) = [e for e in read_ledger(tmp_project) if e.get("ev") == "usage"]
+    d = [e for e in read_ledger(tmp_project) if e.get("ev") == "dispatch"][0]
+    assert u["ref"] == d["id"]
+    assert (u["tokens"], u["tin"], u["tcached"], u["tout"]) == (1100000, 1000000, 400000, 100000)
+    assert u["model"] == "gpt-5.6-luna"
+    assert u["src"] == "wrapper"
+
+
+def test_wrapper_falls_back_to_the_footer_total(tmp_project, tmp_path):
+    home = tmp_path / "home"          # exists but holds no rollout
+    home.mkdir()
+    proc = _wrapper(tmp_project, tmp_path, ["--kind", "impl", "--scope", "cost"],
+                    env={"HOME": str(home)}, body=BANNER_BODY)
+    assert proc.returncode == 0, proc.stderr
+    (u,) = [e for e in read_ledger(tmp_project) if e.get("ev") == "usage"]
+    assert u["tokens"] == 18169
+    assert "tin" not in u
+
+
+def test_no_usage_report_leaves_a_gap_not_a_guess(tmp_project, tmp_path):
+    proc = _wrapper(tmp_project, tmp_path, ["--kind", "impl", "--scope", "quiet"],
+                    body='#!/bin/sh\nexit 0\n')
+    assert proc.returncode == 0, proc.stderr
+    assert not [e for e in read_ledger(tmp_project) if e.get("ev") == "usage"]

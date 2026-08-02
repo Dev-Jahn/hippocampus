@@ -44,6 +44,10 @@ REQUIRED = {
     "review-status": ("ref", "addressed"),
     "directive": ("id", "state"),
     "clerk": ("name", "ok"),
+    # usage: what a lane actually cost (§9.6) — written by the wrapper at lane exit, from the
+    # banner + rollout / footer it observed. tokens is the total; tin/tcached/tout carry the
+    # billing breakdown when the rollout gave one.
+    "usage": ("ref", "tokens"),
 }
 # Per-ev key whitelist — anything else is rejected. A field that is not in the schema
 # (§3.2) would silently poison the derived aggregates (the distiller).
@@ -57,6 +61,7 @@ ALLOWED = {
     "review-status": ("ref", "addressed", "at"),
     "directive": ("id", "text", "lifetime", "state", "audience"),
     "clerk": ("name", "ok", "ms", "tokens"),
+    "usage": ("ref", "tokens", "model", "tin", "tcached", "tout"),
 }
 # Fields only the writer stamps. Rejected if a caller (clerk output, log raw, environment)
 # supplies them: the scribe reads an untrusted transcript, so it must not be able to forge
@@ -98,7 +103,7 @@ ENUMS = {
 # kebab ASCII or nothing. An id derived from non-ASCII text collapses to the empty string, and
 # an id that is empty (or spelled differently every time) cannot supersede anything.
 DIRECTIVE_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-INT_FIELDS = ("findings", "rework", "ms", "tokens", "depth")
+INT_FIELDS = ("findings", "rework", "ms", "tokens", "depth", "tin", "tcached", "tout")
 
 
 def validate_event(e):
@@ -738,7 +743,7 @@ def cmd_task_show(args):
 
 
 # ev -> the ev its `ref` must point at.
-REF_TARGET = {"outcome": "dispatch", "review-status": "review"}
+REF_TARGET = {"outcome": "dispatch", "review-status": "review", "usage": "dispatch"}
 REF_HINT = {
     "outcome": " — a task id is not a dispatch id; the launcher prints the id as `dispatch:<id>`, "
                "or pass `--ref task:<task-id>` to have it resolved",
@@ -817,6 +822,10 @@ def validate_scribe_event(e):
     worth filling with an inferred row that then dilutes the priors. What the scribe alone can
     see, and must keep recording, is everything the wrapper cannot cover: fork, subagent,
     workflow, claude."""
+    if e.get("ev") == "usage":
+        # Same line as the codex-dispatch rule: the wrapper observed the cost from the banner
+        # and rollout; a scribe would be inferring it from a paraphrase.
+        return "ev=usage: the wrapper records usage — it was there when the lane ran"
     if e.get("ev") != "dispatch":
         return None
     # validate_event has already guaranteed the three-slot shape by the time this runs.
@@ -1022,7 +1031,7 @@ def event_time(e):
         return None
 
 
-def prior_facts(rows, now):
+def prior_facts(rows, now, prices=None):
     """Every number in PRIORS.md, computed here instead of by the clerk.
 
     Measured on a consuming project (293 events): all seven cells the clerk produced disagreed
@@ -1032,6 +1041,7 @@ def prior_facts(rows, now):
     is deterministic (dispatch ⋈ outcome on ref, then count), so a model was the wrong instrument
     for it: principles 4 and 6. The clerk still writes every sentence of the page; it no longer
     does the sums, and it is no longer handed the raw ledger to do them from."""
+    prices = prices or load_prices()
     disp = [e for e in rows if e.get("ev") == "dispatch"]
     # Self-reported outcomes are claims, not verdicts (§9.2): they enter no cell, no
     # attribution count, no unjoined count. The scorecard folds only judgments.
@@ -1040,18 +1050,37 @@ def prior_facts(rows, now):
     for e in outs:  # the ledger is append-only, so file order is chronological
         first.setdefault(e.get("ref"), e)
     known = {e.get("id") for e in disp}
+    usage = {}
+    for e in rows:  # one usage per dispatch from the wrapper; last wins if re-recorded
+        if e.get("ev") == "usage":
+            usage[e.get("ref")] = e
 
     cells, per_exec = {}, {}
+    unpriced_models = collections.Counter()
     for d in disp:
         f = first.get(d.get("id"))
         if not f:
             continue
         for bucket, key in ((cells, (d.get("kind"), d.get("exec"))), (per_exec, d.get("exec"))):
             b = bucket.setdefault(key, {"judged": 0, "accepted": 0, "revised": 0, "refuted": 0,
-                                        "no-go": 0, "lost": 0, "rework": 0})
+                                        "no-go": 0, "lost": 0, "rework": 0,
+                                        "tokens": 0, "usd": 0.0, "priced": 0, "unpriced": 0})
             b["judged"] += 1
             b[f.get("result")] = b.get(f.get("result"), 0) + 1
             b["rework"] += int(f.get("rework") or 0)
+        # Cost lands on the kind × exec cell only (§9.6): tokens always; dollars only when
+        # the sheet can price them honestly — an unpriced row is counted and named, not guessed.
+        u = usage.get(d.get("id"))
+        if u:
+            b = cells[(d.get("kind"), d.get("exec"))]
+            b["tokens"] += int(u.get("tokens") or 0)
+            usd = price_usd(u, prices)
+            if usd is None:
+                b["unpriced"] += 1
+                unpriced_models[u.get("model") or "(no model)"] += 1
+            else:
+                b["usd"] += usd
+                b["priced"] += 1
 
     def rate(b):
         return b["judged"] - b["no-go"] - b["lost"]
@@ -1059,8 +1088,12 @@ def prior_facts(rows, now):
     # Cells under the threshold are named but never given a rate: a percentage over n=1 reads as
     # evidence and is not one. Naming them keeps the omission visible instead of silent.
     lines = ["## routing — accepted / (judged − no-go − lost), per kind × exec", "",
-             "| kind | exec | n | first-pass | revised | rework | verdicts |",
-             "|---|---|---:|---:|---:|---:|---|"]
+             f"prices as of {prices.get('as_of') or 'unknown'} (prices.yaml); "
+             "cost columns cover measured usage only",
+             "",
+             "| kind | exec | n | first-pass | revised | rework | tokens | $ | $/accepted "
+             "| verdicts |",
+             "|---|---|---:|---:|---:|---:|---:|---:|---:|---|"]
     thin = []
     for (kind, ex), b in sorted(cells.items(), key=lambda kv: -rate(kv[1])):
         n = rate(b)
@@ -1069,12 +1102,21 @@ def prior_facts(rows, now):
             continue
         verdicts = ", ".join(f"{k} {b[k]}" for k in ("accepted", "revised", "refuted", "no-go",
                                                      "lost") if b[k])
+        tok = f"{b['tokens']:,}" if b["tokens"] else "—"
+        star = "*" if b["unpriced"] else ""
+        usd_s = f"${b['usd']:.2f}{star}" if b["priced"] else ("—" + star)
+        per_acc = (f"${b['usd'] / b['accepted']:.2f}"
+                   if b["priced"] and b["accepted"] else "—")
         lines.append(f"| {kind} | {ex} | {n} | {b['accepted']}/{n} "
                      f"({100 * b['accepted'] / n:.1f}%) | {b['revised']} | {b['rework']} "
-                     f"| {verdicts} |")
+                     f"| {tok} | {usd_s} | {per_acc} | {verdicts} |")
     if thin:
         lines += ["", f"below the n={PRIOR_MIN_SAMPLE} threshold, no rate reported "
                       f"({len(thin)}): " + ", ".join(thin)]
+    if unpriced_models:
+        lines += ["", "unpriced usage (* above — model not on the price sheet, or no billing "
+                      "breakdown): " + ", ".join(f"{m}×{c}" for m, c in
+                                                 unpriced_models.most_common())]
 
     lines += ["", "## verification signal — refuted+revised share of judged, per exec", "",
               "| exec | judged | refuted+revised | rate |", "|---|---:|---:|---:|"]
@@ -1313,13 +1355,130 @@ def run_dispatch(argv):
     # re-delegation clause the lane's capsule will carry (§9.5).
     os.environ["HIPPO_DISPATCH"] = did
     os.environ["HIPPO_DEPTH"] = str(depth)
-    # Close stdin before handing over — left open, codex exec blocks waiting for input.
-    with open(os.devnull) as devnull:
-        os.dup2(devnull.fileno(), 0)
+    # Not execvp anymore (§9.6): the wrapper stays alive as a pass-through so it can observe
+    # what the lane cost. Every line codex prints is forwarded unmodified — the wrapper still
+    # interprets nothing bound for codex; it only *reads* the banner (session id, model) and
+    # the "tokens used" footer as they stream by. stdin closed: left open, codex exec blocks.
     try:
-        os.execvp("codex", ["codex", "exec", *rest])
+        child = subprocess.Popen(
+            ["codex", "exec", *rest],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True, errors="replace",
+        )
     except OSError as err:
         die(f"dispatch: could not run codex: {err}", 127)
+    session_id = model = ""
+    footer_total = None
+    prev = ""
+    assert child.stdout is not None
+    for line in child.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        s = line.strip()
+        if not session_id and s.startswith("session id:"):
+            session_id = s.split(":", 1)[1].strip()
+        elif not model and s.startswith("model:"):
+            model = s.split(":", 1)[1].strip()
+        elif prev == "tokens used":
+            try:
+                footer_total = int(s.replace(",", ""))
+            except ValueError:
+                pass
+        prev = s
+    rc = child.wait()
+    if hp is not None and bad is None:
+        usage = collect_usage(session_id, model, footer_total)
+        if usage is not None:
+            append_event(hp, {"ev": "usage", "ref": did, **usage}, src="wrapper")
+    sys.exit(rc)
+
+
+def _find_key(obj, key):
+    """First value for `key` anywhere in a nested JSON object, or None."""
+    if isinstance(obj, dict):
+        if key in obj:
+            return obj[key]
+        for v in obj.values():
+            r = _find_key(v, key)
+            if r is not None:
+                return r
+    elif isinstance(obj, list):
+        for v in obj:
+            r = _find_key(v, key)
+            if r is not None:
+                return r
+    return None
+
+
+def collect_usage(session_id, model, footer_total):
+    """What the lane cost, from the best witness available (§9.6).
+
+    Preferred: the rollout's final cumulative token count — it carries the billing breakdown
+    (input / cached / output+reasoning). Fallback: the "tokens used" footer, total only.
+    Neither there → None; a gap is a gap, and no number is ever invented."""
+    u = None
+    if session_id:
+        hits = sorted((Path.home() / ".codex" / "sessions").glob(
+            f"*/*/*/rollout-*-{session_id}.jsonl"))
+        if hits:
+            try:
+                for line in hits[-1].read_text(encoding="utf-8",
+                                               errors="replace").splitlines():
+                    if "total_token_usage" not in line:
+                        continue
+                    try:
+                        found = _find_key(json.loads(line), "total_token_usage")
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(found, dict):
+                        u = found  # cumulative — the last one is the lane's total
+            except OSError:
+                u = None
+    if u is not None:
+        try:
+            out = {
+                "tokens": int(u["total_tokens"]),
+                "tin": int(u["input_tokens"]),
+                "tcached": int(u.get("cached_input_tokens") or 0),
+                "tout": (int(u.get("output_tokens") or 0)
+                         + int(u.get("reasoning_output_tokens") or 0)),
+            }
+        except (KeyError, TypeError, ValueError):
+            out = None
+        if out is not None:
+            if model:
+                out["model"] = model
+            return out
+    if footer_total is not None:
+        out = {"tokens": footer_total}
+        if model:
+            out["model"] = model
+        return out
+    return None
+
+
+PRICES_PATH = ROOT / "prices.yaml"
+
+
+def load_prices(path=None):
+    """The shipped price sheet (USD per 1M tokens) — refreshed at every release, dated so
+    PRIORS can show how stale it is instead of being silently wrong."""
+    p = Path(path) if path else PRICES_PATH
+    if not p.exists():
+        return {"as_of": None, "models": {}}
+    data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    return {"as_of": data.get("as_of"), "models": data.get("models") or {}}
+
+
+def price_usd(u, prices):
+    """Dollars for one usage event, or None when it cannot be priced honestly — no billing
+    breakdown, or a model absent from the sheet. (tin − tcached)·input + tcached·cached +
+    tout·output, all per 1M."""
+    m = prices["models"].get(u.get("model"))
+    if not m or u.get("tin") is None or u.get("tout") is None:
+        return None
+    tcached = u.get("tcached") or 0
+    return ((u["tin"] - tcached) * m["input"] + tcached * m.get("cached", m["input"])
+            + u["tout"] * m["output"]) / 1e6
 
 
 def expire_turn_directives(hp):

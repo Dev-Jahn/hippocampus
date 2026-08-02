@@ -282,3 +282,71 @@ def test_log_dispatch_takes_depth_and_parent(tmp_project, run_hippo):
          "scope": "x", "depth": "one"})], cwd=tmp_project)
     assert bad.returncode != 0
     assert "depth must be an integer" in bad.stderr
+
+
+# --------------------------------------------------------------------------
+# cost axis (§9.6, 1.10.0)
+# --------------------------------------------------------------------------
+
+def test_usage_validation_is_fail_closed(tmp_project, run_hippo):
+    run_hippo(["log", "dispatch", "--id", "du1", "--kind", "impl",
+               "--exec", "codex/gpt-5.6-luna/low", "--scope", "x"], cwd=tmp_project)
+    ok = run_hippo(["log", "raw", json.dumps(
+        {"ev": "usage", "ref": "du1", "tokens": 500, "model": "gpt-5.6-luna"})],
+        cwd=tmp_project)
+    assert ok.returncode == 0, ok.stderr
+
+    dangling = run_hippo(["log", "raw", json.dumps(
+        {"ev": "usage", "ref": "dnope", "tokens": 500})], cwd=tmp_project)
+    assert dangling.returncode != 0
+    assert "not a known dispatch id" in dangling.stderr
+
+    junk = run_hippo(["log", "raw", json.dumps(
+        {"ev": "usage", "ref": "du1", "tokens": "many"})], cwd=tmp_project)
+    assert junk.returncode != 0
+
+
+def test_the_scribe_may_not_record_usage(tmp_project, run_hippo, fake_transcript, tmp_path):
+    run_hippo(["log", "dispatch", "--id", "du1", "--kind", "impl",
+               "--exec", "codex/gpt-5.6-luna/low", "--scope", "x"], cwd=tmp_project)
+    mock = tmp_path / "usage.json"
+    mock.write_text(json.dumps({"worklog": "w", "events": [
+        {"ev": "usage", "ref": "du1", "tokens": 500}]}), encoding="utf-8")
+    proc = run_hippo(["scribe", "--transcript", str(fake_transcript), "--session", "s1"],
+                     cwd=tmp_project,
+                     env={"HIPPO_CLERK_BACKEND": "mock", "HIPPO_MOCK_OUTPUT": str(mock)})
+    assert proc.returncode == 0, proc.stderr
+    assert not [e for e in read_ledger(tmp_project) if e.get("ev") == "usage"]
+    dumps = (tmp_project / ".hippo" / "failures").glob("*")
+    assert "the wrapper records usage" in "".join(p.read_text() for p in dumps)
+
+
+def test_priors_price_the_cells(repo_root):
+    import sys
+    sys.path.insert(0, str(repo_root / "cli"))
+    import hippo_cli
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 2, 12, 0, 0, tzinfo=timezone.utc)
+    prices = {"as_of": "2026-08-02",
+              "models": {"gpt-5.6-luna": {"input": 0.20, "cached": 0.02, "output": 1.20}}}
+    t = "2026-08-02T11:00:00Z"
+
+    def d(i):
+        return {"t": t, "ev": "dispatch", "id": f"d{i}", "kind": "impl",
+                "exec": "codex/gpt-5.6-luna/low", "scope": "x"}
+
+    def o(i):
+        return {"t": t, "ev": "outcome", "ref": f"d{i}", "result": "accepted", "src": "cli"}
+
+    rows = [d(i) for i in range(4)] + [o(i) for i in range(4)] + [
+        {"t": t, "ev": "usage", "ref": "d0", "tokens": 1100000, "tin": 1000000,
+         "tcached": 0, "tout": 100000, "model": "gpt-5.6-luna", "src": "wrapper"},
+        {"t": t, "ev": "usage", "ref": "d1", "tokens": 7, "model": "mystery-model",
+         "src": "wrapper"},
+    ]
+    page = hippo_cli.prior_facts(rows, now, prices=prices)
+    assert "prices as of 2026-08-02" in page
+    # d0: (1M − 0)·$0.20/1M + 0.1M·$1.20/1M = $0.32; d1 unpriced (no breakdown) → star.
+    assert "| 1,100,007 | $0.32* |" in page
+    assert "$0.08" in page          # $0.32 over 4 accepted
+    assert "mystery-model×1" in page
