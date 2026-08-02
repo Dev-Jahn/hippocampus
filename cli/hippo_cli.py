@@ -1324,6 +1324,77 @@ def exec_label(rest):
     return f"codex/{model or 'unset'}/{effort or 'unset'}"
 
 
+FANOUT_BUDGET_USD = 500.0  # per parent per 24h — override: config.yaml dispatch.max_wave_usd
+FANOUT_RESERVE_MTOK = (1.0, 0.2)  # nominal (input, output) Mtok reserved per unfinished child
+
+
+def _reserve_usd(model, prices):
+    """Nominal launch-time reservation for a lane whose real cost is not yet measured.
+
+    A burst launches everything before anything finishes, so a breaker fed only measured
+    usage would see $0 exactly when it matters. The nominal token figure is a guard's
+    arithmetic, not data — nothing of it reaches the ledger, and the moment the lane exits,
+    its measured usage replaces the reservation. An unknown model reserves at the most
+    expensive tier on the sheet: a typo must not dodge the breaker."""
+    mtin, mtout = FANOUT_RESERVE_MTOK
+    m = prices["models"].get(model)
+    if m is None:
+        if not prices["models"]:
+            return None
+        return max(mtin * v["input"] + mtout * v["output"] for v in prices["models"].values())
+    return mtin * m["input"] + mtout * m["output"]
+
+
+def check_fanout(hp, parent, child_model):
+    """The fan-out circuit breaker (§3.6): the one check that lives inside this service —
+    denominated in dollars, never in lanes.
+
+    Guards exactly one measured disaster shape: a lane machine-gunning expensive children
+    through the sanctioned path (the 336k-token re-delegation spiral, and its §9.5 sequel).
+    A thousand luna-class children clear a budget the fiftieth sol-class one trips — count was
+    the wrong axis, price × count is the real one. Lane-origin launches only: main is never
+    gated — a session-launched wave of any size is main's judgment, and gating it would be the
+    enforcement principle 3 rejects. A lane that bypasses the wrapper still succeeds; this
+    stops accidents, not adversaries, and every measured failure was an accident."""
+    if not parent or hp is None:
+        return
+    prices = load_prices()
+    if not prices["models"]:
+        return  # no sheet, no cost reasoning — the breaker cannot price what it cannot see
+    budget = float((config(hp).get("dispatch") or {}).get("max_wave_usd")
+                   or FANOUT_BUDGET_USD)
+    now = datetime.now(timezone.utc)
+    rows = read_ledger(hp)
+    usage = {e.get("ref"): e for e in rows if e.get("ev") == "usage"}
+    measured = reserved = 0.0
+    n = 0
+    for e in rows:
+        if e.get("ev") != "dispatch" or e.get("parent") != parent:
+            continue
+        t = event_time(e)
+        if not t or (now - t) > timedelta(hours=IN_FLIGHT_WINDOW_H):
+            continue
+        n += 1
+        u = usage.get(e.get("id"))
+        usd = price_usd(u, prices) if u else None
+        if usd is not None:
+            measured += usd
+        else:
+            model = (str(e.get("exec", "")).split("/") + ["", ""])[1]
+            reserved += _reserve_usd(model, prices) or 0.0
+    total = measured + reserved + (_reserve_usd(child_model, prices) or 0.0)
+    if total > budget:
+        die(f"dispatch: this wave would reach ~${total:.0f} of its ${budget:.0f} budget — "
+            f"lane {parent} has {n} children in 24h (${measured:.2f} measured + "
+            f"${reserved:.0f} reserved for lanes still running). Stop and report instead: "
+            "`hippo log outcome --result no-go --note '…'`; main decides — the budget is "
+            ".hippo/config.yaml dispatch.max_wave_usd.", 2)
+    if total >= budget / 2:
+        print(f"dispatch: note — lane {parent}'s wave is at ~${total:.0f} of its "
+              f"${budget:.0f} budget ({n} children in 24h, ${measured:.2f} measured).",
+              file=sys.stderr)
+
+
 def run_dispatch(argv):
     """DESIGN §3.6. A failed record never blocks the launch — this surface's real job is running
     codex and the ledger is a side effect. But a lost record always makes a sound."""
@@ -1333,6 +1404,7 @@ def run_dispatch(argv):
     # depth-2 becomes an event in the ledger, not a prohibition nobody can check).
     parent = os.environ.get("HIPPO_DISPATCH", "")
     hp = find_hippo()
+    check_fanout(hp, parent, exec_label(rest).split("/")[1])
     if hp is None:
         print("dispatch: no .hippo/ — skipping the dispatch record", file=sys.stderr)
     else:
