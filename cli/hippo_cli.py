@@ -367,6 +367,11 @@ def cmd_init(_args):
 DIRECTIVE_TEXT_NUDGE = 200  # one directive this long is asking to be compressed
 DIRECTIVE_COUNT_NUDGE = 8  # this many live at once is asking for a hygiene pass
 DIRECTIVE_TOTAL_NUDGE = 1600  # total characters resident in every session from here on
+# Staleness is shown, never resolved (a scribe once withdrew a live hold because a report
+# mentioned its keyword — automation that decides is the failure, visibility is the fix).
+# Only `phase` ages: durable is indefinite by definition and turn expires by itself.
+PHASE_AGE_SHOW_D = 7  # a phase directive this old carries its age in the capsule line
+PHASE_STALE_NUDGE_D = 14  # this old, the volume notes ask whether the phase is over
 
 
 def directive_volume_notes(hp):
@@ -391,6 +396,20 @@ def directive_volume_notes(hp):
             f"note: {len(live)} live directives, {total} chars — all of it is injected into every "
             "session from here on. Compress them, or withdraw the stale ones "
             "(`hippo directive withdraw <id>`)."
+        )
+    now = datetime.now(timezone.utc)
+    stale = sorted(
+        ((d["id"], (now - t).days) for d in live
+         if d.get("lifetime") == "phase" and (t := event_time(d))
+         and (now - t).days >= PHASE_STALE_NUDGE_D),
+        key=lambda x: -x[1],
+    )
+    if stale:
+        listed = ", ".join(f"{i} ({n}d)" for i, n in stale)
+        notes.append(
+            f"note: phase directive(s) {PHASE_STALE_NUDGE_D}d or older — {listed}. If that "
+            "phase is over, withdraw them (`hippo directive withdraw <id>`); if it is not, "
+            "they are still doing their job."
         )
     return notes
 
@@ -453,8 +472,16 @@ def status_lines(hp):
     ordered = [d for d in live if d.get("lifetime") == "durable"] + [
         d for d in live if d.get("lifetime") != "durable"
     ]
+    now = datetime.now(timezone.utc)
     for d in ordered:
-        lines.append(f"· live({d.get('lifetime') or '?'}): {one_line(d.get('text', ''))}")
+        label = d.get("lifetime") or "?"
+        # A phase has an end, so its age is information; showing it is the whole staleness
+        # mechanism (nothing expires by itself — the verdict stays with main and the user).
+        if label == "phase":
+            t = event_time(d)
+            if t and (now - t).days >= PHASE_AGE_SHOW_D:
+                label = f"phase·{(now - t).days}d"
+        lines.append(f"· live({label}): {one_line(d.get('text', ''))}")
     # Nothing flying → no line. The capsule only spends a line on a question that has an answer.
     flying = in_flight(hp)
     if flying:

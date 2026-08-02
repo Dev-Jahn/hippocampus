@@ -442,7 +442,7 @@ what shipped is the worklog, ordering is `task deps`, and a merge hazard belongs
 the lane that will cause it (dispatch skill §5). A re-entry document is what appears when those
 surfaces go unused — not a gap in this design.
 
-Two rules govern the directive block:
+Three rules govern the directive block:
 
 - **Nothing is folded away.** Every active directive is injected, in full, durable first. A user
   ruling that is invisible at session start is effectively not there, and a cap does not fix that
@@ -456,6 +456,14 @@ Two rules govern the directive block:
   and `directive list` emit them. Warning only at write time is the failure this fixes: the
   expensive directives are usually the ones already resident, so the one moment they were
   mentionable had already passed and every session went on paying in silence.
+- **Staleness is shown, never resolved.** A `phase` directive's capsule line carries its age from
+  7 days (`live(phase·11d): …`), and the volume notes name any phase directive 14 days or older
+  with the one question that matters — is the phase over? Only `phase` ages: durable is
+  indefinite by definition and turn expires by itself. Nothing is withdrawn automatically, and
+  the scribe may not infer a withdrawal from anything but the user saying so — measured
+  (2026-08-02), a clerk once withdrew a live hold because an assistant report mentioned its
+  keyword. Automation that decides is the failure mode; visibility is the fix, and the verdict
+  stays with main and the user.
 
 ## 7. Testing policy
 

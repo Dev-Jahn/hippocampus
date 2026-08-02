@@ -244,3 +244,51 @@ def test_crowded_directive_set_warns_but_still_records(tmp_project, run_hippo):
     inject = run_hippo(["status", "--inject"], cwd=tmp_project)
     live = [ln for ln in inject.stdout.splitlines() if ln.startswith("· live(")]
     assert len(live) == 8
+
+
+# --------------------------------------------------------------------------
+# phase staleness — shown, never resolved (DESIGN §6, third rule)
+# --------------------------------------------------------------------------
+
+def _backdate_directive(project_dir, did, text, lifetime, days_ago):
+    """Append a directive event with an old writer timestamp. The CLI stamps t itself, so age
+    can only be fabricated the way it really arises: as an old line already in the ledger."""
+    from datetime import datetime, timedelta, timezone
+    t = (datetime.now(timezone.utc) - timedelta(days=days_ago, hours=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    row = {"t": t, "ev": "directive", "id": did, "text": text,
+           "lifetime": lifetime, "state": "active", "src": "cli"}
+    with (project_dir / ".hippo" / "ledger.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def test_phase_age_appears_in_the_capsule_from_seven_days(tmp_project, run_hippo):
+    _backdate_directive(tmp_project, "old-phase", "hold the perf claims", "phase", 10)
+    _add(run_hippo, tmp_project, "use GPUs 0 and 1 only", "phase", "fresh-phase")
+    _backdate_directive(tmp_project, "old-durable", "answer tersely", "durable", 30)
+
+    out = run_hippo(["status", "--inject"], cwd=tmp_project)
+    assert out.returncode == 0, out.stderr
+    assert "live(phase·10d): hold the perf claims" in out.stdout
+    # Fresh phase and durable lines are untouched — durable does not age by definition.
+    assert "live(phase): use GPUs 0 and 1 only" in out.stdout
+    assert "live(durable): answer tersely" in out.stdout
+
+
+def test_stale_phase_note_names_the_id_on_list_and_add(tmp_project, run_hippo):
+    _backdate_directive(tmp_project, "stale-hold", "hold off on speed claims", "phase", 15)
+
+    listed = run_hippo(["directive", "list"], cwd=tmp_project)
+    assert listed.returncode == 0
+    assert "stale-hold (15d)" in listed.stderr
+    assert "withdraw" in listed.stderr
+    # The listing itself stays a clean record — the note rides stderr only.
+    assert "15d" not in listed.stdout
+
+
+def test_fresh_phase_directive_draws_no_staleness_note(tmp_project, run_hippo):
+    _add(run_hippo, tmp_project, "use GPUs 0 and 1 only", "phase", "gpu-01")
+    listed = run_hippo(["directive", "list"], cwd=tmp_project)
+    assert listed.returncode == 0
+    assert "phase directive(s)" not in listed.stderr
