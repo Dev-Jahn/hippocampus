@@ -82,7 +82,12 @@ Mechanics:
   dispatch children of its own — this is what the `ultra` tier and the shared ledger exist for.
   Its children start at depth 0 and their capsules say not to re-delegate. Indexed, never
   enforced: a child launched anyway is recorded with its `parent`, so an unintended depth-2 is
-  an event you can see in the ledger, not a rule nobody can check.
+  an event you can see in the ledger, not a rule nobody can check. One blast-radius guard
+  applies to lane-origin launches only, denominated in dollars, never lanes: the wave's cost
+  per parent per 24h (measured usage where a child finished, a nominal sheet-price reservation
+  where it has not) warns past half the budget and refuses past it — $500 by default, so a
+  thousand luna-class children clear it while ~45 sol-class ones trip it. Size it per project
+  via `.hippo/config.yaml` `dispatch: {max_wave_usd: N}`. Main's own launches are never gated.
 - **COMMON.md carries only what nothing injects**: the seeded bootstrap clause (keep it when
   editing), the absolute `bin/hippo` path on the Codex host, and genuinely wave-common task
   background. Not directives and not lane discipline — the capsule carries both. Individual

@@ -373,6 +373,23 @@ in an ordinary Bash call. Leaving it in `scripts/` means every consuming project
 with a hard-coded cache path (measured). `scripts/dispatch.sh` remains only as a compatibility
 forwarder for those shims.
 
+**The fan-out circuit breaker** (1.11.0) is the one check that lives inside this service
+(principle 3 allows exactly that), and it is denominated in **dollars, never in lanes** — a
+thousand luna-class children are a legitimate wave, the fiftieth sol-class one is the measured
+disaster shape (the 336k-token re-delegation spiral, and its §9.5 sequel: an expensive model
+launching hundreds of expensive children). Lane-origin launches only (`parent` present): the
+wave's cost is summed per parent per 24h — **measured usage where a child has finished, a
+nominal reservation where it has not** (1 Mtok in + 0.2 Mtok out at the child's model's sheet
+price; a burst launches everything before anything finishes, so a measured-only breaker would
+see $0 exactly when it matters). Past half the budget the wrapper warns on stderr with the
+arithmetic; past the budget ($500 by default — `config.yaml` `dispatch.max_wave_usd`) it
+refuses the launch and tells the lane to report no-go instead. An unknown model reserves at
+the sheet's top tier — a typo must not dodge the breaker. The nominal figures are the guard's
+arithmetic, not data: nothing of them reaches the ledger. **Main is never gated** — a wave of
+any size launched from the session is main's judgment, and gating it would be the enforcement
+this design rejects. A lane that bypasses the wrapper still succeeds: this stops accidents,
+not adversaries, and every measured failure was an accident.
+
 This surface is the one exception to the silent no-op rule: with no `.hippo/` it warns and
 **launches anyway**. Its real job is running codex, and swallowing the launch because the record
 failed would make it a trap rather than a wrapper. The remaining arguments — including everything
@@ -466,6 +483,7 @@ Constraints specific to codex (0.144.6):
 | a hand-written PROGRESS.md | It goes stale. Replaced by worklog (generated) + ledger (facts) + PRIORS (distilled) |
 | typed refusal gates, frozen sidecars, remote verify | Record, never enforce (principle 3) |
 | installing a cron job automatically | A user who wants one sets it up. The plugin does not own a schedule |
+| routing.yaml / depth-tier model config | Retired 1.11.0 before being built: prices are `prices.yaml` facts, tier-worth is PRIORS `$/accepted`, the decision between them is main's — frozen config is the stale-instruction shape (§1 principle 9). The runaway worry it addressed is handled by the fan-out circuit breaker (§3.6) instead |
 
 ## 5. After the MVP (recorded only; not being built now)
 
@@ -557,7 +575,7 @@ malformed JSON isolated into failures), and digest_lite basics. Around twenty of
 - Everything else from 0.x → retired to the `legacy` branch. Audit report:
   `~/workspace/b200-2-research-cc-audit/`
 
-## 9. The shared brain (§9.2–9.4 shipped in 1.8.0, §9.5 depth in 1.9.0, §9.6 cost in 1.10.0; routing.yaml remains a draft)
+## 9. The shared brain (§9.2–9.4 shipped in 1.8.0, §9.5 depth in 1.9.0, §9.6 cost in 1.10.0; routing.yaml retired to §4 — nothing in this section remains unbuilt)
 
 Today a delegated executor starts blind. Everything it needs — the live directives, the task it
 serves, what has already been tried — is re-typed by hand into a brief, which is why `COMMON.md`
@@ -651,9 +669,12 @@ not be deleted — it should be indexed:
 
 Recording depth makes an unintended depth 2 an event in the ledger rather than a prohibition nobody
 can check (built: the wrapper stamps `parent` from `HIPPO_DISPATCH` on any launch made inside a
-lane). Model routing for such a dispatch (the reason to pin a strong model at the top and a
-cheap one underneath) belongs in a visible `.hippo/routing.yaml`, not compiled into the CLI: it is a
-claim about *prices*, and prices go stale between releases — this part is not built.
+lane). An earlier draft of this section wanted a `.hippo/routing.yaml` for depth-tier model
+routing; it is **retired, not built** (see §4). §9.6 absorbed both halves: prices are facts in
+`prices.yaml`, and which tier earns its price is PRIORS' `$/accepted` — freezing the judgment
+between them into config is the stale-instruction shape this design keeps declining. What
+survives of the worry is not routing but blast radius, and that is the fan-out circuit breaker
+(§3.6).
 
 ### 9.6 PRIORS has no cost axis, and that is the actual blocker
 

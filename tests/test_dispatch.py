@@ -272,3 +272,87 @@ def test_no_usage_report_leaves_a_gap_not_a_guess(tmp_project, tmp_path):
                     body='#!/bin/sh\nexit 0\n')
     assert proc.returncode == 0, proc.stderr
     assert not [e for e in read_ledger(tmp_project) if e.get("ev") == "usage"]
+
+
+# --------------------------------------------------------------------------
+# fan-out circuit breaker (§3.6, 1.11.0) — dollars, not lanes; main never gated
+# --------------------------------------------------------------------------
+# Reservation arithmetic under the shipped prices.yaml (1 Mtok in + 0.2 Mtok out):
+# sol-class ≈ $11/child, luna-class ≈ $0.44/child; default budget $500, warn from $250.
+
+def _seed_children(tmp_project, n, model="gpt-5.6-sol", parent="dorch", with_usage=None):
+    import datetime as _dt
+    t = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with (tmp_project / ".hippo" / "ledger.jsonl").open("a", encoding="utf-8") as f:
+        for i in range(n):
+            f.write(json.dumps({"t": t, "ev": "dispatch", "id": f"dc{i:04d}", "kind": "impl",
+                                "exec": f"codex/{model}/high", "scope": f"child {i}",
+                                "parent": parent, "src": "wrapper"}) + "\n")
+            if with_usage:
+                f.write(json.dumps({"t": t, "ev": "usage", "ref": f"dc{i:04d}",
+                                    "model": model, "src": "wrapper", **with_usage}) + "\n")
+
+
+def test_expensive_wave_trips_the_budget(tmp_project, tmp_path):
+    _seed_children(tmp_project, 45)          # 45 × $11 reserved ≈ $495; +$11 breaks $500
+    body = '#!/bin/sh\necho LAUNCHED > "$CAPTURE"\n'
+    capture = tmp_path / "launched.txt"
+    proc = _wrapper(tmp_project, tmp_path,
+                    ["--kind", "impl", "--scope", "one more", "-m", "gpt-5.6-sol"],
+                    env={"HIPPO_DISPATCH": "dorch", "CAPTURE": str(capture)}, body=body)
+    assert proc.returncode == 2
+    assert "$500 budget" in proc.stderr
+    assert "no-go" in proc.stderr
+    assert not capture.exists(), "codex must not have been launched"
+    assert not [e for e in read_ledger(tmp_project) if e.get("scope") == "one more"]
+
+
+def test_a_thousand_cheap_lanes_clear_the_same_budget(tmp_project, tmp_path):
+    _seed_children(tmp_project, 1000, model="gpt-5.6-luna")   # ≈ $440 reserved
+    proc = _wrapper(tmp_project, tmp_path,
+                    ["--kind", "impl", "--scope", "and another", "-m", "gpt-5.6-luna"],
+                    env={"HIPPO_DISPATCH": "dorch"})
+    assert proc.returncode == 0, proc.stderr
+    assert "$500 budget" in proc.stderr      # past half: the warning names the arithmetic
+    assert any(e.get("scope") == "and another" for e in read_ledger(tmp_project))
+
+
+def test_measured_usage_replaces_the_reservation(tmp_project, tmp_path):
+    # The same 45 sol children, but finished and measured tiny (≈$0.80 each): the wave is
+    # really ≈$36, so the next launch passes without a word.
+    _seed_children(tmp_project, 45,
+                   with_usage={"tokens": 110000, "tin": 100000, "tcached": 0, "tout": 10000})
+    proc = _wrapper(tmp_project, tmp_path,
+                    ["--kind", "impl", "--scope", "cheap in fact", "-m", "gpt-5.6-sol"],
+                    env={"HIPPO_DISPATCH": "dorch"})
+    assert proc.returncode == 0, proc.stderr
+    assert "budget" not in proc.stderr
+    assert any(e.get("scope") == "cheap in fact" for e in read_ledger(tmp_project))
+
+
+def test_main_is_never_gated(tmp_project, tmp_path):
+    _seed_children(tmp_project, 100)         # main's own wave, however expensive
+    proc = _wrapper(tmp_project, tmp_path,
+                    ["--kind", "impl", "--scope", "mains own", "-m", "gpt-5.6-sol"])
+    assert proc.returncode == 0, proc.stderr
+    assert any(e.get("scope") == "mains own" for e in read_ledger(tmp_project))
+
+
+def test_budget_is_configurable_and_unknown_models_reserve_high(tmp_project, tmp_path):
+    (tmp_project / ".hippo" / "config.yaml").write_text(
+        "dispatch:\n  max_wave_usd: 5\n", encoding="utf-8")
+    sol = _wrapper(tmp_project, tmp_path,
+                   ["--kind", "impl", "--scope", "sol", "-m", "gpt-5.6-sol"],
+                   env={"HIPPO_DISPATCH": "dorch"})
+    assert sol.returncode == 2               # $11 reservation alone breaks a $5 budget
+    assert "$5 budget" in sol.stderr
+
+    luna = _wrapper(tmp_project, tmp_path,
+                    ["--kind", "impl", "--scope", "luna", "-m", "gpt-5.6-luna"],
+                    env={"HIPPO_DISPATCH": "dorch"})
+    assert luna.returncode == 0, luna.stderr  # $0.44 fits
+
+    mystery = _wrapper(tmp_project, tmp_path,
+                       ["--kind", "impl", "--scope", "who", "-m", "mystery-9000"],
+                       env={"HIPPO_DISPATCH": "dorch"})
+    assert mystery.returncode == 2           # unknown reserves at the sheet's top tier
