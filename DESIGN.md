@@ -398,6 +398,33 @@ This surface is the one exception to the silent no-op rule: with no `.hippo/` it
 failed would make it a trap rather than a wrapper. The remaining arguments — including everything
 after `--` — are passed through without interpretation; that is codex's grammar, not this CLI's.
 
+**Batch waves** (1.12.0). One launch per call was the right shape until the waves were not: a
+measured 222-lane fleet cost $2 to run, while the orchestrator model driving its launch/harvest
+loop cost ~$13 in turn-loop context re-feeds — the ceremony around the wave cost six times the
+wave. `hippo dispatch --batch <manifest.yaml>` moves exactly that ceremony into the wrapper —
+fan-out, concurrency, id capture, parent stamping, usage collection, breaker checks, journaling,
+resume — and leaves the model what needs a model: selection (writing the manifest) and judgment
+(verdicts). The manifest is **per-wave data, authored fresh like a brief, never standing
+config** — the routing.yaml retired to §4 would have frozen a judgment; a manifest records one
+wave's already-made routing and expires with the wave. Each entry launches through one of two
+adapters, `codex exec` or `claude -p --output-format json`, both stamped with
+`HIPPO_DISPATCH`/`HIPPO_DEPTH` and recorded as `ev:dispatch` + `ev:usage` exactly like a single
+dispatch — the §3.2 schema is unchanged. Codex usage rides the same stderr banner and footer this
+section already reads; claude's single stdout JSON object supplies the token fields (input +
+cache read + cache creation as tin, cache read as tcached, output as tout), and its
+`total_cost_usd` is deliberately **not** recorded — $ derives from `prices.yaml`, so PRIORS
+prices every executor through one formula instead of trusting each executor's own bill.
+
+A journal beside the manifest records every launch and exit; `--resume` skips entries whose last
+exit (and check) passed and relaunches the rest — and a relaunch mints a **new** dispatch id,
+because two launches are two facts and the ledger never rewrites one. An entry's optional
+`check` command runs after the child exits and its rc lands in the journal — **evidence, never a
+verdict**: batch writes no `ev:outcome`, because a passing check is not acceptance and the
+judgment belongs to main at any scale (principle 3 does not dilute with volume). The circuit
+breaker gates batch launches through the same arithmetic as single ones — factored into one
+verdict function both paths call, consulted before every launch — and, as ever, main is never
+gated.
+
 ### 3.6b The distiller split — the clerk writes the page, the code does the sums
 
 `hippo prior distill` computes the whole scorecard itself — the dispatch ⋈ outcome join, the

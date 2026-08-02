@@ -111,6 +111,47 @@ Mechanics:
 - To steer a lane mid-flight, kill it and resume with an explicit session id (never `--last` when
   lanes run in parallel).
 
+**Batch form** (`--batch`, 1.12.0) — for a large uniform wave, hand the whole fan-out to the
+wrapper instead of looping launches through your own turns (measured: a 222-lane fleet cost $2,
+the launch/harvest loop driving it ~$13 in context re-feeds):
+
+```bash
+hippo dispatch --batch wave.yaml [--concurrency N] [--resume | --fresh] [--dry-run]
+```
+
+```yaml
+concurrency: 8
+defaults:
+  kind: impl
+  executor: codex            # or claude
+  model: gpt-5.6-luna
+  effort: medium
+  args: ["--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]
+  briefs: [.hippo/briefs/COMMON.md]
+  check: "tests/run.sh {test}"
+entries:
+  - scope: "algo: fenwick tree"
+    brief: .hippo/briefs/fenwick.md
+    vars: {test: tests/test_fenwick.py}
+```
+
+- The manifest is a per-wave brief, written fresh each wave — never standing routing config. The
+  thirty seconds of §0 still come first; the manifest records the routing you decided, it does
+  not decide it.
+- **One batch call per stage; the journal is the hand-off; main stays between stages.** A wave
+  with dependencies is stages: batch stage 1, read its journal and outputs, judge, then batch
+  stage 2. Do not encode a DAG into one manifest — sequencing is main's job.
+- Per-entry prompt = `defaults.briefs` contents + entry `brief` + inline `prompt`, with `{var}`
+  substitution in the prompt and the check. Outputs land in `<manifest-stem>.out/` per entry;
+  one summary JSON line arrives on stdout at the end.
+- Editing entries isolate via per-entry `args` carrying `-C .claude/worktrees/<id>` (worktrees
+  created by main **before** the batch call, §5); a read-only wave may drop all three arguments.
+- `check` is evidence, not a verdict: its rc lands in the journal and batch never writes an
+  outcome. Verdicts still follow §4, per lane.
+- `--resume` skips entries whose last exit (and check) passed and relaunches the rest. A
+  relaunch mints a **new** dispatch id — two launches are two facts; record the verdict against
+  the id that produced the accepted work.
+
 ## 3. Brief contract
 
 (1) Background — a "read before starting" list, since the executor has zero context; name only
