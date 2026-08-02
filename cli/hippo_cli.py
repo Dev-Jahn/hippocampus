@@ -52,14 +52,16 @@ ALLOWED = {
     "outcome": ("ref", "result", "attr", "rework", "by", "note"),
     "review": ("id", "base", "source", "findings"),
     "review-status": ("ref", "addressed", "at"),
-    "directive": ("id", "text", "lifetime", "state"),
+    "directive": ("id", "text", "lifetime", "state", "audience"),
     "clerk": ("name", "ok", "ms", "tokens"),
 }
 # Fields only the writer stamps. Rejected if a caller (clerk output, log raw, environment)
 # supplies them: the scribe reads an untrusted transcript, so it must not be able to forge
 # the timestamp or the source.
 WRITER_ONLY = ("t", "src")
-SRC_VALUES = ("scribe", "cli", "wrapper")  # DESIGN §3.2
+# executor = "the agent that did the work wrote this" (§9.2). A self-reported outcome is a
+# claim, never a verdict: everything that folds outcomes into acceptance skips this src.
+SRC_VALUES = ("scribe", "cli", "wrapper", "executor")  # DESIGN §3.2
 SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 # exec is the second axis PRIORS aggregates on, so its shape is a contract, not a hint:
 # exactly executor/model/effort, no whitespace. Measured on a real ledger, a free-form field
@@ -81,6 +83,10 @@ ENUMS = {
     ("outcome", "attr"): {"work", "brief", "harness"},
     ("directive", "lifetime"): {"turn", "phase", "durable"},
     ("directive", "state"): {"active", "withdrawn", "expired"},
+    # audience is the second directive axis (§9.4): lifetime is *when* it holds, audience is
+    # *who* it binds. Absent = all — a narrow default would silently hide a constraint from
+    # the worker that needed it.
+    ("directive", "audience"): {"main", "executor", "all"},
     # addressed is the one field reviews are folded on ("not fully addressed" in the fact
     # sheet), so it is closed like result: a free-form "fully" would read as open forever.
     ("review-status", "addressed"): {"full", "partial", "none"},
@@ -173,7 +179,12 @@ def die(msg, code=1):
 
 
 def find_hippo():
-    """Walk up from cwd looking for .hippo/ (the git root and $HOME are the ceiling)."""
+    """Walk up from cwd looking for .hippo/ (the git root and $HOME are the ceiling).
+
+    A `.git` *directory* is a real repository root: stop there, never adopt a project from
+    beyond it. A `.git` *file* marks a linked worktree, and by convention lanes live inside
+    the repo (`.claude/worktrees/<name>`) — walk through it, so an executor calling hippo
+    from its worktree resolves the project's real .hippo/ (§9.1)."""
     d = Path.cwd().resolve()
     try:
         home = Path.home().resolve()
@@ -182,7 +193,7 @@ def find_hippo():
     for p in [d, *d.parents]:
         if (p / ".hippo").is_dir():
             return p / ".hippo"
-        if (p / ".git").exists():
+        if (p / ".git").is_dir():
             break
         if p == home:  # never go above $HOME — we could adopt someone else's project
             break
@@ -190,10 +201,16 @@ def find_hippo():
 
 
 def resolve_src(src=None):
-    """src ∈ scribe|cli|wrapper (DESIGN §3.2). The built-in surfaces pass it programmatically
-    (`hippo dispatch` stamps wrapper itself); HIPPO_SRC exists so an *external* launch wrapper
-    can declare itself one — and even that value dies loudly if it is off the whitelist."""
-    v = src or os.environ.get("HIPPO_SRC") or "cli"
+    """src ∈ scribe|cli|wrapper|executor (DESIGN §3.2, §9.2). The built-in surfaces pass it
+    programmatically (`hippo dispatch` stamps wrapper itself). HIPPO_DISPATCH — planted by the
+    wrapper into the lane's environment — makes every write from that lane src=executor: the
+    agent that did the work wrote this. HIPPO_SRC remains for an *external* launch wrapper
+    declaring itself one — and either env value dies loudly if it is off the whitelist. An
+    executor that forges its way around this succeeds, and has now lied in an append-only
+    file — a better place for it than a blocked write (§9.2)."""
+    v = (src
+         or ("executor" if os.environ.get("HIPPO_DISPATCH") else None)
+         or os.environ.get("HIPPO_SRC") or "cli")
     if v not in SRC_VALUES:
         die(f"src must be one of {'|'.join(SRC_VALUES)}: {v!r} (check HIPPO_SRC)")
     return v
@@ -223,11 +240,39 @@ def read_ledger(hp):
     return out
 
 
+def judged_refs(rows):
+    """Dispatch ids that carry a *verdict*. An executor's self-report (src=executor) is a
+    claim, not a verdict (§9.2) — it never counts as judged anywhere that word matters: the
+    in-flight line, the scribe's re-judge rule, the task: ref resolution, the priors join."""
+    return {e.get("ref") for e in rows
+            if e.get("ev") == "outcome" and e.get("src") != "executor"}
+
+
+def executor_claims(rows):
+    """ref → the lane's latest word for it (§9.3: rendered as a claim, subject visible, never
+    as a flat fact). Last claim wins: a lane revising itself (accepted → no-go) should be shown
+    saying what it currently says."""
+    out = {}
+    for e in rows:
+        if e.get("ev") == "outcome" and e.get("src") == "executor":
+            out[e.get("ref")] = e.get("result")
+    return out
+
+
 def directives(hp):
-    """id → current state (the last event for an id is the truth — no derived file)."""
+    """id → current state (the last event for an id is the truth — no derived file).
+
+    Directive events written by a lane (src=executor) are recorded but never fold: a directive
+    is a standing rule for every reader, and a lane adding or withdrawing one for the whole
+    network is exactly the belief propagation §9.3 exists to prevent. The attempt stays in the
+    ledger — visible to checkup and grep — it just does not become what the capsule believes.
+    Same shape as outcomes: an executor may record, and the derived views decide what a
+    recording means."""
     cur = {}
     for e in read_ledger(hp):
         if e.get("ev") != "directive" or not e.get("id"):
+            continue
+        if e.get("src") == "executor":
             continue
         d = cur.setdefault(e["id"], {"id": e["id"]})
         d.update({k: v for k, v in e.items() if k not in ("ev", "src")})
@@ -393,9 +438,9 @@ def directive_volume_notes(hp):
         )
     if len(live) >= DIRECTIVE_COUNT_NUDGE or total >= DIRECTIVE_TOTAL_NUDGE:
         notes.append(
-            f"note: {len(live)} live directives, {total} chars — all of it is injected into every "
-            "session from here on. Compress them, or withdraw the stale ones "
-            "(`hippo directive withdraw <id>`)."
+            f"note: {len(live)} live directives, {total} chars — all of it rides every session "
+            "from here on (each reader gets its audience's slice). Compress them, or withdraw "
+            "the stale ones (`hippo directive withdraw <id>`)."
         )
     now = datetime.now(timezone.utc)
     stale = sorted(
@@ -427,9 +472,13 @@ def in_flight(hp):
     project was maintaining in a file.
 
     A dispatch older than a day is not in flight, it is forgotten; `prior distill` already reports
-    those as open items, which is the right place for them."""
+    those as open items, which is the right place for them.
+
+    A lane's self-reported outcome does not land it: the claim rides along, subject visible
+    (§9.3), and the entry leaves this line only when main's verdict arrives."""
     rows = read_ledger(hp)
-    judged = {e.get("ref") for e in rows if e.get("ev") == "outcome"}
+    judged = judged_refs(rows)
+    claims = executor_claims(rows)
     now = datetime.now(timezone.utc)
     out = []
     for e in rows:
@@ -441,15 +490,24 @@ def in_flight(hp):
         if not t or (now - t) > timedelta(hours=IN_FLIGHT_WINDOW_H):
             continue
         mins = int((now - t).total_seconds()) // 60
-        out.append(f"{one_line(e.get('scope', ''), 44)} ({mins // 60}h{mins % 60:02d}m)")
+        age = f"{mins // 60}h{mins % 60:02d}m"
+        claim = claims.get(e.get("id"))
+        tail = f"{age} · claims {claim}" if claim else age
+        out.append(f"{one_line(e.get('scope', ''), 44)} ({tail})")
     return out
 
 
 def status_lines(hp):
-    """DESIGN §6 resident surface (header + live directives + in flight + last)."""
+    """DESIGN §6 resident surface (header + live directives + in flight + last).
+
+    Audience (§9.4): inside a dispatched lane (HIPPO_DISPATCH set) the capsule carries the
+    directives addressed to executors; everywhere else, the ones addressed to main. `all`
+    (and absent, its default) reaches both."""
     data = tasks_load(hp)
     n_open = sum(1 for t in data["tasks"] if t.get("status") in OPEN_STATUSES)
-    live = [d for d in directives(hp).values() if d.get("state") == "active"]
+    reader = "executor" if os.environ.get("HIPPO_DISPATCH") else "main"
+    live = [d for d in directives(hp).values() if d.get("state") == "active"
+            and (d.get("audience") or "all") in (reader, "all")]
 
     def stamp(name):
         p = hp / name
@@ -682,7 +740,7 @@ def resolve_ref(hp, ref):
         return ref
     task = ref[len("task:"):]
     rows = read_ledger(hp)
-    judged = {e.get("ref") for e in rows if e.get("ev") == "outcome"}
+    judged = judged_refs(rows)  # a lane's claim leaves its dispatch still awaiting the verdict
     hits = [e for e in rows if e.get("ev") == "dispatch" and e.get("task") == task]
     if not hits:
         die(f"--ref {ref}: no dispatch recorded for task {task!r}")
@@ -749,7 +807,9 @@ def check_scribe_outcome(hp, e):
     read the first verdict either way (the routing table is a first-pass rate)."""
     if e.get("ev") != "outcome":
         return None
-    if any(x.get("ev") == "outcome" and x.get("ref") == e.get("ref") for x in read_ledger(hp)):
+    # A lane's self-report is a claim, not a verdict (§9.2): the scribe recording main's
+    # explicit acceptance signal *after* a claim is the normal flow, not a re-judgment.
+    if e.get("ref") in judged_refs(read_ledger(hp)):
         return (f"ev=outcome: ref={e.get('ref')!r} already has a verdict — the scribe does not "
                 "re-judge (at most one outcome per dispatch; a second verdict belongs to main)")
     return None
@@ -771,13 +831,21 @@ def cmd_log(args):
         if args.task:
             e["task"] = args.task
     elif args.ev == "outcome":
-        e.update(ref=resolve_ref(args.hp, args.ref), result=args.result)
+        # Inside a dispatched lane, HIPPO_DISPATCH names the one dispatch the writer is (§9.2):
+        # the lane does not have to know its own hash to report what it observed.
+        ref = args.ref or os.environ.get("HIPPO_DISPATCH")
+        if not ref:
+            die("outcome: --ref is required (inside a dispatched lane HIPPO_DISPATCH supplies it)")
+        e.update(ref=resolve_ref(args.hp, ref), result=args.result)
         for k in ("attr", "rework", "by", "note"):
             if getattr(args, k) is not None:
                 e[k] = getattr(args, k)
+        # Claims (src=executor) do not make this "a second verdict" — main judging a claimed
+        # dispatch is the intended sequence, and the note would train the reader to skim.
         prior_verdicts = [
             x for x in read_ledger(args.hp)
             if x.get("ev") == "outcome" and x.get("ref") == e["ref"]
+            and x.get("src") != "executor"
         ]
     elif args.ev == "review":
         e.update(id=args.id, base=args.base, source=args.source, findings=args.findings)
@@ -805,6 +873,8 @@ def cmd_log(args):
             e["text"] = args.text
         if args.lifetime:
             e["lifetime"] = args.lifetime
+        if getattr(args, "audience", None):
+            e["audience"] = args.audience
         # Length is not warned about here: the set-wide notes emitted after the write name every
         # oversized directive by id and size, including this one. Saying it twice trains the
         # reader to skim the notes.
@@ -857,8 +927,10 @@ def cmd_directive_list(args):
         print(json.dumps(ds, ensure_ascii=False, indent=2))
         return
     for d in ds:
+        aud = d.get("audience")
+        tag = f"/{aud}" if aud and aud != "all" else ""
         print(
-            f"{d['id']}  [{d.get('state', '?')}/{d.get('lifetime', '?')}]  {d.get('text', '')}"
+            f"{d['id']}  [{d.get('state', '?')}/{d.get('lifetime', '?')}{tag}]  {d.get('text', '')}"
         )
     # Reviewing the set is the other moment the author can act on what it costs. On stderr, so
     # the listing itself stays a clean, pipeable record of the directives.
@@ -916,7 +988,9 @@ def prior_facts(rows, now):
     for it: principles 4 and 6. The clerk still writes every sentence of the page; it no longer
     does the sums, and it is no longer handed the raw ledger to do them from."""
     disp = [e for e in rows if e.get("ev") == "dispatch"]
-    outs = [e for e in rows if e.get("ev") == "outcome"]
+    # Self-reported outcomes are claims, not verdicts (§9.2): they enter no cell, no
+    # attribution count, no unjoined count. The scorecard folds only judgments.
+    outs = [e for e in rows if e.get("ev") == "outcome" and e.get("src") != "executor"]
     first = {}
     for e in outs:  # the ledger is append-only, so file order is chronological
         first.setdefault(e.get("ref"), e)
@@ -1178,6 +1252,10 @@ def run_dispatch(argv):
             # The ledger line goes to stderr: stdout's first line belongs to the dispatch id (§3.6).
             print(json.dumps(append_event(hp, e, src="wrapper"), ensure_ascii=False), file=sys.stderr)
     print(f"dispatch:{did}", flush=True)
+    # The lane inherits its own dispatch id (§9.2): every hippo write it makes arrives as
+    # src=executor, and `log outcome` needs no --ref. Set even when the record failed — the
+    # id was printed and is the lane's name either way.
+    os.environ["HIPPO_DISPATCH"] = did
     # Close stdin before handing over — left open, codex exec blocks waiting for input.
     with open(os.devnull) as devnull:
         os.dup2(devnull.fileno(), 0)
@@ -1236,13 +1314,24 @@ def dispatch_roster(hp):
     It doubles as the set of ids an outcome may legally ref, which the digest also could not
     guarantee."""
     rows = read_ledger(hp)
-    judged = {e.get("ref") for e in rows if e.get("ev") == "outcome"}
+    judged = judged_refs(rows)
+    claims = executor_claims(rows)
     disp = [e for e in rows if e.get("ev") == "dispatch"][-DISPATCH_ROSTER_N:]
     if not disp:
         return "(none yet)"
+
+    def marker(did):
+        # A claimed dispatch is still awaiting the verdict — and naming the claim keeps the
+        # clerk from reading the lane's own report in the digest as an acceptance signal.
+        if did in judged:
+            return ""
+        if did in claims:
+            return f"  [claims {claims[did]} — verdict pending]"
+        return "  [no outcome yet]"
+
     return "\n".join(
         f"- {e.get('id')} ({e.get('kind', '?')}): {one_line(e.get('scope', ''), 80)}"
-        + ("" if e.get("id") in judged else "  [no outcome yet]")
+        + marker(e.get("id"))
         for e in disp
     )
 
@@ -1422,8 +1511,8 @@ def build_parser():
     a = lsub.add_parser("outcome", help="verdict on a delegation")
     a.add_argument(
         "--ref",
-        required=True,
-        help="dispatch id, or task:<task-id> for its dispatch still awaiting an outcome",
+        help="dispatch id, or task:<task-id> for its dispatch still awaiting an outcome; "
+             "inside a dispatched lane, defaults to $HIPPO_DISPATCH (your own dispatch)",
     )
     a.add_argument(
         "--result", required=True, choices=sorted(ENUMS[("outcome", "result")])
@@ -1469,6 +1558,12 @@ def build_parser():
         "--lifetime",
         choices=sorted(ENUMS[("directive", "lifetime")]),
         help="how long the directive lives",
+    )
+    a.add_argument(
+        "--audience",
+        choices=sorted(ENUMS[("directive", "audience")]),
+        help="who it binds (default all): main = this session's judgment, "
+             "executor = dispatched lanes, all = both",
     )
     a.add_argument(
         "--state", default="active", choices=sorted(ENUMS[("directive", "state")])
@@ -1575,12 +1670,12 @@ def main():
         hp = find_hippo()
         if hp is None:
             # Reads stay completely silent outside a project (§3.1). A *write* does not: the
-            # caller typed it expecting a record, and silence reads as success. The usual cause
-            # is cwd — a worktree holds a .git file, so the walk-up stops before the project.
+            # caller typed it expecting a record, and silence reads as success. (Worktrees are
+            # no longer the usual cause — find_hippo walks through their .git file, §9.1.)
             if getattr(args, "writes", False):
                 print(
                     "hippo: no .hippo/ found from here — nothing was recorded. "
-                    "Run `hippo init`, or check your cwd (a worktree is not the project root).",
+                    "Run `hippo init` at the project root, or check your cwd.",
                     file=sys.stderr,
                 )
             sys.exit(0)

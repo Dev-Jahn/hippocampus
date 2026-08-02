@@ -84,6 +84,7 @@ hippo log raw '<json>'
 hippo log tail [-n N] [--ev TYPE]
 hippo directive list [--active] [--json]
 hippo directive add [typed flags…]        # --lifetime turn|phase|durable
+                                          # --audience main|executor|all (default all)
 hippo directive withdraw <directive-id>
 hippo prior show
 hippo prior distill [--days N]

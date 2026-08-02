@@ -64,11 +64,19 @@ Filling the three groups of arguments:
 Mechanics:
 
 - The wrapper records `ev:dispatch` automatically and prints the dispatch id on the first line.
+- The wrapper plants `HIPPO_DISPATCH=<id>` in the lane's environment: every `hippo` write from
+  inside arrives as `src=executor`, and the lane can report what it observed with
+  `hippo log outcome --result … --note '…'` (no ref needed). That self-report is a **claim** —
+  the capsule shows it as `claims …` on the in-flight line, and the verdict still belongs to
+  main (§4). A lane's `hippo status --inject` carries the directives whose audience includes
+  executors. In Claude Code the lane inherits PATH, so bare `hippo` resolves; on the Codex host
+  it does not — put the absolute `bin/hippo` path into COMMON.md. A lane's `directive`
+  writes are recorded but never change the live set — a lane may propose, not rule.
 - In Claude Code `hippo` is on PATH. **In Codex the plugin's `bin/` is not on PATH** — resolve
   `../../bin/hippo` relative to this SKILL.md into an absolute path and call that.
-- **cwd must be somewhere `.hippo/` is findable upward** (usually the repo root); point at the
-  worktree with `-C <worktree>`. Running from the worktree's cwd loses the record (you get a
-  warning when that happens).
+- **cwd must be somewhere `.hippo/` is findable upward.** The repo root with `-C <worktree>`
+  remains the tidy shape, but a lane's worktree cwd resolves too — the walk goes through a
+  worktree's `.git` file to the project's real `.hippo/` (1.8.0).
 - The wrapper has `codex exec … < /dev/null` built in (an unclosed stdin hangs). Launch the
   command itself through the harness's `run_in_background` — no nohup/disown or other detach
   outside the harness (that produced orphans).
@@ -99,7 +107,9 @@ chained into 10-minute hard timeouts). (8) **State plainly that re-delegation is
 without that clause one lane spiraled through 336k tokens of re-delegation and ended with zero
 commits). (9) A verification lane reproduces dynamically **in a tempdir only** — the real repo
 state and documents are untouchable ("read-only" as an instruction alone did not prevent
-contamination).
+contamination). (10) Tell the lane it may record what it observed — `hippo log outcome
+--result no-go|… --note '…'`, no ref needed inside the lane — and that this lands as a claim
+main will judge, not as the verdict.
 
 ## 4. Verification budget (proportional to evidence, not a fixed ritual)
 
