@@ -217,3 +217,24 @@ def test_a_git_directory_is_still_a_hard_boundary(tmp_project, run_hippo):
     assert proc.returncode == 0
     assert "nothing was recorded" in proc.stderr
     assert not any(e.get("id") == "dnope" for e in read_ledger(tmp_project))
+
+
+# --------------------------------------------------------------------------
+# deterministic usage injection (1.8.1) — capsule report line + COMMON seed
+# --------------------------------------------------------------------------
+
+def test_lane_capsule_carries_the_report_line(tmp_project, run_hippo):
+    lane = run_hippo(["status", "--inject"], cwd=tmp_project,
+                     env={"HIPPO_DISPATCH": "dlane1"})
+    assert "· report: hippo log outcome" in lane.stdout
+    assert "no --ref needed" in lane.stdout
+    main_view = run_hippo(["status", "--inject"], cwd=tmp_project)
+    assert "report:" not in main_view.stdout
+
+
+def test_init_seeds_the_common_bootstrap(tmp_path, run_hippo):
+    proc = run_hippo(["init"], cwd=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    seed = (tmp_path / ".hippo" / "briefs" / "COMMON.md").read_text(encoding="utf-8")
+    assert "hippo status --inject" in seed
+    assert "compaction" in seed

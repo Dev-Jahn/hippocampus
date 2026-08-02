@@ -117,3 +117,53 @@ def test_stop_hook_returns_immediately_detached(
     # used here to avoid CI flakiness while still catching an implementation
     # that blocks Stop on the full scribe pipeline.
     assert elapsed < 2.0, f"stop.sh must not block on scribe; took {elapsed:.2f}s"
+
+
+# --------------------------------------------------------------------------
+# the HIPPO_DISPATCH gate (1.8.1): a lane gets the capsule, never the scribe
+# --------------------------------------------------------------------------
+
+def _worktree(tmp_project, name="pass2"):
+    lane = tmp_project / ".claude" / "worktrees" / name
+    lane.mkdir(parents=True)
+    (lane / ".git").write_text("gitdir: ../../../.git/worktrees/pass2\n", encoding="utf-8")
+    return lane
+
+
+def test_session_start_walks_through_a_worktree_for_a_lane(tmp_project, repo_root):
+    lane = _worktree(tmp_project)
+    payload = {"cwd": str(lane), "hook_event_name": "SessionStart", "source": "compact"}
+    proc = _run_hook(repo_root / "hooks" / "session_start.sh", payload, cwd=lane,
+                     env={"HIPPO_DISPATCH": "dlane1"})
+    assert proc.returncode == 0
+    assert proc.stdout.strip().startswith("[hippo]")
+    assert "· report: hippo log outcome" in proc.stdout
+
+
+def test_session_start_stays_conservative_without_the_gate(tmp_project, repo_root):
+    lane = _worktree(tmp_project, "plain")
+    payload = {"cwd": str(lane), "hook_event_name": "SessionStart", "source": "startup"}
+    proc = _run_hook(repo_root / "hooks" / "session_start.sh", payload, cwd=lane)
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
+
+
+def test_stop_exits_at_once_for_a_lane_and_spawns_no_scribe(
+    tmp_project, repo_root, fake_transcript, valid_mock_output
+):
+    payload = {
+        "session_id": "sess-lane",
+        "transcript_path": str(fake_transcript),
+        "cwd": str(tmp_project),
+        "hook_event_name": "Stop",
+    }
+    proc = _run_hook(repo_root / "hooks" / "stop.sh", payload, cwd=tmp_project,
+                     env={"HIPPO_DISPATCH": "dlane1",
+                          "HIPPO_CLERK_BACKEND": "mock",
+                          "HIPPO_MOCK_OUTPUT": str(valid_mock_output)})
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
+    # A spawned scribe (even the mock) would advance a cursor and meter itself in the
+    # ledger within moments; give it that moment, then assert nothing happened.
+    time.sleep(1.2)
+    assert not (tmp_project / ".hippo" / "cursors.json").exists()
+    ledger = (tmp_project / ".hippo" / "ledger.jsonl").read_text(encoding="utf-8")
+    assert '"ev": "clerk"' not in ledger and '"ev":"clerk"' not in ledger

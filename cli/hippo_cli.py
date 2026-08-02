@@ -390,8 +390,19 @@ def cmd_init(_args):
     hp.mkdir(parents=True)
     (hp / "failures").mkdir()
     # briefs/ is never read by hippo — created so the brief convention (§3.1) is discoverable
-    # instead of every wave reinventing an absolute scratchpad path.
+    # instead of every wave reinventing an absolute scratchpad path. The COMMON.md seed is
+    # written once and never read back: it bootstraps every lane to the capsule, which is
+    # where the usage contract actually lives (single source, generated).
     (hp / "briefs").mkdir()
+    (hp / "briefs" / "COMMON.md").write_text(
+        "# COMMON — shared brief clauses (hand-maintained; hippo never reads this file)\n"
+        "\n"
+        "Lane bootstrap: run `hippo status --inject` before starting. Its `live(…)` lines are\n"
+        "standing constraints, and its `report:` line tells you how to record your outcome.\n"
+        "Re-run it after any context compaction — constraints do not survive compaction on\n"
+        "their own.\n",
+        encoding="utf-8",
+    )
     (hp / "ledger.jsonl").touch()
     tasks_save(hp, {"tasks": []})
     print(f"created: {hp}")
@@ -554,6 +565,14 @@ def status_lines(hp):
         entries = [m.group(2).strip() for m in map(WORKLOG_ENTRY.match, section) if m]
         if entries:
             lines.append(f"· last: {one_line(entries[-1], 120)}")
+    if reader == "executor":
+        # The lane's usage contract, generated where the lane actually reads (principle 5):
+        # briefs no longer have to hand-copy it, and it survives the lane's own compaction
+        # wherever the SessionStart gate re-injects this capsule.
+        lines.append(
+            "· report: hippo log outcome --result accepted|revised|refuted|no-go|lost "
+            "--note '…' — no --ref needed; recorded as your claim, main judges"
+        )
     return lines
 
 

@@ -102,6 +102,10 @@ path — `.hippo/briefs/<task>.md` — reachable from the same cwd `hippo dispat
 It is called briefs because that is what the rest of the system calls the document, including the
 ledger's own `attr: brief`.
 It is a convention, not a requirement: a path anywhere else still launches.
+`hippo init` seeds `briefs/COMMON.md` with the lane bootstrap alone — run `status --inject`
+first, re-run it after a compaction — written once and never read back: the usage contract
+itself lives in the capsule's `report:` line (§6), one generated source instead of prose every
+brief re-types.
 
 ### 3.2 Ledger schema (a contract — exactly this)
 
@@ -196,9 +200,10 @@ optional `src` (`scribe|cli|wrapper|executor`).
 - `.hippo/` is found by walking up from cwd. A `.git` *directory* is the ceiling (never adopt a
   project from beyond a real repo root); a `.git` *file* — a linked worktree — is walked through,
   so a lane calling hippo from its worktree resolves the project's real `.hippo/` (§9.1, wired
-  in 1.8.0). The two hooks keep the old conservative walk: a Claude session opened *inside* a
-  worktree gets no capsule and no scribe while the CLI there still resolves — lanes are
-  processes, not sessions, so the asymmetry costs nothing by design.
+  in 1.8.0). The hooks walk conservatively for ordinary sessions (a session opened *inside* a
+  worktree gets no capsule and no scribe) with one exception: under `HIPPO_DISPATCH` —
+  a dispatched lane — SessionStart walks through the worktree's `.git` file too, which is what
+  re-injects the capsule after the lane's own compaction (§3.4, 1.8.1).
 - **Every subcommand has `-h/--help`, and errors attach the usage to stderr** (a direct fix for the
   largest source of friction in 0.x).
 - The surface:
@@ -257,10 +262,17 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
 - **SessionStart** (startup, resume, clear, compact): `hooks/session_start.sh` → silent exit 0 with
   no `.hippo/`; otherwise `hippo status --inject` (the §6 format). Re-injection after a compact is
   what makes it a **context keeper**: live directives survive compaction (the fix for the loss
-  measured across 86 compactions).
+  measured across 86 compactions). Under `HIPPO_DISPATCH` the walk crosses a worktree's `.git`
+  file (§3.3), so a dispatched lane whose host fires hooks gets the same treatment — its
+  audience slice plus the `report:` line, at start and after every compaction. The lane-side
+  gap this closes is the same measured loss, unhandled: a long lane compacts and its brief's
+  constraints evaporate.
 - **Stop**: `hooks/stop.sh` — parse `transcript_path`, `session_id` and `cwd` from the stdin JSON;
   silent exit 0 with no `.hippo/`; otherwise `setsid hippo scribe … >/dev/null 2>&1 &` and then
-  **exit 0 immediately** (<100ms).
+  **exit 0 immediately** (<100ms). Under `HIPPO_DISPATCH` it exits at once instead: the executor
+  gets no scribe (§9.7) — a per-lane Stop would multiply clerk cost by the wave width, and a
+  scribe over a lane's transcript would mint src=scribe rows (verdicts) out of a worker's
+  self-narrative.
 
 ### 3.5 The scribe pipeline (inside `hippo scribe`)
 
@@ -411,6 +423,11 @@ Constraints specific to codex (0.144.6):
 - **Hooks are skipped silently until they are trusted.** Review and trust them once through
   `/hooks`, or bypass with `--dangerously-bypass-hook-trust`. If the capsule never appears after
   installing, look here first.
+- Installing and trusting hippo in the Codex host is also what gives **dispatched lanes** their
+  capsule (start + post-compaction, §3.4): `codex exec` fires plugin hooks — the reason
+  `clerk_run.sh` must pass `--disable hooks` — so a lane launched by `hippo dispatch` carries
+  the gate's env either way. Smoke-test the exec-mode compact event once per codex upgrade;
+  0.144.6 is the measured baseline.
 - The project `.codex/` layer loads **only in a trusted project** (plugin hooks are unaffected).
 - `"async": true` parses but is **skipped** — a Stop hook earns its non-blocking behavior by
   detaching itself (our `stop.sh` already does, with setsid and all three streams closed).
@@ -465,6 +482,15 @@ Everything else such a file carries has a home already: the current phase is a `
 what shipped is the worklog, ordering is `task deps`, and a merge hazard belongs in the brief for
 the lane that will cause it (dispatch skill §5). A re-entry document is what appears when those
 surfaces go unused — not a gap in this design.
+
+When the reader is a dispatched lane (`HIPPO_DISPATCH` set), one fixed line is appended —
+
+```
+· report: hippo log outcome --result … --note '…' — no --ref needed; recorded as your claim, main judges
+```
+
+— the lane's whole usage contract, generated where the lane reads it (principle 5) instead of
+hand-copied into every brief.
 
 Three rules govern the directive block:
 
@@ -621,8 +647,11 @@ parent's dispatch id means a fleet's cost sums itself.
 
 ### 9.7 Consequences to settle before building
 
-- **The executor gets no scribe.** Running the Stop hook per lane multiplies clerk cost by the wave
-  width, and the hook cap is two (§3.4). If a depth-1 orchestrator's reasoning is worth keeping, the
+- **The executor gets no scribe** (enforced by the Stop hook's `HIPPO_DISPATCH` gate since
+  1.8.1). Running the Stop hook per lane multiplies clerk cost by the wave width, and the hook
+  cap is two (§3.4). It *does* get the capsule — SessionStart's side of the same gate — because
+  a lane that compacts loses its brief's constraints exactly the way main used to (§3.4). If a
+  depth-1 orchestrator's reasoning is worth keeping, the
   distillation belongs in the dispatch wrapper at lane exit — not in a third hook.
 - **A discarded lane's events survive in the ledger while its code does not.** This is a feature —
   "this approach was tried and failed" is recorded nowhere today — but it requires the dispatch to

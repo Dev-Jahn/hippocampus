@@ -8,6 +8,11 @@ set -u
 # fire, or this hook would spawn a clerk that spawns a clerk (no recursion, §2).
 [ -n "${HIPPO_CLERK:-}" ] && exit 0
 
+# A dispatched lane gets no scribe (§9.7): a per-lane Stop would multiply clerk cost by the
+# wave width, and a scribe reading a lane's transcript would write src=scribe rows — verdicts —
+# out of a worker's self-narrative. HIPPO_DISPATCH, planted by the wrapper, is the gate.
+[ -n "${HIPPO_DISPATCH:-}" ] && exit 0
+
 # jq is preferred but not required: python3 is already a hard dependency of the
 # CLI shim, so a missing jq must not turn this hook into a silent death.
 if command -v jq >/dev/null 2>&1; then
