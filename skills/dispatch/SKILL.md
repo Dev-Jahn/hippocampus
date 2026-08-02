@@ -141,6 +141,10 @@ entries:
 - **One batch call per stage; the journal is the hand-off; main stays between stages.** A wave
   with dependencies is stages: batch stage 1, read its journal and outputs, judge, then batch
   stage 2. Do not encode a DAG into one manifest — sequencing is main's job.
+- **Mass-identical check failures are one defect, not N.** When a large fraction of a wave fails
+  its check the same way, diagnose the common cause before writing a repair manifest — the batch
+  moved judgment out of the launch loop, so nothing inside it will do this for you (measured: 130
+  identical import failures were one missing `pytest.ini`, paid as 130 repair lanes).
 - Per-entry prompt = `defaults.briefs` contents + entry `brief` + inline `prompt`, with `{var}`
   substitution in the prompt and the check. Outputs land in `<manifest-stem>.out/` per entry;
   one summary JSON line arrives on stdout at the end.

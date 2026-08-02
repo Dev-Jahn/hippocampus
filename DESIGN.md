@@ -425,6 +425,14 @@ breaker gates batch launches through the same arithmetic as single ones — fact
 verdict function both paths call, consulted before every launch — and, as ever, main is never
 gated.
 
+Measured against its predecessor on the same 200-algorithm fleet: the orchestrator's cost fell
+$13.07 → $9.23 (turn-loop input nearly halved, 19.6M → 10.9M tokens) and wall time 42 → 28
+minutes. The run also measured the shape's one hazard: with judgment moved out of the launch
+loop, 130 *identical* check failures (one missing `pytest.ini` — a defect the loop-driving
+orchestrator of round one had diagnosed once and fixed globally) were paid as 130 per-entry
+repair lanes. Batch replaces the loop's ceremony, not its judgment — mass-identical failures
+still deserve a diagnosis before a repair manifest (the dispatch skill says so now).
+
 ### 3.6b The distiller split — the clerk writes the page, the code does the sums
 
 `hippo prior distill` computes the whole scorecard itself — the dispatch ⋈ outcome join, the
