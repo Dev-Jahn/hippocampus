@@ -52,7 +52,14 @@ while :; do
     found="$dir"
     break
   fi
-  if [ -e "$dir/.git" ]; then   # -e: .git is a file in git worktrees
+  if [ -d "$dir/.git" ]; then   # a real repo root: never adopt a project from beyond it
+    break
+  fi
+  # A .git *file* is a linked worktree. For a dispatched lane (HIPPO_DISPATCH, planted by
+  # the wrapper) keep walking to the project root, same as the CLI (§9.1) — this is what
+  # re-injects the capsule after the lane's own compaction. Ordinary sessions keep the
+  # conservative stop.
+  if [ -e "$dir/.git" ] && [ -z "${HIPPO_DISPATCH:-}" ]; then
     break
   fi
   [ -n "${HOME:-}" ] && [ "$dir" = "$HOME" ] && break

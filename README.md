@@ -59,6 +59,8 @@ codex plugin add hippo@jahns-codex-marketplace
 Codex requires you to **review and trust hooks once** before they run: open `/hooks`
 in the CLI and trust hippo's `SessionStart`/`Stop` entries. Until you do, they are
 skipped silently — if the session-start capsule never appears, look there first.
+Trusting them also gives lanes launched by `hippo dispatch` their capsule — at start
+and again after each compaction (executor-audience directives plus the report line).
 Codex also does not put a plugin's `bin/` on `PATH`; the skills resolve `bin/hippo`
 relative to themselves, and you can add your own alias if you want to type `hippo`.
 

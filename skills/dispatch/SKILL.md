@@ -69,7 +69,11 @@ Mechanics:
   `hippo log outcome --result … --note '…'` (no ref needed). That self-report is a **claim** —
   the capsule shows it as `claims …` on the in-flight line, and the verdict still belongs to
   main (§4). A lane's `hippo status --inject` carries the directives whose audience includes
-  executors. In Claude Code the lane inherits PATH, so bare `hippo` resolves; on the Codex host
+  executors plus a `report:` line with its usage contract — `.hippo/briefs/COMMON.md` is seeded
+  at init with the bootstrap ("run it first, re-run after compaction"), so keep that clause when
+  editing the file. With hippo installed and trusted in the Codex host, a lane re-receives that
+  capsule automatically at start and after every compaction — worth it for any long lane. In
+  Claude Code the lane inherits PATH, so bare `hippo` resolves; on the Codex host
   it does not — put the absolute `bin/hippo` path into COMMON.md. A lane's `directive`
   writes are recorded but never change the live set — a lane may propose, not rule.
 - In Claude Code `hippo` is on PATH. **In Codex the plugin's `bin/` is not on PATH** — resolve
