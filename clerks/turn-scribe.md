@@ -96,7 +96,9 @@ events: only the four kinds below are allowed, with exactly these field names.
 3. `{"ev":"directive","id":"<short kebab id>","text":"<the gist of what was said>","lifetime":"turn|phase|durable","state":"active"}`
    or `{"ev":"directive","id":"<existing id>","state":"withdrawn"}`
    — **only operating constraints or instructions spoken by the user (USER: lines)**. Rules or
-   resolutions the model invented for itself are not directives — do not record them.
+   resolutions the model invented for itself are not directives — do not record them. A decision
+   this same window already carried out (code merged, config changed, document updated) is not a
+   directive either: it is finished work and belongs in the worklog, not in the standing rules.
 
    Choosing the lifetime:
 
@@ -110,7 +112,11 @@ events: only the four kinds below are allowed, with exactly these field names.
    currently live. When this turn *changes* an instruction that is already on that list, reuse its
    exact id — a new id does not update anything, it just adds a second directive that says
    something different. Coin a new id only for a genuinely new instruction. When the user drops an
-   instruction that is on the list, record it withdrawn under that same id.
+   instruction that is on the list, record it withdrawn under that same id. A withdrawal needs
+   the same evidence as an addition: the user saying so, on a USER line. **Never infer one from
+   the assistant's own summaries or reports** — a paraphrase that merely mentions a directive's
+   subject is not a withdrawal (measured: a live hold was once withdrawn because a report
+   mentioned its keyword).
 
    An id is lowercase kebab ascii — `[a-z0-9]` joined by `-`, roughly 3 words, naming the *subject*
    (`gpu-pinning`, `review-in-context`). This holds whatever language the user writes in: an id
