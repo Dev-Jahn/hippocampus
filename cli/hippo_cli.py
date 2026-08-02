@@ -6,6 +6,7 @@
 
 import argparse
 import collections
+import concurrent.futures
 import contextlib
 import fcntl
 import hashlib
@@ -16,6 +17,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -1268,7 +1270,9 @@ DISPATCH_USAGE = (
     "[--] <codex exec args...>\n"
     "       everything after -- goes to codex exec verbatim, even if it looks like a wrapper flag\n"
     "       --depth 0 (default): the lane is told not to re-delegate; --depth 1: it may spawn\n"
-    "       children, which start at depth 0 (§9.5 — the clause is indexed, never enforced)"
+    "       children, which start at depth 0 (§9.5 — the clause is indexed, never enforced)\n"
+    "       batch form: hippo dispatch --batch <manifest.yaml> [--concurrency N] "
+    "[--resume | --fresh] [--dry-run]"
 )
 
 
@@ -1345,9 +1349,11 @@ def _reserve_usd(model, prices):
     return mtin * m["input"] + mtout * m["output"]
 
 
-def check_fanout(hp, parent, child_model):
+def fanout_verdict(hp, parent, child_model):
     """The fan-out circuit breaker (§3.6): the one check that lives inside this service —
-    denominated in dollars, never in lanes.
+    denominated in dollars, never in lanes. Returns (None | "warn" | "stop", msg); the caller
+    decides what a verdict becomes — single dispatch dies on stop, a batch wave must keep
+    collecting the children already running.
 
     Guards exactly one measured disaster shape: a lane machine-gunning expensive children
     through the sanctioned path (the 336k-token re-delegation spiral, and its §9.5 sequel).
@@ -1357,10 +1363,10 @@ def check_fanout(hp, parent, child_model):
     enforcement principle 3 rejects. A lane that bypasses the wrapper still succeeds; this
     stops accidents, not adversaries, and every measured failure was an accident."""
     if not parent or hp is None:
-        return
+        return None, ""
     prices = load_prices()
     if not prices["models"]:
-        return  # no sheet, no cost reasoning — the breaker cannot price what it cannot see
+        return None, ""  # no sheet, no cost reasoning — the breaker cannot price what it cannot see
     budget = float((config(hp).get("dispatch") or {}).get("max_wave_usd")
                    or FANOUT_BUDGET_USD)
     now = datetime.now(timezone.utc)
@@ -1384,20 +1390,35 @@ def check_fanout(hp, parent, child_model):
             reserved += _reserve_usd(model, prices) or 0.0
     total = measured + reserved + (_reserve_usd(child_model, prices) or 0.0)
     if total > budget:
-        die(f"dispatch: this wave would reach ~${total:.0f} of its ${budget:.0f} budget — "
+        return "stop", (
+            f"dispatch: this wave would reach ~${total:.0f} of its ${budget:.0f} budget — "
             f"lane {parent} has {n} children in 24h (${measured:.2f} measured + "
             f"${reserved:.0f} reserved for lanes still running). Stop and report instead: "
             "`hippo log outcome --result no-go --note '…'`; main decides — the budget is "
-            ".hippo/config.yaml dispatch.max_wave_usd.", 2)
+            ".hippo/config.yaml dispatch.max_wave_usd.")
     if total >= budget / 2:
-        print(f"dispatch: note — lane {parent}'s wave is at ~${total:.0f} of its "
-              f"${budget:.0f} budget ({n} children in 24h, ${measured:.2f} measured).",
-              file=sys.stderr)
+        return "warn", (
+            f"dispatch: note — lane {parent}'s wave is at ~${total:.0f} of its "
+            f"${budget:.0f} budget ({n} children in 24h, ${measured:.2f} measured).")
+    return None, ""
+
+
+def check_fanout(hp, parent, child_model):
+    """The single-dispatch face of the breaker: die on stop, stderr on warn."""
+    verdict, msg = fanout_verdict(hp, parent, child_model)
+    if verdict == "stop":
+        die(msg, 2)
+    if verdict == "warn":
+        print(msg, file=sys.stderr)
 
 
 def run_dispatch(argv):
     """DESIGN §3.6. A failed record never blocks the launch — this surface's real job is running
     codex and the ledger is a side effect. But a lost record always makes a sound."""
+    # After a `--` every token belongs to codex — a --batch there is not ours to read.
+    head = argv[: argv.index("--")] if "--" in argv else argv
+    if "--batch" in head:
+        return run_batch(argv)
     kind, scope, task, depth, rest = split_dispatch_argv(argv)
     did = "d" + os.urandom(16).hex()
     # A launch from inside a lane is a child: record who spawned it (§9.5 — an unintended
@@ -1464,6 +1485,456 @@ def run_dispatch(argv):
         if usage is not None:
             append_event(hp, {"ev": "usage", "ref": did, **usage}, src="wrapper")
     sys.exit(rc)
+
+
+# --- batch dispatch (DESIGN §3.6 — batch waves) --------------------------------
+
+BATCH_USAGE = (
+    "usage: hippo dispatch --batch <manifest.yaml> [--concurrency N] [--resume | --fresh] "
+    "[--dry-run]\n"
+    "       the manifest is per-wave data, authored fresh like a brief — never standing config\n"
+    "       --resume continues an existing journal (done entries skip, the rest relaunch); "
+    "--fresh sets it aside"
+)
+
+# Everything a manifest entry may set, with the built-in value where one exists. kind and
+# model have no default on purpose: they are the axes PRIORS routes on, so the author chooses.
+MANIFEST_DEFAULTS = {"kind": None, "executor": "codex", "model": None, "effort": "medium",
+                     "depth": 0, "task": "", "args": [], "briefs": [], "check": "",
+                     "timeout": 3600}
+ENTRY_KEYS = ("id", "scope", "brief", "prompt", "vars")
+BATCH_EXECUTORS = ("codex", "claude")  # the adapters that exist — not the ledger vocabulary
+CHECK_TIMEOUT = 600
+# The ids double as journal keys and <id>.out/.err filenames, so a path-shaped id must not
+# validate — the slug alphabet plus the separators an author would reasonably type — and an
+# unbounded one must not either: past the filesystem's 255-byte name cap the launch OSErrors
+# mid-wave, after the dispatch row already landed.
+ENTRY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+ENTRY_ID_MAX = 100
+
+# append_event was written for one writer per process; batch is the one multi-writer surface.
+# One lock for ledger and journal both, reentrant on purpose: each file must interleave in
+# whole lines, AND the breaker's admit-then-record region re-acquires it through the append
+# helpers — RLock keeps it one lock serving both duties.
+BATCH_LOCK = threading.RLock()
+
+
+def parse_batch_argv(argv):
+    manifest = concurrency = None
+    flags = {"resume": False, "fresh": False, "dry_run": False}
+    i, n = 0, len(argv)
+    while i < n:
+        a = argv[i]
+        if a in ("--batch", "--concurrency"):
+            if i + 1 >= n:
+                die(f"dispatch --batch: {a} has no value\n{BATCH_USAGE}", 2)
+            if a == "--batch":
+                manifest = argv[i + 1]
+            else:
+                try:
+                    concurrency = int(argv[i + 1])
+                except ValueError:
+                    die(f"dispatch --batch: --concurrency must be an integer: "
+                        f"{argv[i + 1]!r}\n{BATCH_USAGE}", 2)
+                if concurrency < 1:
+                    die(f"dispatch --batch: --concurrency must be >= 1\n{BATCH_USAGE}", 2)
+            i += 2
+        elif a in ("--resume", "--fresh", "--dry-run"):
+            flags[a[2:].replace("-", "_")] = True
+            i += 1
+        else:
+            die(BATCH_USAGE, 2)
+    if flags["resume"] and flags["fresh"]:
+        die(f"dispatch --batch: --resume and --fresh are mutually exclusive\n{BATCH_USAGE}", 2)
+    if not manifest:
+        die(BATCH_USAGE, 2)
+    return manifest, concurrency, flags["resume"], flags["fresh"], flags["dry_run"]
+
+
+def load_manifest(mp):
+    """(concurrency, fully-resolved entries). Fail-closed and total: every problem is
+    collected, then one die — a manifest that half-validates must not launch half a wave."""
+    if not mp.is_file():
+        die(f"dispatch --batch: no such manifest: {mp}", 2)
+    try:
+        data = yaml.safe_load(mp.read_text(encoding="utf-8"))
+    except yaml.YAMLError as ex:
+        die(f"dispatch --batch: manifest parse failed: {ex}", 2)
+    if not isinstance(data, dict):
+        die(f"dispatch --batch: manifest must be a YAML mapping: {mp}", 2)
+    problems = []
+    # YAML keys need not be strings (an int, or `on:` read as a bool) — sort by repr so a
+    # mixed-type key set still joins the problem list instead of raising TypeError.
+    for k in sorted(set(data) - {"concurrency", "defaults", "entries"}, key=repr):
+        problems.append(f"unknown top-level key: {k}")
+    conc = data.get("concurrency", 8)
+    if isinstance(conc, bool) or not isinstance(conc, int) or conc < 1:
+        problems.append(f"concurrency must be a positive integer: {conc!r}")
+        conc = 8
+    defaults = data.get("defaults") or {}
+    if not isinstance(defaults, dict):
+        problems.append("defaults must be a mapping")
+        defaults = {}
+    for k in sorted(set(defaults) - set(MANIFEST_DEFAULTS), key=repr):
+        problems.append(f"defaults: unknown key: {k}")
+    base = {**MANIFEST_DEFAULTS,
+            **{k: v for k, v in defaults.items() if k in MANIFEST_DEFAULTS}}
+    raw = data.get("entries")
+    if not isinstance(raw, list) or not raw:
+        problems.append("entries must be a non-empty list")
+        raw = []
+
+    def text_of(path, where, what):
+        p = Path(path)  # relative paths resolve from the invocation cwd, like `$(cat …)`
+        if not p.is_file():
+            problems.append(f"{where}: {what} file not found: {path}")
+            return ""
+        try:
+            return p.read_text(encoding="utf-8")
+        except OSError as ex:
+            problems.append(f"{where}: {what} file unreadable: {path} ({ex})")
+            return ""
+
+    entries, seen = [], set()
+    for i, en in enumerate(raw):
+        where = f"entry {i + 1}"
+        if not isinstance(en, dict):
+            problems.append(f"{where}: must be a mapping")
+            continue
+        scope = en.get("scope")
+        if not isinstance(scope, str) or not scope.strip():
+            problems.append(f"{where}: scope is required")
+            scope = ""
+        eid = en.get("id")
+        if eid is None:
+            eid = re.sub(r"[^a-z0-9]+", "-", scope.lower()).strip("-")
+            if scope and not eid:
+                problems.append(f"{where}: scope slugs to nothing — an explicit id is required")
+        elif not isinstance(eid, str) or not ENTRY_ID_RE.match(eid):
+            problems.append(f"{where}: id must be [A-Za-z0-9._-] and start with an "
+                            f"alphanumeric: {eid!r}")
+            eid = ""
+        if len(eid) > ENTRY_ID_MAX:
+            problems.append(f"{where}: id must be at most {ENTRY_ID_MAX} chars "
+                            f"(ids become filenames): {eid[:40]!r}…")
+            eid = ""
+        if eid:
+            where = f"entry {i + 1} ({eid})"
+            if eid in seen:
+                problems.append(f"{where}: duplicate id")
+            seen.add(eid)
+        for k in sorted(set(en) - set(MANIFEST_DEFAULTS) - set(ENTRY_KEYS), key=repr):
+            problems.append(f"{where}: unknown key: {k}")
+        cfg = {**base, **{k: v for k, v in en.items() if k in MANIFEST_DEFAULTS}}
+        for f in ("kind", "model"):
+            if not isinstance(cfg[f], str) or not cfg[f].strip():
+                problems.append(f"{where}: {f} is required (in defaults or the entry)")
+        if cfg["executor"] not in BATCH_EXECUTORS:
+            problems.append(f"{where}: executor must be {'|'.join(BATCH_EXECUTORS)} "
+                            f"(the adapters that exist): {cfg['executor']!r}")
+        if not isinstance(cfg["effort"], str) or not cfg["effort"].strip():
+            problems.append(f"{where}: effort must be a non-empty string: {cfg['effort']!r}")
+        for f in ("depth", "timeout"):
+            if isinstance(cfg[f], bool) or not isinstance(cfg[f], int):
+                problems.append(f"{where}: {f} must be an integer: {cfg[f]!r}")
+        for f in ("task", "check"):
+            if not isinstance(cfg[f], str):
+                problems.append(f"{where}: {f} must be a string: {cfg[f]!r}")
+                cfg[f] = ""
+        args = cfg["args"]
+        if not isinstance(args, list) or any(not isinstance(a, str) for a in args):
+            problems.append(f"{where}: args must be a list of strings")
+            args = []
+        briefs = cfg["briefs"]
+        if not isinstance(briefs, list) or any(not isinstance(b, str) for b in briefs):
+            problems.append(f"{where}: briefs must be a list of file paths")
+            briefs = []
+        parts = [text_of(b, where, "briefs") for b in briefs]
+        brief = en.get("brief")
+        if brief is not None:
+            if not isinstance(brief, str):
+                problems.append(f"{where}: brief must be a file path")
+            else:
+                parts.append(text_of(brief, where, "brief"))
+        ptext = en.get("prompt")
+        if ptext is not None and not isinstance(ptext, str):
+            problems.append(f"{where}: prompt must be a string")
+            ptext = None
+        if brief is None and ptext is None:
+            problems.append(f"{where}: at least one of brief/prompt is required")
+        if ptext is not None:
+            parts.append(ptext)
+        prompt = "".join(parts)
+        vars_ = en.get("vars")
+        if vars_ is None:
+            vars_ = {}
+        if not isinstance(vars_, dict) or any(
+            not isinstance(k, str) or isinstance(v, bool) or not isinstance(v, (str, int))
+            for k, v in vars_.items()
+        ):
+            problems.append(f"{where}: vars must be a flat str -> str|int map")
+            vars_ = {}
+        check = cfg["check"]
+        # Literal {k} tokens only — code braces in a prompt pass through untouched.
+        for k, v in vars_.items():
+            prompt = prompt.replace("{" + k + "}", str(v))
+            check = check.replace("{" + k + "}", str(v))
+        entries.append({"id": eid, "scope": scope, "kind": cfg["kind"],
+                        "executor": cfg["executor"], "model": cfg["model"],
+                        "effort": cfg["effort"], "depth": cfg["depth"], "task": cfg["task"],
+                        "args": args, "check": check, "timeout": cfg["timeout"],
+                        "prompt": prompt})
+    if problems:
+        die(f"dispatch --batch: {mp}: {len(problems)} problem(s)\n"
+            + "\n".join(f"  - {p}" for p in problems), 2)
+    return conc, entries
+
+
+def adapter_argv(en):
+    """The two launch shapes (prompt always last, behind `--`: a brief opening with `---`
+    frontmatter or `-m ` is otherwise argv, not prompt). effort for claude is a label only —
+    the CLI takes no effort flag; it still rides the exec field so PRIORS keeps its axis."""
+    if en["executor"] == "claude":
+        return ["claude", "-p", "--output-format", "json", "--model", en["model"],
+                *en["args"], "--", en["prompt"]]
+    return ["codex", "exec", "-m", en["model"], "-c",
+            f"model_reasoning_effort={en['effort']}", *en["args"], "--", en["prompt"]]
+
+
+def codex_usage(err_path):
+    """Banner and footer land in <id>.err (measured 0.144.6: "session id: …", "model: …" and
+    the two-line "tokens used" footer all ride stderr) — the same prev-line walk as
+    run_dispatch, then the same rollout/footer collection."""
+    try:
+        text = err_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    session_id = model = ""
+    footer_total = None
+    prev = ""
+    for line in text.splitlines():
+        s = line.strip()
+        if not session_id and s.startswith("session id:"):
+            session_id = s.split(":", 1)[1].strip()
+        elif not model and s.startswith("model:"):
+            model = s.split(":", 1)[1].strip()
+        elif prev == "tokens used":
+            try:
+                footer_total = int(s.replace(",", ""))
+            except ValueError:
+                pass
+        prev = s
+    return collect_usage(session_id, model, footer_total)
+
+
+def claude_usage(out_path, manifest_model):
+    """Measured shape: `claude -p --output-format json` prints ONE json object on stdout.
+    total_cost_usd is deliberately not recorded — $ derives from prices.yaml so PRIORS
+    prices every executor with one formula. Parse failure or missing usage → None: a gap
+    is a gap, and no number is ever invented."""
+    try:
+        obj = json.loads(out_path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(obj, dict) or not isinstance(obj.get("usage"), dict):
+        return None
+    u = obj["usage"]
+    try:
+        tcached = int(u.get("cache_read_input_tokens") or 0)
+        tin = (int(u.get("input_tokens") or 0) + tcached
+               + int(u.get("cache_creation_input_tokens") or 0))
+        tout = int(u.get("output_tokens") or 0)
+    except (TypeError, ValueError):
+        return None
+    mu = obj.get("modelUsage")
+    model = next(iter(mu)) if isinstance(mu, dict) and len(mu) == 1 else manifest_model
+    return {"tokens": tin + tout, "tin": tin, "tcached": tcached, "tout": tout,
+            "model": model}
+
+
+def journal_state(journal):
+    """Previous attempts per id, plus the ids that are DONE (latest exit line has rc==0 and
+    check_rc null-or-0). A relaunch mints a NEW dispatch id — two launches are two facts."""
+    attempts, latest_exit = {}, {}
+    for line in journal.read_text(encoding="utf-8").splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("event") in ("launch", "exit") and isinstance(rec.get("attempt"), int):
+            attempts[rec.get("id")] = max(attempts.get(rec.get("id"), 0), rec["attempt"])
+        if rec.get("event") == "exit":
+            latest_exit[rec.get("id")] = rec
+    done = {i for i, r in latest_exit.items()
+            if r.get("rc") == 0 and r.get("check_rc") in (None, 0)}
+    return attempts, done
+
+
+def run_batch(argv):
+    """DESIGN §3.6, batch waves: the deterministic half of a fleet — fan-out, concurrency,
+    id capture, parent stamping, usage collection, breaker checks, journaling, resume — in
+    one wrapper call. Selection (the manifest) and judgment (verdicts) stay with the model:
+    a check result is journal evidence and batch never writes ev:outcome."""
+    manifest, cli_conc, resume, fresh, dry_run = parse_batch_argv(argv)
+    mp = Path(manifest)
+    concurrency, entries = load_manifest(mp)
+    if cli_conc is not None:
+        concurrency = cli_conc
+    journal = mp.parent / f"{mp.stem}.journal.jsonl"
+    outdir = mp.parent / f"{mp.stem}.out"
+    total = len(entries)
+
+    def summary(launched, ok, failed, skipped, stopped):
+        return json.dumps(
+            {"total": total, "launched": launched, "ok": ok, "failed": failed,
+             "skipped": skipped, "stopped": stopped, "journal": str(journal),
+             "outdir": str(outdir)}, ensure_ascii=False)
+
+    if dry_run:
+        for en in entries:
+            print(f"{en['id']} exec={en['executor']}/{en['model']}/{en['effort']} "
+                  f"prompt={len(en['prompt'].encode('utf-8'))}B "
+                  f"check={'yes' if en['check'] else 'no'}", file=sys.stderr)
+        print(summary(0, 0, 0, 0, False))
+        sys.exit(0)
+
+    attempts, done_ids = {}, set()
+    if journal.exists():
+        if fresh:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            journal.rename(journal.with_name(f"{journal.name}.{stamp}.bak"))
+        elif resume:
+            attempts, done_ids = journal_state(journal)
+        else:
+            die(f"dispatch --batch: journal exists — --resume continues it, --fresh starts "
+                f"over ({journal})", 2)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    hp = find_hippo()
+    if hp is None:
+        print("dispatch --batch: no .hippo/ — skipping the ledger records", file=sys.stderr)
+    parent = os.environ.get("HIPPO_DISPATCH", "")
+    cwd = Path.cwd()
+    stop = threading.Event()
+    state = {"launched": 0, "ok": 0, "failed": 0, "done": 0,
+             "warned": False, "stopped": False}
+
+    def jrnl(rec):
+        with BATCH_LOCK:
+            with journal.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    def run_entry(en, attempt):
+        if stop.is_set():
+            return
+        did = "d" + os.urandom(16).hex()
+        e = {"ev": "dispatch", "id": did, "kind": en["kind"],
+             "exec": f"{en['executor']}/{en['model']}/{en['effort']}",
+             "scope": en["scope"], "depth": en["depth"]}
+        if en["task"]:
+            e["task"] = en["task"]
+        if parent:
+            e["parent"] = parent
+        bad = validate_event(e)
+        # Verdict and dispatch record are ONE locked region: the verdict prices the wave from
+        # the ledger, so each admitted child's row must land before the next verdict reads.
+        # Priced outside the lock, every worker admits against the pre-wave total (measured:
+        # 4 sol children through a $20 budget).
+        with BATCH_LOCK:
+            verdict, msg = fanout_verdict(hp, parent, en["model"])
+            if verdict == "stop":
+                first = not state["stopped"]
+                state["stopped"] = True
+                stop.set()
+                if first:
+                    print(msg, file=sys.stderr)
+                    jrnl({"t": now_iso(), "event": "stopped", "reason": msg})
+                return
+            if verdict == "warn":
+                first = not state["warned"]
+                state["warned"] = True
+                if first:
+                    print(msg, file=sys.stderr)
+            if bad:
+                # Same stance as single dispatch: a lost record makes a sound, never a blocked launch.
+                print(f"dispatch --batch: {en['id']}: record failed ({bad}) — the launch "
+                      "proceeds anyway", file=sys.stderr)
+                jrnl({"t": now_iso(), "event": "record_failed", "id": en["id"],
+                      "dispatch": did, "reason": bad})
+            elif hp is not None:
+                append_event(hp, e, src="wrapper")
+
+        jrnl({"t": now_iso(), "event": "launch", "id": en["id"], "attempt": attempt,
+              "dispatch": did})
+        with BATCH_LOCK:
+            state["launched"] += 1
+        out_p, err_p = outdir / f"{en['id']}.out", outdir / f"{en['id']}.err"
+        env = {**os.environ, "HIPPO_DISPATCH": did, "HIPPO_DEPTH": str(en["depth"])}
+        cmd = adapter_argv(en)
+        timed_out = False
+        with out_p.open("w", encoding="utf-8") as fo, err_p.open("w", encoding="utf-8") as fe:
+            try:
+                child = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=fo,
+                                         stderr=fe, env=env)
+            except OSError as oe:
+                fe.write(f"could not run {cmd[0]}: {oe}\n")
+                rc = 127
+            else:
+                try:
+                    rc = child.wait(timeout=en["timeout"])
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    rc = child.wait()
+                    timed_out = True
+
+        # Cost was incurred whatever rc says; a parse gap stays a gap in the ledger too.
+        usage = (claude_usage(out_p, en["model"]) if en["executor"] == "claude"
+                 else codex_usage(err_p))
+        # A usage row must join to a dispatch row: when the dispatch record failed, the
+        # tokens still reach the journal below, just not the ledger.
+        if usage is not None and hp is not None and bad is None:
+            with BATCH_LOCK:
+                append_event(hp, {"ev": "usage", "ref": did, **usage}, src="wrapper")
+
+        check_rc = None
+        if en["check"]:
+            try:
+                r = subprocess.run(en["check"], shell=True, cwd=str(cwd),
+                                   capture_output=True, text=True, timeout=CHECK_TIMEOUT)
+                check_rc, check_out = r.returncode, (r.stdout or "") + (r.stderr or "")
+            except subprocess.TimeoutExpired:
+                check_rc, check_out = -1, f"timeout {CHECK_TIMEOUT}s\n"
+            (outdir / f"{en['id']}.check").write_text(check_out, encoding="utf-8")
+
+        rec = {"t": now_iso(), "event": "exit", "id": en["id"], "attempt": attempt,
+               "dispatch": did, "rc": rc, "check_rc": check_rc}
+        if timed_out:
+            rec["timed_out"] = True
+        rec["tokens"] = usage["tokens"] if usage else None
+        jrnl(rec)
+        ok = rc == 0 and check_rc in (None, 0)
+        mark = "-" if check_rc is None else ("pass" if check_rc == 0 else "fail")
+        with BATCH_LOCK:
+            state["ok" if ok else "failed"] += 1
+            state["done"] += 1
+            print(f"[{state['done']}/{total}] {en['id']} rc={rc} check={mark} {did}",
+                  file=sys.stderr)
+
+    skipped = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futs = []
+        for en in entries:
+            if en["id"] in done_ids:
+                jrnl({"t": now_iso(), "event": "skip", "id": en["id"]})
+                skipped += 1
+                continue
+            futs.append(pool.submit(run_entry, en, attempts.get(en["id"], 0) + 1))
+        for f in concurrent.futures.as_completed(futs):
+            f.result()  # a wrapper bug dies loudly, never as a silently thinner wave
+
+    print(summary(state["launched"], state["ok"], state["failed"], skipped,
+                  state["stopped"]))
+    sys.exit(2 if state["stopped"] else (1 if state["failed"] else 0))
 
 
 def _find_key(obj, key):
