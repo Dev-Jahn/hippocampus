@@ -364,7 +364,10 @@ in the child's environment — the whole of the executor data plane's wiring (§
 launch made from inside a lane records that lane as `parent`. Since 1.10.0 the wrapper is a
 pass-through rather than an exec: it stays alive to *read* (never rewrite) the stream — the
 banner's session id and model, the "tokens used" footer — and at lane exit records `ev:usage`
-from the rollout or the footer (§9.6). It does not record an
+from the rollout or the footer (§9.6). Those markers ride codex's *stderr* (measured, 0.144.6;
+stdout carries only the agent's own output) — so stderr is the one piped-and-forwarded stream,
+and stdout passes through untouched. 1.10.0–1.11.0 read stdout instead, saw no session id, and
+silently recorded nothing — the stub test had encoded the wrong stream; fixed in 1.11.1. It does not record an
 outcome — the acceptance judgment belongs to main (through the CLI directly) or to the scribe
 (by inference); what the lane itself records under that id is a claim, never the verdict.
 

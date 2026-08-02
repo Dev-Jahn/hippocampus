@@ -1428,23 +1428,25 @@ def run_dispatch(argv):
     os.environ["HIPPO_DISPATCH"] = did
     os.environ["HIPPO_DEPTH"] = str(depth)
     # Not execvp anymore (§9.6): the wrapper stays alive as a pass-through so it can observe
-    # what the lane cost. Every line codex prints is forwarded unmodified — the wrapper still
-    # interprets nothing bound for codex; it only *reads* the banner (session id, model) and
-    # the "tokens used" footer as they stream by. stdin closed: left open, codex exec blocks.
+    # what the lane cost. codex prints the banner (session id, model) and the "tokens used"
+    # footer on *stderr* (measured, 0.144.6) — so only stderr is piped, forwarded line by
+    # line; stdout (the agent's own output) is inherited untouched, no pipe at all. The
+    # wrapper still interprets nothing bound for codex. stdin closed: left open, codex
+    # exec blocks.
     try:
         child = subprocess.Popen(
             ["codex", "exec", *rest],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True, errors="replace",
+            stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace",
         )
     except OSError as err:
         die(f"dispatch: could not run codex: {err}", 127)
     session_id = model = ""
     footer_total = None
     prev = ""
-    assert child.stdout is not None
-    for line in child.stdout:
-        sys.stdout.write(line)
-        sys.stdout.flush()
+    assert child.stderr is not None
+    for line in child.stderr:
+        sys.stderr.write(line)
+        sys.stderr.flush()
         s = line.strip()
         if not session_id and s.startswith("session id:"):
             session_id = s.split(":", 1)[1].strip()

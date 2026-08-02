@@ -222,11 +222,14 @@ def test_junk_depth_dies_with_usage(tmp_project, tmp_path):
 # --------------------------------------------------------------------------
 
 UUID = "01234567-abcd-7000-8000-0123456789ab"
+# Real codex (0.144.6, measured): banner and "tokens used" footer ride stderr; stdout
+# carries only the agent's own output. The stub reproduces that split.
 BANNER_BODY = (
     '#!/bin/sh\n'
-    'printf "OpenAI Codex stub\\n--------\\n"\n'
-    f'printf "model: gpt-5.6-luna\\nsession id: {UUID}\\n--------\\n"\n'
-    'printf "codex\\nOK\\ntokens used\\n18,169\\n"\n'
+    'printf "OpenAI Codex stub\\n--------\\n" >&2\n'
+    f'printf "model: gpt-5.6-luna\\nsession id: {UUID}\\n--------\\n" >&2\n'
+    'printf "codex\\nOK\\n"\n'
+    'printf "tokens used\\n18,169\\n" >&2\n'
 )
 
 
