@@ -48,7 +48,10 @@ REQUIRED = {
 # Per-ev key whitelist — anything else is rejected. A field that is not in the schema
 # (§3.2) would silently poison the derived aggregates (the distiller).
 ALLOWED = {
-    "dispatch": ("id", "kind", "exec", "scope", "task"),
+    # depth: how far this lane may re-delegate (§9.5 — 0 = leaf, told not to spawn; the clause
+    # is indexed, not deleted). parent: the dispatch id of the lane that launched this one —
+    # an unintended depth-2 becomes an event in the ledger, not a prohibition nobody can check.
+    "dispatch": ("id", "kind", "exec", "scope", "task", "depth", "parent"),
     "outcome": ("ref", "result", "attr", "rework", "by", "note"),
     "review": ("id", "base", "source", "findings"),
     "review-status": ("ref", "addressed", "at"),
@@ -95,7 +98,7 @@ ENUMS = {
 # kebab ASCII or nothing. An id derived from non-ASCII text collapses to the empty string, and
 # an id that is empty (or spelled differently every time) cannot supersede anything.
 DIRECTIVE_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-INT_FIELDS = ("findings", "rework", "ms", "tokens")
+INT_FIELDS = ("findings", "rework", "ms", "tokens", "depth")
 
 
 def validate_event(e):
@@ -566,12 +569,31 @@ def status_lines(hp):
         if entries:
             lines.append(f"· last: {one_line(entries[-1], 120)}")
     if reader == "executor":
-        # The lane's usage contract, generated where the lane actually reads (principle 5):
-        # briefs no longer have to hand-copy it, and it survives the lane's own compaction
-        # wherever the SessionStart gate re-injects this capsule.
+        # The lane's whole operating contract, generated where the lane actually reads
+        # (principle 5): briefs no longer hand-copy any of it, and it survives the lane's own
+        # compaction wherever the SessionStart gate re-injects this capsule. The re-delegation
+        # clause is indexed by depth (§9.5) — never enforced, the wrapper records what happens.
+        try:
+            depth = int(os.environ.get("HIPPO_DEPTH", "0"))
+        except ValueError:
+            depth = 0
         lines.append(
             "· report: hippo log outcome --result accepted|revised|refuted|no-go|lost "
             "--note '…' — no --ref needed; recorded as your claim, main judges"
+        )
+        if depth <= 0:
+            lines.append(
+                "· depth 0: do not re-delegate — implement it yourself; "
+                "no codex exec, no subagent, no workflow"
+            )
+        else:
+            lines.append(
+                f"· depth {depth}: you may dispatch children (`hippo dispatch …`) — "
+                "each child starts at depth 0 and is told not to re-delegate"
+            )
+        lines.append(
+            "· discipline: report no-go early when the premise does not hold; "
+            "long runs go to background — never poll with a foreground sleep"
         )
     return lines
 
@@ -849,6 +871,10 @@ def cmd_log(args):
         e.update(id=args.id, kind=args.kind, exec=args.exec, scope=args.scope)
         if args.task:
             e["task"] = args.task
+        if args.depth is not None:
+            e["depth"] = args.depth
+        if args.parent:
+            e["parent"] = args.parent
     elif args.ev == "outcome":
         # Inside a dispatched lane, HIPPO_DISPATCH names the one dispatch the writer is (§9.2):
         # the lane does not have to know its own hash to report what it observed.
@@ -1196,9 +1222,11 @@ def save_cursors(hp, cursors):
 
 
 DISPATCH_USAGE = (
-    "usage: hippo dispatch --kind <kind> --scope <scope> [--task <task-id>] "
+    "usage: hippo dispatch --kind <kind> --scope <scope> [--task <task-id>] [--depth N] "
     "[--] <codex exec args...>\n"
-    "       everything after -- goes to codex exec verbatim, even if it looks like a wrapper flag"
+    "       everything after -- goes to codex exec verbatim, even if it looks like a wrapper flag\n"
+    "       --depth 0 (default): the lane is told not to re-delegate; --depth 1: it may spawn\n"
+    "       children, which start at depth 0 (§9.5 — the clause is indexed, never enforced)"
 )
 
 
@@ -1207,7 +1235,7 @@ def split_dispatch_argv(argv):
 
     Why not argparse: the remaining arguments are codex's grammar (-m, -c k=v, -C dir …) and
     this parser has no business interpreting them. After `--`, even wrapper-shaped flags pass."""
-    kind = scope = task = ""
+    fields = {"kind": "", "scope": "", "task": "", "depth": ""}
     rest = []
     i, n = 0, len(argv)
     while i < n:
@@ -1215,28 +1243,30 @@ def split_dispatch_argv(argv):
         if a == "--":
             rest.extend(argv[i + 1 :])
             break
-        for name, key in (("--kind", "kind"), ("--scope", "scope"), ("--task", "task")):
+        for key in fields:
+            name = f"--{key}"
             if a == name:
                 if i + 1 >= n:
                     die(f"dispatch: {name} has no value\n{DISPATCH_USAGE}", 2)
-                val, i = argv[i + 1], i + 2
+                fields[key], i = argv[i + 1], i + 2
                 break
             if a.startswith(name + "="):
-                val, i = a[len(name) + 1 :], i + 1
+                fields[key], i = a[len(name) + 1 :], i + 1
                 break
         else:
             rest.append(a)
             i += 1
             continue
-        if key == "kind":
-            kind = val
-        elif key == "scope":
-            scope = val
-        else:
-            task = val
-    if not kind or not scope:
+    if not fields["kind"] or not fields["scope"]:
         die(DISPATCH_USAGE, 2)
-    return kind, scope, task, rest
+    if fields["depth"]:
+        try:
+            fields["depth"] = int(fields["depth"])
+        except ValueError:
+            die(f"dispatch: --depth must be an integer: {fields['depth']!r}\n{DISPATCH_USAGE}", 2)
+    else:
+        fields["depth"] = 0
+    return fields["kind"], fields["scope"], fields["task"], fields["depth"], rest
 
 
 def exec_label(rest):
@@ -1255,15 +1285,21 @@ def exec_label(rest):
 def run_dispatch(argv):
     """DESIGN §3.6. A failed record never blocks the launch — this surface's real job is running
     codex and the ledger is a side effect. But a lost record always makes a sound."""
-    kind, scope, task, rest = split_dispatch_argv(argv)
+    kind, scope, task, depth, rest = split_dispatch_argv(argv)
     did = "d" + os.urandom(16).hex()
+    # A launch from inside a lane is a child: record who spawned it (§9.5 — an unintended
+    # depth-2 becomes an event in the ledger, not a prohibition nobody can check).
+    parent = os.environ.get("HIPPO_DISPATCH", "")
     hp = find_hippo()
     if hp is None:
         print("dispatch: no .hippo/ — skipping the dispatch record", file=sys.stderr)
     else:
-        e = {"ev": "dispatch", "id": did, "kind": kind, "exec": exec_label(rest), "scope": scope}
+        e = {"ev": "dispatch", "id": did, "kind": kind, "exec": exec_label(rest), "scope": scope,
+             "depth": depth}
         if task:
             e["task"] = task
+        if parent:
+            e["parent"] = parent
         bad = validate_event(e)
         if bad:
             print(f"dispatch: record failed ({bad}) — the delegation proceeds anyway", file=sys.stderr)
@@ -1273,8 +1309,10 @@ def run_dispatch(argv):
     print(f"dispatch:{did}", flush=True)
     # The lane inherits its own dispatch id (§9.2): every hippo write it makes arrives as
     # src=executor, and `log outcome` needs no --ref. Set even when the record failed — the
-    # id was printed and is the lane's name either way.
+    # id was printed and is the lane's name either way. HIPPO_DEPTH indexes the
+    # re-delegation clause the lane's capsule will carry (§9.5).
     os.environ["HIPPO_DISPATCH"] = did
+    os.environ["HIPPO_DEPTH"] = str(depth)
     # Close stdin before handing over — left open, codex exec blocks waiting for input.
     with open(os.devnull) as devnull:
         os.dup2(devnull.fileno(), 0)
@@ -1526,6 +1564,8 @@ def build_parser():
     a.add_argument("--exec", required=True, help="executor/model/effort (executor = the agent that did the work)")
     a.add_argument("--scope", required=True)
     a.add_argument("--task")
+    a.add_argument("--depth", type=int, help="0 = leaf lane (told not to re-delegate), 1 = may spawn (§9.5)")
+    a.add_argument("--parent", help="dispatch id of the lane that launched this one")
     a.set_defaults(fn=cmd_log, writes=True)
     a = lsub.add_parser("outcome", help="verdict on a delegation")
     a.add_argument(
