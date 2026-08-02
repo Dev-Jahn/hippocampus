@@ -14,9 +14,12 @@ measurement against the Opus 5 guide.
    advice: main still decides the final routing from the difficulty and volume of the work at hand.
 2. `hippo task` — what can start now: a lane whose task shows a `waiting on:` line still has an
    unfinished dep and belongs in a later wave.
-3. `hippo directive list --active` — fold the live constraints (GPU range, hold policies, …) into
-   the brief. **Grep the shared brief (COMMON) against the individual brief for conflicting
-   constraint clauses first** (contradictory clauses once produced a fail-closed NO-GO).
+3. `hippo directive list --active` — check what the lanes will see. Directives whose audience
+   includes executors reach every lane through its own capsule (`status --inject`, re-injected
+   after compaction) — **do not copy them into briefs**; one source, no drift. Hand-fold a
+   constraint only where hooks cannot run and the lane might skip the bootstrap. **Grep COMMON
+   against the individual brief for conflicting clauses** (contradictory clauses once produced
+   a fail-closed NO-GO).
 4. Asset preflight: main verifies that the files, models and data the brief names actually exist.
 
 ## 1. Role routing
@@ -64,18 +67,26 @@ Filling the three groups of arguments:
 Mechanics:
 
 - The wrapper records `ev:dispatch` automatically and prints the dispatch id on the first line.
-- The wrapper plants `HIPPO_DISPATCH=<id>` in the lane's environment: every `hippo` write from
-  inside arrives as `src=executor`, and the lane can report what it observed with
-  `hippo log outcome --result … --note '…'` (no ref needed). That self-report is a **claim** —
-  the capsule shows it as `claims …` on the in-flight line, and the verdict still belongs to
-  main (§4). A lane's `hippo status --inject` carries the directives whose audience includes
-  executors plus a `report:` line with its usage contract — `.hippo/briefs/COMMON.md` is seeded
-  at init with the bootstrap ("run it first, re-run after compaction"), so keep that clause when
-  editing the file. With hippo installed and trusted in the Codex host, a lane re-receives that
-  capsule automatically at start and after every compaction — worth it for any long lane. In
-  Claude Code the lane inherits PATH, so bare `hippo` resolves; on the Codex host
-  it does not — put the absolute `bin/hippo` path into COMMON.md. A lane's `directive`
-  writes are recorded but never change the live set — a lane may propose, not rule.
+- The wrapper plants `HIPPO_DISPATCH=<id>` and `HIPPO_DEPTH` in the lane's environment: every
+  `hippo` write from inside arrives as `src=executor`, and the lane can report what it observed
+  with `hippo log outcome --result … --note '…'` (no ref needed). That self-report is a
+  **claim** — the capsule shows it as `claims …` on the in-flight line, and the verdict still
+  belongs to main (§4). A lane's `hippo status --inject` carries its audience's directives plus
+  its full operating tail (`report:` / `depth N:` / `discipline:` lines). With hippo installed
+  and trusted in the Codex host, that capsule re-arrives automatically at start and after every
+  compaction — worth it for any long lane. In Claude Code the lane inherits PATH, so bare
+  `hippo` resolves; on the Codex host it does not — put the absolute `bin/hippo` path into
+  COMMON.md. A lane's `directive` writes are recorded but never change the live set — a lane
+  may propose, not rule.
+- `--depth 1` marks an **orchestrator lane**: one task the size of a session, allowed to
+  dispatch children of its own — this is what the `ultra` tier and the shared ledger exist for.
+  Its children start at depth 0 and their capsules say not to re-delegate. Indexed, never
+  enforced: a child launched anyway is recorded with its `parent`, so an unintended depth-2 is
+  an event you can see in the ledger, not a rule nobody can check.
+- **COMMON.md carries only what nothing injects**: the seeded bootstrap clause (keep it when
+  editing), the absolute `bin/hippo` path on the Codex host, and genuinely wave-common task
+  background. Not directives and not lane discipline — the capsule carries both. Individual
+  briefs are task-specific content only (§3).
 - In Claude Code `hippo` is on PATH. **In Codex the plugin's `bin/` is not on PATH** — resolve
   `../../bin/hippo` relative to this SKILL.md into an absolute path and call that.
 - **cwd must be somewhere `.hippo/` is findable upward.** The repo root with `-C <worktree>`
@@ -103,17 +114,15 @@ dead reference nobody could open). (2) Scope and non-scope. (3) Verification dem
 and pre-register acceptance before starting — **as a property, not as an implementation
 instruction** ("fix it like this" clauses made two lanes diverge over four rounds; restating them
 as properties converged). (4) Where the report is saved plus a stdout summary. (5) Merge cautions
-(split hot files into sections in the brief, in advance). (6) **Report an early NO-GO when the
-premise does not reproduce** (a rejected research hypothesis is common). (7) Put long runs in the
-background and wait through Monitor or notification — **never poll with a foreground sleep** (that
-chained into 10-minute hard timeouts). (8) **State plainly that re-delegation is forbidden**
-("implement it yourself; no codex exec, no subagent, no re-entering the project's own harness" —
-without that clause one lane spiraled through 336k tokens of re-delegation and ended with zero
-commits). (9) A verification lane reproduces dynamically **in a tempdir only** — the real repo
-state and documents are untouchable ("read-only" as an instruction alone did not prevent
-contamination). (10) Tell the lane it may record what it observed — `hippo log outcome
---result no-go|… --note '…'`, no ref needed inside the lane — and that this lands as a claim
-main will judge, not as the verdict.
+(split hot files into sections in the brief, in advance). (6) A verification lane reproduces
+dynamically **in a tempdir only** — the real repo state and documents are untouchable
+("read-only" as an instruction alone did not prevent contamination).
+
+Deliberately absent from briefs since 1.9.0: early no-go, background instead of foreground
+sleep, the re-delegation rule (now indexed by `--depth`, §2), and permission to record
+observations — all of it rides the lane's capsule, generated, one source. A brief is
+task-specific content only. (The 336k-token re-delegation spiral that motivated the old blanket
+clause is why depth 0 lanes still receive it — from the capsule, not from your prose.)
 
 ## 4. Verification budget (proportional to evidence, not a fixed ritual)
 

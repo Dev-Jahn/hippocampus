@@ -157,3 +157,61 @@ def test_cli_dispatch_honors_double_dash(tmp_project, tmp_path, run_hippo):
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.splitlines()[1:] == ["exec", "--kind", "codex-kind"]
     assert json.loads((tmp_project / ".hippo" / "ledger.jsonl").read_text())["kind"] == "k"
+
+
+# --------------------------------------------------------------------------
+# depth and parent (§9.5, 1.9.0) — indexed, recorded, never enforced
+# --------------------------------------------------------------------------
+
+def _wrapper(tmp_project, tmp_path, args, env=None, body='#!/bin/sh\nexit 0\n'):
+    full = {**os.environ, **(env or {}), "PATH": _stub_codex(tmp_path, body)}
+    return subprocess.run(
+        ["bash", str(SCRIPTS_DIR / "dispatch.sh"), *args],
+        cwd=tmp_project, env=full, capture_output=True, text=True, timeout=30,
+    )
+
+
+def test_depth_defaults_to_zero_and_is_recorded(tmp_project, tmp_path):
+    proc = _wrapper(tmp_project, tmp_path, ["--kind", "impl", "--scope", "leaf"])
+    assert proc.returncode == 0, proc.stderr
+    (event,) = read_ledger(tmp_project)
+    assert event["depth"] == 0
+    assert "parent" not in event
+
+
+def test_depth_flag_is_recorded_and_planted(tmp_project, tmp_path):
+    body = '#!/bin/sh\nprintf "DEPTH=%s DISPATCH=%s" "$HIPPO_DEPTH" "$HIPPO_DISPATCH"\n'
+    proc = _wrapper(tmp_project, tmp_path,
+                    ["--kind", "impl", "--scope", "orchestrator", "--depth", "1"], body=body)
+    assert proc.returncode == 0, proc.stderr
+    (event,) = read_ledger(tmp_project)
+    assert event["depth"] == 1
+    did = proc.stdout.splitlines()[0].removeprefix("dispatch:")
+    assert f"DEPTH=1 DISPATCH={did}" in proc.stdout
+
+
+def test_a_launch_inside_a_lane_records_its_parent(tmp_project, tmp_path):
+    proc = _wrapper(tmp_project, tmp_path, ["--kind", "impl", "--scope", "child"],
+                    env={"HIPPO_DISPATCH": "dparent1", "HIPPO_DEPTH": "1"})
+    assert proc.returncode == 0, proc.stderr
+    (event,) = read_ledger(tmp_project)
+    assert event["parent"] == "dparent1"
+    assert event["depth"] == 0          # children start at depth 0 unless told otherwise
+    assert event["src"] == "wrapper"    # the wrapper's own record is never mis-stamped executor
+
+
+def test_depth_after_double_dash_belongs_to_codex(tmp_project, tmp_path):
+    body = '#!/bin/sh\nprintf "%s\\n" "$@"\n'
+    proc = _wrapper(tmp_project, tmp_path,
+                    ["--kind", "impl", "--scope", "x", "--", "--depth", "9"], body=body)
+    assert proc.returncode == 0, proc.stderr
+    (event,) = read_ledger(tmp_project)
+    assert event["depth"] == 0
+    assert "--depth" in proc.stdout.splitlines()
+
+
+def test_junk_depth_dies_with_usage(tmp_project, tmp_path):
+    proc = _wrapper(tmp_project, tmp_path,
+                    ["--kind", "impl", "--scope", "x", "--depth", "much"])
+    assert proc.returncode == 2
+    assert "--depth must be an integer" in proc.stderr

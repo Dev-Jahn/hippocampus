@@ -238,3 +238,47 @@ def test_init_seeds_the_common_bootstrap(tmp_path, run_hippo):
     seed = (tmp_path / ".hippo" / "briefs" / "COMMON.md").read_text(encoding="utf-8")
     assert "hippo status --inject" in seed
     assert "compaction" in seed
+
+
+# --------------------------------------------------------------------------
+# depth-indexed capsule tail (§9.5, 1.9.0)
+# --------------------------------------------------------------------------
+
+def test_leaf_lane_capsule_forbids_re_delegation(tmp_project, run_hippo):
+    out = run_hippo(["status", "--inject"], cwd=tmp_project,
+                    env={"HIPPO_DISPATCH": "dlane1"})
+    assert "· depth 0: do not re-delegate" in out.stdout
+    assert "· discipline:" in out.stdout
+
+
+def test_orchestrator_lane_capsule_grants_children(tmp_project, run_hippo):
+    out = run_hippo(["status", "--inject"], cwd=tmp_project,
+                    env={"HIPPO_DISPATCH": "dlane1", "HIPPO_DEPTH": "1"})
+    assert "· depth 1: you may dispatch children" in out.stdout
+    assert "do not re-delegate" not in out.stdout.split("· depth 1")[0]
+    assert "each child starts at depth 0" in out.stdout
+
+
+def test_main_capsule_has_no_lane_tail(tmp_project, run_hippo):
+    out = run_hippo(["status", "--inject"], cwd=tmp_project)
+    assert "depth" not in out.stdout
+    assert "discipline" not in out.stdout
+
+
+def test_log_dispatch_takes_depth_and_parent(tmp_project, run_hippo):
+    run_hippo(["log", "dispatch", "--id", "dp1", "--kind", "impl",
+               "--exec", "codex/sol/high", "--scope", "parent lane", "--depth", "1"],
+              cwd=tmp_project)
+    proc = run_hippo(["log", "dispatch", "--id", "dc1", "--kind", "impl",
+                      "--exec", "codex/sol/high", "--scope", "child lane",
+                      "--parent", "dp1"], cwd=tmp_project)
+    assert proc.returncode == 0, proc.stderr
+    rows = {e["id"]: e for e in read_ledger(tmp_project) if e.get("ev") == "dispatch"}
+    assert rows["dp1"]["depth"] == 1
+    assert rows["dc1"]["parent"] == "dp1"
+
+    bad = run_hippo(["log", "raw", json.dumps(
+        {"ev": "dispatch", "id": "dx", "kind": "impl", "exec": "codex/sol/high",
+         "scope": "x", "depth": "one"})], cwd=tmp_project)
+    assert bad.returncode != 0
+    assert "depth must be an integer" in bad.stderr

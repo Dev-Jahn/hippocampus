@@ -90,8 +90,9 @@ hippo directive add [typed flags…]        # --lifetime turn|phase|durable
 hippo directive withdraw <directive-id>
 hippo prior show
 hippo prior distill [--days N]
-hippo dispatch --kind K --scope S [--task T] [--] <codex exec args…>
+hippo dispatch --kind K --scope S [--task T] [--depth N] [--] <codex exec args…>
                                      # codex exec wrapper: records ev:dispatch, prints its id
+                                     # --depth 1 = orchestrator lane (may spawn; children start at 0)
 ```
 
 Mental model: facts go in through one door (`log <event>`); bare `hippo log`

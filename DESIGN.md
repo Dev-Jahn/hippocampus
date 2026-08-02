@@ -143,6 +143,11 @@ optional `src` (`scribe|cli|wrapper|executor`).
   then judges it. The same line holds for directives: a lane's directive events are recorded
   but never fold into the live set — a lane may propose, not rule. Both are one rendering rule
   in a generated view (principle 5), not a blocked write.
+- `dispatch.depth` (int, absent = 0) and `dispatch.parent` (§9.5, built in 1.9.0): depth is how
+  far a lane may re-delegate — 0 is a leaf whose capsule says so, 1 may spawn children that
+  start at 0. `parent` is stamped by the wrapper from `HIPPO_DISPATCH` when a launch happens
+  inside a lane, which turns an unintended depth-2 into a ledger event instead of a prohibition
+  nobody can check. Neither field is enforced anywhere.
 - `directive.audience ∈ {main, executor, all}` (absent = all — §9.4, built in 1.8.0): `lifetime`
   is *when* a directive holds, audience is *who* it binds. `status --inject` filters by reader —
   inside a lane (HIPPO_DISPATCH set) the capsule carries `executor|all`, everywhere else
@@ -227,7 +232,7 @@ hippo directive withdraw <directive-id>
 hippo prior show
 hippo prior distill [--days N]              # compute the scorecard, then have the distiller
                                             #   clerk write PRIORS.md around it
-hippo dispatch --kind K --scope S [--task T] [--] <codex exec args…>   # §3.6
+hippo dispatch --kind K --scope S [--task T] [--depth N] [--] <codex exec args…>   # §3.6
 hippo scribe --transcript P --session S     # internal surface the Stop hook calls detached
 ```
 
@@ -343,8 +348,9 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
 A codex exec wrapper: the point that already knows the model and effort from its own argv is
 exactly the point to collect them automatically (principle 6). It takes the `--kind`, `--scope` and
 `--task` labels, records `ev:dispatch`, prints the dispatch id on stdout's first line, and then runs
-`codex exec … < /dev/null` unchanged. It also plants `HIPPO_DISPATCH=<id>` in the child's
-environment — the whole of the executor data plane's wiring (§9.2). It does not record an
+`codex exec … < /dev/null` unchanged. It also plants `HIPPO_DISPATCH=<id>` and `HIPPO_DEPTH`
+in the child's environment — the whole of the executor data plane's wiring (§9.2, §9.5). A
+launch made from inside a lane records that lane as `parent`. It does not record an
 outcome — the acceptance judgment belongs to main (through the CLI directly) or to the scribe
 (by inference); what the lane itself records under that id is a claim, never the verdict.
 
@@ -483,14 +489,18 @@ what shipped is the worklog, ordering is `task deps`, and a merge hazard belongs
 the lane that will cause it (dispatch skill §5). A re-entry document is what appears when those
 surfaces go unused — not a gap in this design.
 
-When the reader is a dispatched lane (`HIPPO_DISPATCH` set), one fixed line is appended —
+When the reader is a dispatched lane (`HIPPO_DISPATCH` set), a three-line operating tail is
+appended —
 
 ```
 · report: hippo log outcome --result … --note '…' — no --ref needed; recorded as your claim, main judges
+· depth 0: do not re-delegate — implement it yourself; no codex exec, no subagent, no workflow
+· discipline: report no-go early when the premise does not hold; long runs go to background — never poll with a foreground sleep
 ```
 
-— the lane's whole usage contract, generated where the lane reads it (principle 5) instead of
-hand-copied into every brief.
+— the lane's whole operating contract, generated where the lane reads it (principle 5) instead
+of hand-copied into every brief. The depth line follows `HIPPO_DEPTH` (§9.5): at depth ≥ 1 it
+grants dispatching children instead, and notes they start at depth 0.
 
 Three rules govern the directive block:
 
@@ -533,7 +543,7 @@ malformed JSON isolated into failures), and digest_lite basics. Around twenty of
 - Everything else from 0.x → retired to the `legacy` branch. Audit report:
   `~/workspace/b200-2-research-cc-audit/`
 
-## 9. The shared brain (data plane §9.2–9.4 shipped in 1.8.0; §9.5–9.6 remain drafts)
+## 9. The shared brain (§9.2–9.4 shipped in 1.8.0, §9.5 depth in 1.9.0; §9.6 remains a draft)
 
 Today a delegated executor starts blind. Everything it needs — the live directives, the task it
 serves, what has already been tried — is re-typed by hand into a brief, which is why `COMMON.md`
@@ -621,13 +631,15 @@ This directly inverts the dispatch skill's "no re-delegation" clause, which exis
 measured loss (one lane spiralled through 336k tokens and produced zero commits). The clause should
 not be deleted — it should be indexed:
 
-- `--depth 0` (default) — unchanged. The brief carries the no-re-delegation clause automatically.
+- `--depth 0` (default) — unchanged. The **capsule** carries the no-re-delegation clause
+  automatically (built in 1.9.0 — the clause moved out of briefs entirely).
 - `--depth 1` — may spawn. Its children are depth 0 and receive that clause.
 
 Recording depth makes an unintended depth 2 an event in the ledger rather than a prohibition nobody
-can check. Model routing for such a dispatch (the reason to pin a strong model at the top and a
+can check (built: the wrapper stamps `parent` from `HIPPO_DISPATCH` on any launch made inside a
+lane). Model routing for such a dispatch (the reason to pin a strong model at the top and a
 cheap one underneath) belongs in a visible `.hippo/routing.yaml`, not compiled into the CLI: it is a
-claim about *prices*, and prices go stale between releases.
+claim about *prices*, and prices go stale between releases — this part is not built.
 
 ### 9.6 PRIORS has no cost axis, and that is the actual blocker
 
