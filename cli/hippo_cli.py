@@ -992,8 +992,11 @@ def cmd_distill(args):
     # The raw ledger is deliberately not sent: everything the page needs is in the fact sheet,
     # and handing over 300 JSONL lines only offers something to compute from — badly — and to
     # quote from.
+    # The generation time is on the sheet because the clerk may not invent numbers — without
+    # it, a disciplined clerk correctly writes "Generated: unavailable" (observed 2026-08-02).
     payload = (
-        f"# computed facts (window: {args.days} days, {len(kept)} events)\n\n"
+        f"# computed facts (generated {now_iso()}, window: {args.days} days, "
+        f"{len(kept)} events)\n\n"
         + prior_facts(kept, now)
         + "\n\n# current PRIORS.md\n\n"
         + priors
