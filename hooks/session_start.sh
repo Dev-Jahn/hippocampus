@@ -76,4 +76,22 @@ root="${CLAUDE_PLUGIN_ROOT:-$(dirname "$script_dir")}"
 # cd into the session's cwd (as Stop does): the CLI re-derives .hippo/ from
 # its own working directory, which is not necessarily this hook's.
 cd "$cwd" || exit 0
-exec "$root/bin/hippo" status --inject
+capsule="$("$root/bin/hippo" status --inject 2>/dev/null)"
+[ -n "$capsule" ] || exit 0
+
+# The capsule ships as JSON, not bare text: codex 0.146 parses SessionStart stdout
+# strictly as JSON and rejects anything else ("hook returned invalid session start
+# JSON output" — 0.144 accepted the bare text, so this broke on a host upgrade, not
+# on a hippo change). Claude Code reads the same `hookSpecificOutput.additionalContext`
+# shape, so one output serves both hosts — the alternative, branching on the host, is a
+# guess about which host is running and drifts the moment either contract moves.
+if [ "$HAVE_JQ" = "1" ]; then
+  jq -n --arg c "$capsule" \
+    '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $c}}'
+else
+  printf '%s' "$capsule" | python3 -c '
+import json, sys
+print(json.dumps({"hookSpecificOutput": {
+    "hookEventName": "SessionStart", "additionalContext": sys.stdin.read()}}))
+'
+fi
