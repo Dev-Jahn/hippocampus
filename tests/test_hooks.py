@@ -60,6 +60,19 @@ def test_session_start_hook_silent_noop_when_uninitialized(uninitialized_dir, re
     assert proc.stderr == ""
 
 
+def _capsule(proc):
+    """The capsule out of a SessionStart hook run.
+
+    Both hosts read `hookSpecificOutput.additionalContext`; codex 0.146 additionally
+    *requires* it (bare text is rejected as invalid JSON, measured on a host upgrade),
+    so the JSON envelope is the contract this suite pins.
+    """
+    out = json.loads(proc.stdout)
+    hs = out["hookSpecificOutput"]
+    assert hs["hookEventName"] == "SessionStart"
+    return hs["additionalContext"]
+
+
 def test_session_start_hook_emits_capsule_when_initialized(tmp_project, repo_root):
     payload = {
         "session_id": "sess-z",
@@ -69,7 +82,7 @@ def test_session_start_hook_emits_capsule_when_initialized(tmp_project, repo_roo
     }
     proc = _run_hook(repo_root / "hooks" / "session_start.sh", payload, cwd=tmp_project)
     assert proc.returncode == 0
-    assert proc.stdout.strip().startswith("[hippo]")
+    assert _capsule(proc).strip().startswith("[hippo]")
 
 
 def test_session_start_uses_stdin_cwd_not_process_cwd(tmp_project, repo_root):
@@ -89,7 +102,7 @@ def test_session_start_uses_stdin_cwd_not_process_cwd(tmp_project, repo_root):
         repo_root / "hooks" / "session_start.sh", payload, cwd=repo_root
     )
     assert proc.returncode == 0
-    assert proc.stdout.strip().startswith("[hippo]"), (
+    assert _capsule(proc).strip().startswith("[hippo]"), (
         f"hook must honor the stdin cwd, got stdout={proc.stdout!r}"
     )
 
@@ -136,8 +149,9 @@ def test_session_start_walks_through_a_worktree_for_a_lane(tmp_project, repo_roo
     proc = _run_hook(repo_root / "hooks" / "session_start.sh", payload, cwd=lane,
                      env={"HIPPO_DISPATCH": "dlane1"})
     assert proc.returncode == 0
-    assert proc.stdout.strip().startswith("[hippo]")
-    assert "· report: hippo log outcome" in proc.stdout
+    capsule = _capsule(proc)
+    assert capsule.strip().startswith("[hippo]")
+    assert "· report: hippo log outcome" in capsule
 
 
 def test_session_start_stays_conservative_without_the_gate(tmp_project, repo_root):

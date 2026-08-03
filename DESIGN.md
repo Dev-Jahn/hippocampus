@@ -274,7 +274,12 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
 `hooks/hooks.json`:
 
 - **SessionStart** (startup, resume, clear, compact): `hooks/session_start.sh` → silent exit 0 with
-  no `.hippo/`; otherwise `hippo status --inject` (the §6 format). Re-injection after a compact is
+  no `.hippo/`; otherwise `hippo status --inject` (the §6 format), wrapped as
+  `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "…"}}`. Both
+  hosts read that shape; codex 0.146 *requires* it (0.144 took the bare text, so the capsule
+  silently stopped arriving on a host upgrade — the failure mode a shared contract has: it moves
+  under you). One envelope for both hosts rather than a branch on which one is running: the
+  branch would be a guess that rots the moment either contract moves. Re-injection after a compact is
   what makes it a **context keeper**: live directives survive compaction (the fix for the loss
   measured across 86 compactions). Under `HIPPO_DISPATCH` the walk crosses a worktree's `.git`
   file (§3.3), so a dispatched lane whose host fires hooks gets the same treatment — its
@@ -489,7 +494,7 @@ engine (measured on 0.144.6).
 | | Claude Code | Codex CLI |
 |---|---|---|
 | Manifest | `.claude-plugin/plugin.json` | `.codex-plugin/plugin.json` (names the `skills` and `hooks` paths) |
-| Hooks | `hooks/hooks.json` | **the same file** — event keys (PascalCase), matcher, stdin payload fields and SessionStart stdout injection are all identical |
+| Hooks | `hooks/hooks.json` | **the same file** — event keys (PascalCase), matcher, stdin payload fields and the SessionStart `hookSpecificOutput.additionalContext` envelope are all identical (codex ≥0.146 rejects bare text, §3.4) |
 | Plugin `bin/` | added to PATH automatically | **not added** → a skill resolves `bin/hippo` relative to its own SKILL.md |
 | Transcript | Claude JSONL | codex rollout JSONL — `digest_lite.py` detects the format from the first lines and reduces both to the same line vocabulary |
 

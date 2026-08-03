@@ -481,7 +481,9 @@ def test_m5_session_start_hook_works_without_jq(tmp_project, repo_root, tmp_path
         env={"PATH": path_value},
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip().startswith("[hippo]"), (
+    # The fallback owes the same JSON envelope as the jq path (hosts parse it strictly).
+    capsule = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert capsule.strip().startswith("[hippo]"), (
         f"without jq the hook must fall back to python3, not die mute; "
         f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     )
