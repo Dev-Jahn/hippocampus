@@ -117,8 +117,9 @@ def test_difficulty_picks_the_tier_and_the_effort(tmp_project, tmp_path, run_hip
 
 def test_the_ladder_is_printed_once_per_executor_from_the_price_sheet(tmp_project, tmp_path,
                                                                       run_hippo):
-    """Read off prices.yaml at call time — cheapest input price, most expensive, second most
-    expensive — so a price refresh moves the tiers instead of a config file going stale (§4)."""
+    """Read off prices.yaml at call time — the lowest, highest and second-highest *price
+    level*, so a price refresh moves the tiers instead of a config file going stale (§4). Levels,
+    not rows: fable-5 shares fable-5-1's price and must not become `mid`."""
     manifest = _manifest(tmp_project, "wave.yaml", """\
         defaults:
           kind: impl
@@ -136,7 +137,7 @@ def test_the_ladder_is_printed_once_per_executor_from_the_price_sheet(tmp_projec
     ladders = [ln for ln in proc.stdout.splitlines() if ln.startswith("ladder ")]
     assert ladders == [
         "ladder codex: cheap gpt-5.6-luna · mid gpt-5.6-sol · top gpt-6-astra",
-        "ladder claude: cheap claude-haiku-4-5 · mid claude-fable-5 · top claude-fable-5-1"]
+        "ladder claude: cheap claude-haiku-4-5 · mid claude-opus-5 · top claude-fable-5-1"]
     assert _row(proc, "other")[6] == "claude/claude-haiku-4-5/medium"
 
 

@@ -2892,18 +2892,24 @@ PLAN_TIERS = ("cheap", "mid", "top")
 
 
 def price_ladder(executor, prices):
-    """The executor's three tiers, read off the price sheet: the cheapest input price is
-    `cheap`, the most expensive is `top`, the second most expensive is `mid`. Read at call
-    time, so a price refresh moves the ladder — the frozen version of this is the routing.yaml
-    the NOT-list retired (§4)."""
+    """The executor's three tiers, read off the price sheet's *distinct input prices*: the
+    lowest price level is `cheap`, the highest is `top`, the second highest is `mid`. Levels,
+    not rows — two generations of one model sit at the same price (fable-5 and fable-5-1,
+    opus-4-8 and opus-5), and "second most expensive row" would make `mid` a `top` twin. Within
+    a level the sheet's first row wins, because the sheet lists the current model first. Read
+    at call time, so a price refresh moves the ladder — the frozen version of this is the
+    routing.yaml the NOT-list retired (§4)."""
     prefix = "claude-" if executor == "claude" else "gpt-"
-    models = sorted((m for m in prices["models"] if str(m).startswith(prefix)),
-                    key=lambda m: (prices["models"][m].get("input", 0.0), str(m)))
-    if not models:
+    by_price = {}
+    for m, v in prices["models"].items():
+        if str(m).startswith(prefix):
+            by_price.setdefault(float((v or {}).get("input", 0.0)), m)
+    if not by_price:
         return {}
-    # A sheet carrying one or two models for this executor still has three tiers: they
+    levels = [by_price[p] for p in sorted(by_price)]
+    # A sheet carrying one or two levels for this executor still has three tiers: they
     # collapse onto what exists rather than naming a model that does not.
-    return dict(zip(PLAN_TIERS, (models[0], models[max(0, len(models) - 2)], models[-1])))
+    return dict(zip(PLAN_TIERS, (levels[0], levels[max(0, len(levels) - 2)], levels[-1])))
 
 
 def entry_exec(en):

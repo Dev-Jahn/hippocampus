@@ -538,9 +538,10 @@ can know before a launch is how hard *this* brief is, which main has been guessi
 priors page. So the judge is asked five literal questions about each entry's brief — scope,
 novelty, how completely the goal is specified, whether a machine could confirm completion, and
 which kind of work it is — and code does everything after that: the tier the difficulty demands,
-the model that tier resolves to on `prices.yaml` (cheapest input price is `cheap`, the most
-expensive is `top`, the second most expensive is `mid`, read at call time so a price refresh
-moves the ladder), the effort, and then at most one step of adjustment from the ledger's own
+the model that tier resolves to on `prices.yaml` (the lowest *price level* is `cheap`, the
+highest is `top`, the second highest is `mid` — levels, not rows, because two generations of
+one model share a price and would otherwise make `mid` a twin of `top`; within a level the
+sheet's first row wins; read at call time so a price refresh moves the ladder), the effort, and then at most one step of adjustment from the ledger's own
 cells — a tier this kind keeps failing at goes up one, and the cheapest tier whose record clears
 the bar takes the work. A probe on real briefs (three algorithm briefs from a consuming project
 against one cross-cutting design brief, 20 questions, 0.7s) separated them cleanly: scope 0.9 vs
