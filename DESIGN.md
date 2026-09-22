@@ -482,6 +482,41 @@ orchestrator of round one had diagnosed once and fixed globally) were paid as 13
 repair lanes. Batch replaces the loop's ceremony, not its judgment — mass-identical failures
 still deserve a diagnosis before a repair manifest (the dispatch skill says so now).
 
+**Harvest triage.** What remained expensive after batch was the *reading*: the $9.23 above is
+almost entirely main opening 222 lane reports to reach 222 verdicts, and the 130 identical
+failures were paid as 130 repair lanes because nothing clustered them first. The judge (§3.9)
+moves the reading, and only the reading: at every lane's exit the wrapper hands it that lane
+whole — the full brief, the full report, the stderr tail with codex's banner filtered out, the
+check output, and `git status --short` + `diff --stat` of the directory the lane worked in —
+and asks eight literal questions about it. Code, not the model, turns the answers into a
+**route** (`failed` from the exit codes alone, then `no-go-candidate`, `accept-candidate`,
+else `escalate`) and a `verify` hint, against thresholds that sit in `clerks/jev/harvest.yaml`
+next to the questions they belong to. A route is evidence of exactly the standing a check rc
+has — `accept-candidate` is not acceptance, and batch still writes no `ev:outcome`. The record
+lands in the journal as a `triage` line with every probability, and the progress line gains
+`triage=<route>`. Over budget, the state is trimmed in one fixed order (stderr, brief,
+changes, then the report from its *head*, since a lane's summary of itself is at the end) and
+the record names what was cut — no silent shortening, and no answer invented for a judge that
+failed: `route: null` and an `ev:clerk name:jev-harvest ok:false` row are the record.
+
+`--batch <manifest> --harvest` launches nothing. It re-triages every exited entry (two
+harvests are two facts; the latest is what a reader reads), clusters the failures, and prints
+one table — id, rc, check, the lane's own claim, route, verify, the numbers that produced the
+route, and the path to the file that holds the diagnosis — sorted so what needs main's eyes
+comes first. Clustering is greedy and one-pass: each failure is asked once against the
+representatives found so far — "would one fix clear both?" — and joins the first above
+`same_cause_at`, else opens its own cluster. It is a high threshold on purpose, since a wrong
+merge hides a defect behind another's diagnosis while a wrong split costs a second read. The
+footer names each cluster and then hands main the two next commands: a
+`--resume --causes transient,environment` that relaunches only the failures a relaunch could
+clear (a `capability` or `spec` failure needs a new brief, not another run), and the
+`log outcome --from-batch` line for `<manifest>.verdicts.jsonl`, which `--harvest` writes with
+one row per `accept-candidate` and none for a failure — a failure needs a diagnosis, not a
+verdict. The note on each row says main confirmed it, because main is expected to read the
+table and pipe the file only if that is true. All of this exists only where the judge does:
+with no `TYPESAFE_API_KEY` there is no triage record, no column and no verdicts file, and
+`--harvest` prints the same table with its judged columns as `-` and one stderr line saying so.
+
 ### 3.6b The distiller split — the clerk writes the page, the code does the sums
 
 `hippo prior distill` computes the whole scorecard itself — the dispatch ⋈ outcome join, the

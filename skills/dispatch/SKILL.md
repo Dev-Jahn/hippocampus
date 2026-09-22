@@ -125,7 +125,8 @@ wrapper instead of looping launches through your own turns (measured: a 222-lane
 the launch/harvest loop driving it ~$13 in context re-feeds):
 
 ```bash
-hippo dispatch --batch wave.yaml [--concurrency N] [--resume | --fresh] [--dry-run]
+hippo dispatch --batch wave.yaml [--concurrency N] [--resume [--causes a,b] | --fresh]
+                                 [--dry-run | --harvest]
 ```
 
 ```yaml
@@ -154,6 +155,18 @@ entries:
   its check the same way, diagnose the common cause before writing a repair manifest — the batch
   moved judgment out of the launch loop, so nothing inside it will do this for you (measured: 130
   identical import failures were one missing `pytest.ini`, paid as 130 repair lanes).
+- **Harvest the wave before you read any of it**: `hippo dispatch --batch wave.yaml --harvest`
+  launches nothing and prints one table — per lane a route, the numbers behind it, and where its
+  diagnosis is — plus a cluster line per group of failures one fix would clear. Read the
+  escalations first, then the no-gos; open a lane's report when the table tells you to, not by
+  default. **`accept-candidate` is not acceptance** — it means a judge read the report and found
+  nothing to stop on, which is evidence of the same standing as a passing check (§4 still
+  decides, and the `verify` column says which lanes are worth a verification lane). The clusters
+  are what the previous bullet asks for, already computed: repair one cluster with one brief,
+  never one lane at a time. Then `--resume --causes transient,environment` to relaunch only what
+  a relaunch could clear, and pipe `wave.verdicts.jsonl` through `log outcome --from-batch` for
+  the lanes you actually accepted — delete the rows you did not. With no `TYPESAFE_API_KEY`
+  there is no judge: the table still prints, with those columns empty.
 - Per-entry prompt = `defaults.briefs` contents + entry `brief` + inline `prompt`, with `{var}`
   substitution in the prompt and the check. Outputs land in `<manifest-stem>.out/` per entry;
   one summary JSON line arrives on stdout at the end.
