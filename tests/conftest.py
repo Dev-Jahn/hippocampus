@@ -50,6 +50,10 @@ def run_hippo():
         full_env = dict(os.environ)
         if env:
             full_env.update(env)
+        # The judge is off unless a test asks for it: a developer machine has a live
+        # TYPESAFE_API_KEY in the environment, and auto-resolution would turn any scribe run
+        # here into a real HTTP call (DESIGN §3.9).
+        full_env.setdefault("HIPPO_JEV_BACKEND", "off")
         return subprocess.run(
             [str(HIPPO_BIN), *args],
             cwd=str(cwd),

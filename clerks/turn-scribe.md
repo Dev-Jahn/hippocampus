@@ -9,6 +9,12 @@ Report on the digest. The two lists before it are context, and they exist for th
 id you coin for something that already has one does not update it, it silently forks it. Reuse
 from the lists; do not go looking for them in the digest.
 
+A `# gate hints` section may also appear. Those are advisory probabilities from a separate judge
+that read the same digest and nothing else — a low value means look harder before you record that
+kind of event, and a high one means look again if you found nothing. They are never evidence:
+never record an event because a hint is high, and never doubt one the digest plainly shows because
+a hint is low. When the section is missing, nothing is implied by its absence.
+
 Your output is consumed by a validator, not by a human:
 **emit exactly one JSON object, with no code fence**. Do not add a single character of other text.
 

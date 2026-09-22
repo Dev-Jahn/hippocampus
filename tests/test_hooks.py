@@ -21,6 +21,9 @@ def _run_hook(script_path, payload: dict, cwd, env=None, timeout=10):
     full_env = dict(os.environ)
     if env:
         full_env.update(env)
+    # Same rule as conftest's run_hippo: the Stop hook launches a real scribe, and this
+    # machine's environment carries a live TYPESAFE_API_KEY (DESIGN §3.9).
+    full_env.setdefault("HIPPO_JEV_BACKEND", "off")
     return subprocess.run(
         ["bash", str(script_path)],
         input=json.dumps(payload, ensure_ascii=False),

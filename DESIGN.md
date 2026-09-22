@@ -53,6 +53,7 @@ model, and this organ's job is to quietly make sure that judgment happens on top
 |---|---|---|
 | deterministic script | hooks and the CLI — fast and dumb | 0 |
 | **clerk** | a hook or cron calls a cheap model (luna/sonnet class) headlessly. Work that needs judgment but not main's context | tokens only, zero main context |
+| **judge** | a typed-judgment call (TypeSafe Jev) made inside a CLI path over text the code already holds — classification, selection, scoring. It returns probabilities, never prose | treated as zero, and outside both subscriptions |
 | skill | work that needs main's context, or where main must act on the result | main's context |
 | main | routing, acceptance, talking to the user | — |
 
@@ -68,11 +69,29 @@ Clerk guardrails (invariant):
 - **A variant of "no silent death"**: the system survives a dead clerk by design, but it never fills
   the gap by inventing content. Failures land in `failures/` and checkup reports them.
 
+Judge guardrails (invariant):
+
+- **No hook of its own** — it rides a surface that already exists (the cap of two hooks is
+  untouched, §3.4).
+- It **never writes a verdict, an outcome, or a directive state**. Its answers are evidence that a
+  code policy thresholds; the policy is what decides, and it is readable in one place.
+- Every judge-backed path is a **pure addition on top of the deterministic one**. When the judge is
+  unavailable the path continues exactly as before, and the gap is either recorded
+  (`ev:clerk name:jev-*` with `ok:false`) or simply absent: with no key there is no judge, no row,
+  no note and no changed output.
+- **It is opt-in by the key alone** — no setting, no prompt, nothing a user has to decide (§3.9).
+- The state is **pre-filtered by code**. Accuracy drops with irrelevant material in the state, so
+  code decides what is relevant — and never shrinks relevant volume, which is the whole point of
+  using this instrument rather than a small classifier.
+- **Nothing numeric or temporal is asked of it** (jaggedness: no arithmetic, no counting, no dates).
+- Question specs are text in `clerks/jev/*.yaml` (principle 8), with thresholds under their
+  `policy` key.
+
 ## 3. Components
 
 ```
 runtime (thin):   bin/hippo (shim) + cli/hippo_cli.py + 2 hooks + scripts/{clerk_run,digest_lite,dispatch}
-cognition (text): clerks/{turn-scribe,distiller}.md + skills/{hippo,checkup,dispatch}
+cognition (text): clerks/{turn-scribe,distiller}.md + clerks/jev/*.yaml + skills/{hippo,checkup,dispatch}
 resident (small): the capsule injected at SessionStart (§6 below)
 enforcement:      none
 ```
@@ -304,6 +323,20 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
    `digest_lite.py` (a light port of the digest logic proven on the 479MB audit).
 3. **Deterministic prefilter**: if the digest has no TOOL or USER line, update the cursor and exit
    (zero model calls).
+3b. **The judge gate** (§3.9). The prefilter answers *did anything happen*; this answers *is any of
+   it the scribe's business*, which is a judgment and therefore not a regex. `clerks/jev/scribe-gate.yaml`
+   asks five yes/no questions over the digest alone — a standing user instruction, a verdict on
+   delegated work, a pasted external review with a sha, a worker launched, substantive work
+   finished or failed. The call is self-metered like any clerk
+   (`ev:clerk name:jev-gate ok ms tokens`, `src:scribe`), whether it succeeded or not.
+   When every answer is below `policy.skip_when_all_below`, the cursor advances and the turn
+   clerk is not called at all — the window had nothing in it worth a scribe. Otherwise the
+   probabilities ride into the clerk's payload as a `# gate hints` section between the dispatch
+   roster and the digest, marked advisory, with the digest still the only evidence (the clerk
+   prompt says so in its own words). A failed judge inserts no section, so the clerk sees exactly
+   what it sees today, and the reason lands on stderr. With the backend off the gate does not
+   exist: no row, no section, no change in behavior. Measured live on the suite's fake transcript
+   (2026-09-23): 570–640ms and 873 tokens for all five questions in one request.
 4. Resolve the backend: `config.yaml > $HIPPO_CLERK_BACKEND > automatic (codex/gpt-5.6-luna/low when
    codex exists, otherwise claude -p sonnet) > mock` (for tests). 120s timeout. `$HIPPO_CLERK_MODEL`
    overrides the model on whichever backend is resolved; it is one variable for both, so pin the
@@ -523,6 +556,62 @@ Constraints specific to codex (0.144.6):
 - `"async": true` parses but is **skipped** — a Stop hook earns its non-blocking behavior by
   detaching itself (our `stop.sh` already does, with setsid and all three streams closed).
 - The `version` in the two manifests must match (a test enforces it).
+
+### 3.9 The judge (Jev)
+
+TypeSafe's Jev is a judgment-only model: it takes a `state` (a string or a JSON value) and a map of
+typed questions, and returns probabilities — it cannot write prose, which is exactly why it is safe
+to point at an untrusted transcript. Three question types: `noul` (one yes/no →
+`{"noul": 0.87}`), `choice` (pick one of the named options → the option, a confidence and the
+distribution) and `score` (an ordered ladder of levels → a number, a confidence and a legend).
+`POST https://api.typesafe.ai/v1/systemone`, `Authorization: Bearer $TYPESAFE_API_KEY`, body
+`{"model": …, "state": …, "questions": {…}}`; the reply carries `answers` and `usage`.
+Measured on this machine (2026-09-23): 0.7–1.5s per request, a 20-question probe and a
+77-question probe each answered in one round trip (the 77 in 0.9s). The cost is a third budget —
+it is charged to neither the Claude nor the Codex subscription — and is treated as zero here.
+
+**Large context is the point.** What separates this from a BERT-class classifier is that it takes a
+large, messy state — a whole digest, a whole lane report, a brief beside the live directive set —
+and returns a calibrated judgment over it. Code pre-filters *irrelevant* material and never shrinks
+relevant volume. The hard limit is the model's context (32k tokens for the state plus the longest
+question, 64k for the request), and the client owns it: `JEV_STATE_BUDGET_CHARS = 110_000`
+(≈28k tokens at 4 chars/token, leaving the questions their room). Over budget, `judge` returns a
+failure reading `state exceeds jev budget (<n> chars)` and the caller continues as it would on any
+other failure — it never truncates, because a shortened state answers a different question. A 422
+from the API is the same path.
+
+The known weaknesses (docs.typesafe.ai/model-jaggedness/jev-1.13) shape every use: it reads
+literally, does no arithmetic and no counting, loses accuracy when the state carries irrelevant
+material, can be moved by adversarial text inside the state, and is weaker on CJK than on English.
+So: one narrow judgment per question, criteria that agree with their instruction (a `true` that
+describes "no" confuses it), state pre-filtered by code, and every threshold evaluated in code.
+
+- **There is no setting, by design.** The backend is `live` when `TYPESAFE_API_KEY` is set and
+  non-empty and `off` otherwise — a machine with the key gets the judge, a machine without it gets
+  exactly the plugin as it was, byte for byte, and nothing ever asks the user. `$HIPPO_JEV_BACKEND`
+  (`live|mock|off`) exists for developers and for the test suite, not as a user-facing switch, and
+  there is deliberately no `config.yaml` key: the clerk has one because a user chooses between two
+  real backends there, and here there is nothing to choose. `$HIPPO_JEV_MODEL` overrides the model
+  (default `jev-latest`). 20s per request, one retry after 2s on 429/529, nothing else retried.
+- **Specs are text** — `clerks/jev/<name>.yaml`, a `questions` map plus an optional `policy` map
+  (principle 8: the judgment lives in prose a person tunes, the thresholds in a key code reads).
+  `jev_questions(name, **vars)` renders `{var}` placeholders in the question id and in
+  `instructions`; `criteria` are copied verbatim, and an unknown `{placeholder}` is left exactly as
+  written, so a spec that names a variable its caller did not pass still loads. A brace that is not
+  a `{name}` at all is a malformed spec and dies at load, where a test catches it — the same
+  treatment a broken clerk prompt gets. A caller fans out over n items by
+  calling it once per item and merging the maps — n narrow questions in one request, not one
+  question about n things.
+- **`judge(hp, name, state, questions) → (answers, meta)`** never raises for a backend or network
+  problem. `meta` is `{ok, reason, ms, tokens, model}`; `tokens` is the reply's input+output usage.
+  A missing answer for a requested id is a failure like any other. A missing or malformed spec file
+  still dies — that is missing infrastructure, like a missing clerk prompt.
+- **The mock backend** is how the tests never touch the network: `$HIPPO_JEV_MOCK_OUTPUT` names a
+  JSON file `{"answers": {<id>: <answer>}, "default": {"noul": …, "choice": …, "score": …}}` — by
+  id first, then by question type, and no default for that type is a failure naming the id.
+  `$HIPPO_JEV_MOCK_CAPTURE` receives the request body that would have gone out, so a test asserts
+  on what was actually asked (the same contract `HIPPO_MOCK_CAPTURE` has for the clerk). The test
+  suite runs with `HIPPO_JEV_BACKEND=off` by default.
 
 ## 4. What does not exist (the NOT-list — reintroducing any of it requires revising this document)
 

@@ -1,0 +1,46 @@
+# scribe-gate: asked over the transcript digest before the turn-scribe clerk runs (DESIGN §3.5.3b).
+# Every question is one literal yes/no about `digest`; thresholds live under policy, in code's hands.
+questions:
+  user_instruction:
+    type: noul
+    instructions: >-
+      Does a USER line in `digest` state an operating rule or constraint meant to hold beyond
+      this one answer — how work must be done, what is off limits, or what to keep doing?
+    criteria:
+      "true": A user line lays down a rule, preference, hold, or standing instruction
+      "false": User lines only ask questions, request one-off actions, or make remarks
+  verdict:
+    type: noul
+    instructions: >-
+      Does `digest` contain an explicit verdict on delegated work — merged, accepted, rejected,
+      refuted, or NO-GO — spoken by the user or by the main assistant, not a worker's own
+      completion report?
+    criteria:
+      "true": Someone judges delegated work — merged it, accepted it, rejected or refuted it, or called it NO-GO
+      "false": Delegated work is only reported, described, or still running, with nobody judging it
+  external_review:
+    type: noul
+    instructions: Does `digest` contain a pasted external review reply that names a commit sha?
+    criteria:
+      "true": A review reply from outside this session is quoted and a commit sha appears with it
+      "false": No pasted external review, or a review with no commit sha anywhere near it
+  launch:
+    type: noul
+    instructions: >-
+      Was a subagent, fork, workflow, or headless claude process launched in `digest`
+      (an Agent or Task tool call, a Workflow launch, a `claude -p` command)?
+    criteria:
+      "true": A line shows such a worker being started in this window
+      "false": No worker was started — only ordinary tool calls, or a launch merely discussed
+  substantive_work:
+    type: noul
+    instructions: >-
+      Did substantive work finish, merge, get discovered, or fail in `digest` — beyond reading
+      files, planning, or conversation?
+    criteria:
+      "true": Something was built, changed, merged, measured, found out, or went wrong
+      "false": The window is reading, searching, planning, or talking, with nothing concluded
+policy:
+  # Below this, every question says "nothing of the sort happened" and the clerk is skipped.
+  # It is deliberately low: a missed event costs a record, a needless clerk call costs tokens.
+  skip_when_all_below: 0.2

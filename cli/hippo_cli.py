@@ -19,6 +19,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -363,6 +365,186 @@ def run_clerk(hp, prompt_path, input_text, timeout):
         tmp.unlink(missing_ok=True)
     tokens = (len(prompt_text) + len(input_text) + len(out)) // 4
     return out, err, rc, int((time.monotonic() - t0) * 1000), tokens
+
+
+# --- the judge (DESIGN §3.9) --------------------------------------------------
+
+JEV_URL = "https://api.typesafe.ai/v1/systemone"
+JEV_TIMEOUT = 20  # seconds per request — measured 0.7–1.5s, so this is slack, not a budget
+JEV_DIR = CLERKS / "jev"  # question specs live as text (principle 8)
+# The model takes 32k tokens of state plus the longest question. 110k characters is ~28k tokens
+# at 4 chars/token, which leaves the questions their room. The client owns the limit because
+# the API's own answer to an oversize state is a 422 — a gate that fails silently is worse
+# than one that says the state was too large.
+JEV_STATE_BUDGET_CHARS = 110_000
+JEV_RETRY_STATUS = (429, 529)  # the two transient ones; every other status is the answer
+JEV_RETRY_WAIT = 2.0
+JEV_SPECS = {}  # per-process cache: a spec file is read once
+
+
+class _SpecVars(dict):
+    """Leaves an unknown `{placeholder}` exactly as it was written — a spec is prose a person
+    tunes, and most of the braces in it are not placeholders."""
+
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def jev_spec(name):
+    """Load `clerks/jev/<name>.yaml`. A missing or malformed spec dies: the specs are
+    infrastructure, like a clerk prompt, not a runtime condition to be survived."""
+    if name not in JEV_SPECS:
+        p = JEV_DIR / f"{name}.yaml"
+        if not p.exists():
+            die(f"no jev spec: {p}")
+        try:
+            spec = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as e:
+            die(f"malformed jev spec {p}: {one_line(e, 200)}")
+        if not isinstance(spec, dict) or not isinstance(spec.get("questions"), dict):
+            die(f"malformed jev spec {p}: a `questions` map is required")
+        JEV_SPECS[name] = spec
+    return JEV_SPECS[name]
+
+
+def jev_questions(name, **variables):
+    """The rendered questions map of a spec: `{var}` is substituted in the question id and in
+    its instructions, criteria are copied verbatim. A caller fans out over several items by
+    calling this once per item (`i=1`, `i=2`, …) and merging the maps — one narrow judgment
+    per question is what the model is accurate at (jaggedness)."""
+    path = JEV_DIR / f"{name}.yaml"
+    out = {}
+    for qid, q in jev_spec(name)["questions"].items():
+        if not isinstance(q, dict):
+            die(f"malformed jev spec {path}: question {qid} is not a map")
+        try:
+            rid = str(qid).format_map(_SpecVars(variables))
+            body = dict(q)
+            body["instructions"] = str(q.get("instructions", "")).format_map(
+                _SpecVars(variables)
+            )
+        except (ValueError, IndexError) as e:
+            die(f"malformed jev spec {path}: question {qid}: {e}")
+        out[rid] = body
+    return out
+
+
+def jev_policy(name):
+    """The spec's `policy` map. Thresholds sit in the text next to the questions they belong
+    to, but they are read and applied by code: the judge answers, it never decides (§3.9)."""
+    return jev_spec(name).get("policy") or {}
+
+
+def jev_backend(_hp):
+    """`live` when TYPESAFE_API_KEY is set and non-empty, `off` otherwise — and there is no
+    setting. $HIPPO_JEV_BACKEND (live|mock|off) is a developer and test knob, never something a
+    user is asked about: a machine with the key gets the judge, a machine without it gets the
+    plugin exactly as it was. The clerk backend has a config.yaml override because a user picks
+    between real backends there; here there is nothing to pick (§3.9)."""
+    b = os.environ.get("HIPPO_JEV_BACKEND")
+    if b:
+        return str(b)
+    return "live" if os.environ.get("TYPESAFE_API_KEY") else "off"
+
+
+def jev_mock(questions, body):
+    """Test backend → (answers, reason). Answers come from $HIPPO_JEV_MOCK_OUTPUT, and
+    $HIPPO_JEV_MOCK_CAPTURE receives the request body that would have gone out — tests assert
+    on what was actually asked, the way HIPPO_MOCK_CAPTURE does for the clerk."""
+    capture = os.environ.get("HIPPO_JEV_MOCK_CAPTURE")
+    if capture:
+        Path(capture).write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    path = os.environ.get("HIPPO_JEV_MOCK_OUTPUT")
+    if not path:
+        return None, "mock: no $HIPPO_JEV_MOCK_OUTPUT"
+    try:
+        mock = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return None, f"mock: {one_line(e, 200)}"
+    canned = mock.get("answers") or {}
+    default = mock.get("default") or {}
+    answers = {}
+    for qid, q in questions.items():
+        if qid in canned:
+            answers[qid] = canned[qid]
+            continue
+        kind = q.get("type")
+        if kind not in default:
+            return None, f"mock: no answer for {qid}"
+        v = default[kind]
+        if kind == "choice":
+            answers[qid] = {"choice": v, "confidence": 1.0, "probabilities": {v: 1.0}}
+        elif kind == "score":
+            answers[qid] = {"score": v, "confidence": 1.0}
+        else:
+            answers[qid] = {"noul": v}
+    return answers, None
+
+
+def judge(hp, name, state, questions):
+    """Ask the judge one map of typed questions over one state → (answers, meta).
+
+    It never raises for a backend or a network problem: every caller has a path that runs
+    without an answer, and the gap is recorded rather than filled (§3.9). Only a programming
+    error — a missing or malformed spec — dies. `name` is the spec the questions came from,
+    which is also what the caller's self-metering row is named after."""
+    model = os.environ.get("HIPPO_JEV_MODEL") or "jev-latest"
+    t0 = time.monotonic()
+
+    def meta(ok, reason=None, tokens=0):
+        return {"ok": ok, "reason": reason, "ms": int((time.monotonic() - t0) * 1000),
+                "tokens": tokens, "model": model}
+
+    backend = jev_backend(hp)
+    if backend == "off":
+        return None, meta(False, "off")
+    size = len(json.dumps(state, ensure_ascii=False))
+    if size > JEV_STATE_BUDGET_CHARS:
+        # Never truncate. The state is what the question is about, so a silently shortened one
+        # answers a different question — the caller continues as it would on any other failure.
+        return None, meta(False, f"state exceeds jev budget ({size} chars)")
+    body = {"model": model, "state": state, "questions": questions}
+    if backend == "mock":
+        answers, reason = jev_mock(questions, body)
+        return (answers, meta(True)) if answers is not None else (None, meta(False, reason))
+    if backend != "live":
+        return None, meta(False, f"unknown jev backend: {backend}")
+    key = os.environ.get("TYPESAFE_API_KEY")
+    if not key:
+        return None, meta(False, "no TYPESAFE_API_KEY")
+    req = urllib.request.Request(
+        JEV_URL,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    for attempt in (0, 1):
+        try:
+            with urllib.request.urlopen(req, timeout=JEV_TIMEOUT) as r:
+                obj = json.loads(r.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in JEV_RETRY_STATUS and attempt == 0:
+                time.sleep(JEV_RETRY_WAIT)
+                continue
+            # The body of a 422 names the malformed question, which is the whole diagnosis.
+            try:
+                detail = e.read().decode("utf-8", "replace")
+            except OSError:
+                detail = str(e.reason)
+            return None, meta(False, one_line(f"http {e.code}: {detail}", 200))
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            return None, meta(False, one_line(f"{type(e).__name__}: {e}", 200))
+    answers = obj.get("answers") if isinstance(obj, dict) else None
+    if not isinstance(answers, dict):
+        return None, meta(False, "no answers in the response")
+    usage = obj.get("usage") or {}
+    tokens = int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
+    model = obj.get("model") or model  # what actually answered, for the metering row
+    missing = [q for q in questions if q not in answers]
+    if missing:
+        return None, meta(False, f"no answer for {missing[0]}", tokens)
+    return answers, meta(True, None, tokens)
 
 
 def dump_failure(hp, kind, text):
@@ -1315,8 +1497,12 @@ def prior_facts(rows, now, prices=None):
     clerks = [e for e in rows if e.get("ev") == "clerk"]
     fails = sum(1 for e in clerks if e.get("ok") is False)
     tokens = sum(int(e.get("tokens") or 0) for e in clerks)
+    # Broken down by name: the turn clerk, the judge gate and the distiller are different
+    # instruments at wildly different prices, and one total hides which one is spending.
+    by_name = collections.Counter(e.get("name") or "?" for e in clerks)
+    detail = f" ({', '.join(f'{n} {c}' for n, c in by_name.most_common())})" if by_name else ""
     lines += ["", "## clerk overhead", "",
-              f"{len(clerks)} runs, {fails} failures, ~{tokens} tokens"]
+              f"{len(clerks)} runs{detail}, {fails} failures, ~{tokens} tokens"]
     return "\n".join(lines)
 
 
@@ -2325,9 +2511,41 @@ def cmd_scribe(args):
         save_cursor()
         return
 
+    # 3b. The judge gate (DESIGN §3.5.3b). The prefilter answers "did anything happen"; this
+    # answers "is any of it the scribe's business", which is a judgment and so not a regex.
+    # With the backend off the gate does not exist — no row, no note, no change in behavior.
+    hints = ""
+    if jev_backend(hp) != "off":
+        questions = jev_questions("scribe-gate")
+        answers, jmeta = judge(hp, "scribe-gate", {"digest": digest}, questions)
+        append_event(
+            hp,
+            {"ev": "clerk", "name": "jev-gate", "ok": jmeta["ok"], "ms": jmeta["ms"],
+             "tokens": jmeta["tokens"]},
+            src="scribe",
+        )
+        if answers is None:
+            print(f"jev-gate: {jmeta['reason']}", file=sys.stderr)
+        else:
+            probs = {q: float(answers[q]["noul"]) for q in questions
+                     if isinstance(answers.get(q), dict)
+                     and isinstance(answers[q].get("noul"), (int, float))}
+            floor = jev_policy("scribe-gate").get("skip_when_all_below")
+            if floor is not None and probs and all(p < float(floor) for p in probs.values()):
+                save_cursor()
+                return
+            if probs:
+                hints = (
+                    "# gate hints\n\nadvisory probabilities from a separate judge over the "
+                    "same digest; the digest is the only evidence\n\n"
+                    + "\n".join(f"- {q}: {p:.2f}" for q, p in probs.items())
+                    + "\n\n"
+                )
+
     payload = (
         f"# live directives\n\n{directive_roster(hp)}\n\n"
         f"# dispatches already recorded\n\n{dispatch_roster(hp)}\n\n"
+        f"{hints}"
         f"# transcript digest\n\n{digest}"
     )
     out, err, rc, ms, tokens = run_clerk(

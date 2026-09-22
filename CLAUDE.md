@@ -11,4 +11,7 @@ add a third.
 Clerk output contract (strict JSON, validated like `hippo log`) is defined
 in `clerks/turn-scribe.md` and `clerks/distiller.md`.
 
+Jev question specs live in `clerks/jev/*.yaml` (`DESIGN.md` §3.9); tests run with
+`HIPPO_JEV_BACKEND=off` by default (conftest) and must never reach the network.
+
 Full design, ledger schema, and rationale: `DESIGN.md`.
