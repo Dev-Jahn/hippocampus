@@ -47,7 +47,7 @@ model, and this organ's job is to quietly make sure that judgment happens on top
    from contradictory GPU clauses). So a directive carries a lifetime (scope) as a first-class
    concept, and directive hygiene comes before verification machinery.
 
-## 2. The four execution layers
+## 2. The five execution layers
 
 | Layer | What | Cost |
 |---|---|---|
