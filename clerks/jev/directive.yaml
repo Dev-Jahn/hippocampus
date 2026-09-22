@@ -1,0 +1,77 @@
+# directive: read over the live directive set at `hippo directive add` and at
+# `hippo directive list --hygiene` (DESIGN §6, fourth rule — content is judged, never enforced).
+# Every answer becomes at most one note on stderr; nothing here changes what is stored.
+#
+# The conflict question comes in three shapes because the state it reads does: the directive just
+# written beside the live set, one pair inside that set, and — on the second stage — the pair
+# alone, with nothing else in the state. It is the same judgment each time, so the criteria are
+# shared by anchor and cannot drift apart; only the subjects the instructions name differ.
+questions:
+  # stage 1 of `directive add`: the directive just written against one that was already live.
+  conflict_{i}:
+    type: noul
+    instructions: >-
+      Would an agent that must obey both `new` and `directives[{i}]` be unable to satisfy both at
+      once, because they demand incompatible things about the same subject?
+    criteria: &conflict
+      "true": Following one of them necessarily violates the other
+      "false": They speak to different subjects, or both of them can be followed at once
+  # stage 1 of `directive list --hygiene`: one pair inside the live set.
+  conflict_{i}_{j}:
+    type: noul
+    instructions: >-
+      Would an agent that must obey both `directives[{i}]` and `directives[{j}]` be unable to
+      satisfy both at once, because they demand incompatible things about the same subject?
+    criteria: *conflict
+  # stage 2 of both: the pair alone. Irrelevant material in the state costs accuracy (§3.9), and
+  # the probe that measured this ranked two unrelated pairs at 0.66-0.74 with the whole set in
+  # view — so stage 1 only decides what is worth asking again, and this is what gets reported.
+  conflict:
+    type: noul
+    instructions: >-
+      Would an agent that must obey both `a` and `b` be unable to satisfy both at once, because
+      they demand incompatible things about the same subject?
+    criteria: *conflict
+  # audience and lifetime are read off one directive's own text: what is stored is a claim the
+  # author made in passing, and `all` is what an omitted --audience leaves behind (§9.4).
+  audience:
+    type: choice
+    instructions: Reading the text of `new`, who has to know this rule?
+    criteria: &audience
+      main: >-
+        It governs how the main session behaves toward the user, toward a release, or toward its
+        own identity; a worker that only edits files never needs it
+      executor: >-
+        It governs how the work inside the repository is done, and matters only to whoever edits
+        the files
+      all: Both the main session and a worker editing files have to know it
+  audience_{i}:
+    type: choice
+    instructions: Reading the text of `directives[{i}]`, who has to know this rule?
+    criteria: *audience
+  lifetime:
+    type: choice
+    instructions: Reading the text of `new`, how long does this rule hold?
+    criteria: &lifetime
+      turn: It covers the next answer or the next action, and nothing past it
+      phase: >-
+        It holds until the current piece of work is finished — it names a specific ongoing task,
+        version, hold, or date
+      durable: It holds for the whole project, indefinitely
+  lifetime_{i}:
+    type: choice
+    instructions: Reading the text of `directives[{i}]`, how long does this rule hold?
+    criteria: *lifetime
+policy:
+  # Stage 1 is wide and cheap; stage 2 is what a note is allowed to rest on. Measured on this
+  # repo's live set (8 directives + 3 planted, 77 questions, 0.9s): the two planted conflicts
+  # ranked first (0.83, 0.82), the planted non-conflict stayed under 0.25, and two unrelated
+  # pairs scored 0.66-0.74 — hence the second stage and a report threshold above them.
+  recheck_at: 0.5
+  report_at: 0.7
+  # An audience or lifetime reading is worth a line only when it disagrees with the stored value
+  # and the model is sure; an unsure choice is a coin toss between three options.
+  suggest_at: 0.7
+  # Pairs grow as n²: 40 live directives is 780 of them. Past that, say so rather than send a
+  # request the model cannot hold.
+  max_live: 40

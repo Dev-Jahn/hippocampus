@@ -84,7 +84,9 @@ hippo task show <id> | task drop <id>
 hippo log <ev> [typed flags…]        # dispatch|outcome|review|review-status
 hippo log raw '<json>'
 hippo log tail [-n N] [--ev TYPE]
-hippo directive list [--active] [--json]
+hippo directive list [--active] [--json] [--hygiene]
+                                          # --hygiene: the judge reads the live set for
+                                          #   conflicts and audience/lifetime mismatches
 hippo directive add [typed flags…]        # --lifetime turn|phase|durable
                                           # --audience main|executor|all (default all)
 hippo directive withdraw <directive-id>

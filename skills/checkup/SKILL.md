@@ -45,6 +45,9 @@ Code) or `~/.codex/sessions/` in dated subdirectories (Codex) — take the newes
 
 - List the active directives from `hippo directive list` oldest first: a phase directive alive for
   more than two weeks is a candidate — "the phase may be over; keep or withdraw?".
+- Run `hippo directive list --hygiene` and read its notes before proposing any withdrawal or
+  merge: the judge reads the live set for probable conflicts and for an audience or lifetime that
+  disagrees with the stored one, and a note is evidence to weigh, never a verdict.
 - Cross-check active directives against CLAUDE.md and the memory files for **contradictions and
   duplication** (by meaning, not by string). Quote both sides of a contradiction and take a
   position on which one survives. Edit only after confirmation, local files first.

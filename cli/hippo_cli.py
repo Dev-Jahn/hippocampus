@@ -662,6 +662,184 @@ def directive_volume_notes(hp):
     return notes
 
 
+# --- what the judge reads in the directives themselves (DESIGN §6, fourth rule) ------------
+# The volume notes above count characters; nothing counted the *content* of the set. These do,
+# and they stay on the same side of the line: a note on stderr after a write that already landed
+# or after a listing, never a refusal and never a stored change. The thresholds sit in
+# clerks/jev/directive.yaml, next to the questions they belong to.
+
+# The flag that acts on each suggestion — the note is only worth printing if it says what to type.
+AXIS_FLAGS = {"audience": "--audience", "lifetime": "--lifetime"}
+
+
+def directive_as_state(d):
+    """What the judge is told about one directive. `audience` is normalized because an absent
+    one *is* `all` (§9.4): the question is whether the text agrees with the effective value."""
+    return {
+        "id": d.get("id", ""),
+        "lifetime": d.get("lifetime") or "",
+        "audience": d.get("audience") or "all",
+        "text": one_line(d.get("text", "")),
+    }
+
+
+def directive_questions(ids, **variables):
+    """The questions one request asks, picked out of the rendered `directive` spec.
+
+    `jev_questions` renders every shape the spec carries (the three states a conflict is read in,
+    the two subjects an axis is read on); a request asks the ids it needs and no others, because
+    irrelevant material in a request is exactly what costs the model accuracy (§3.9)."""
+    rendered = jev_questions("directive", **variables)
+    return {qid: rendered[qid] for qid in ids}
+
+
+def jev_directive_meter(hp, meta):
+    """One self-metering row per request (§2, judge guardrails). A judge that failed has to be
+    visible as a gap in the ledger rather than as silence on the terminal."""
+    append_event(hp, {"ev": "clerk", "name": "jev-directive", "ok": meta["ok"],
+                      "ms": meta["ms"], "tokens": meta["tokens"]})
+
+
+def jev_noul(answers, qid):
+    """The probability of one yes/no answer, or None when it is missing or malformed."""
+    a = (answers or {}).get(qid)
+    v = a.get("noul") if isinstance(a, dict) else None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def jev_choice(answers, qid):
+    """(option, confidence) of one choice answer, or (None, 0.0) when it is missing or malformed.
+    A missing confidence reads as no confidence: every caller gates on it."""
+    a = (answers or {}).get(qid)
+    if not isinstance(a, dict) or not isinstance(a.get("choice"), str):
+        return None, 0.0
+    c = a.get("confidence")
+    ok = isinstance(c, (int, float)) and not isinstance(c, bool)
+    return a["choice"], float(c) if ok else 0.0
+
+
+def directive_recheck(hp, a, b):
+    """Stage 2: the one pair, alone in the state, asked again with the same wording.
+
+    Stage 1 reads the whole set in one request, which is wide and cheap; the probe that measured
+    it scored two unrelated pairs at 0.66-0.74 there. Nothing is reported until it survives being
+    asked on its own."""
+    answers, meta = judge(
+        hp, "directive", {"a": directive_as_state(a), "b": directive_as_state(b)},
+        directive_questions(["conflict"]),
+    )
+    jev_directive_meter(hp, meta)
+    return jev_noul(answers, "conflict")
+
+
+def directive_axis_notes(answers, d, policy, suffix="", prefix=""):
+    """The audience and lifetime lines for one directive — or none, when the judge reads them
+    the way they are already stored. A suggestion that agrees with the stored value is not news,
+    and one the model is unsure of is a coin toss between three options."""
+    suggest_at = float(policy.get("suggest_at", 1.0))
+    notes = []
+    for axis, stored in (("audience", d.get("audience") or "all"),
+                         ("lifetime", d.get("lifetime") or "")):
+        pick, conf = jev_choice(answers, f"{axis}{suffix}")
+        if pick is None or pick == stored or conf < suggest_at:
+            continue
+        notes.append(
+            f"note: {prefix}{axis} reads as {pick} ({conf:.2f}) — stored as {stored or '?'}; "
+            f"re-add with {AXIS_FLAGS[axis]} {pick} if that is what was meant"
+        )
+    return notes
+
+
+def directive_content_notes(hp, new):
+    """What the judge reads in the directive just written: a probable conflict with something
+    already live, and an audience or lifetime that reads differently from the stored value.
+
+    The write has already landed and nothing here changes it — a note is the whole of it. With
+    the judge off there is no request, no row and no note: the command is what it always was."""
+    if jev_backend(hp) == "off":
+        return []
+    # Every live directive except this id. A re-add under the same --id is an update, so
+    # comparing the text with its own previous version would report every edit as a conflict.
+    live = [d for d in directives(hp).values()
+            if d.get("state") == "active" and d.get("id") != new.get("id")]
+    policy = jev_policy("directive")
+    max_live = int(policy.get("max_live") or 0)
+    if max_live and len(live) > max_live:
+        return [f"note: {len(live)} live directives — more than the {max_live} the judge is "
+                "asked about in one request, so the content notes are skipped. Withdraw the "
+                "stale ones (`hippo directive withdraw <id>`)."]
+    questions = directive_questions(["audience", "lifetime"])
+    for i in range(len(live)):
+        questions.update(directive_questions([f"conflict_{i}"], i=i))
+    state = {"new": directive_as_state(new),
+             "directives": [directive_as_state(d) for d in live]}
+    answers, meta = judge(hp, "directive", state, questions)
+    jev_directive_meter(hp, meta)
+    if answers is None:
+        return []
+    recheck_at = float(policy.get("recheck_at", 1.0))
+    report_at = float(policy.get("report_at", 1.0))
+    flagged = []
+    for i, d in enumerate(live):
+        p = jev_noul(answers, f"conflict_{i}")
+        if p is None or p < recheck_at:
+            continue
+        p2 = directive_recheck(hp, new, d)
+        if p2 is not None and p2 >= report_at:
+            flagged.append((p2, d))
+    notes = [f"note: may conflict with {d['id']} ({p:.2f}): {one_line(d.get('text', ''), 80)}"
+             for p, d in sorted(flagged, key=lambda x: -x[0])]
+    return notes + directive_axis_notes(answers, new, policy)
+
+
+def directive_hygiene_notes(hp):
+    """`directive list --hygiene`: the same reading over the whole live set — every pair of it,
+    and each directive's own audience and lifetime.
+
+    This is the one mode that is mostly the judge, so with the judge off it says so in one line
+    rather than printing nothing: the listing and the volume notes above it are still exactly
+    what they were (§3.9)."""
+    if jev_backend(hp) == "off":
+        return ["hygiene: judge off — no TYPESAFE_API_KEY; showing the deterministic part only"]
+    live = [d for d in directives(hp).values() if d.get("state") == "active"]
+    policy = jev_policy("directive")
+    max_live = int(policy.get("max_live") or 0)
+    if max_live and len(live) > max_live:
+        # Pairs grow as n². Saying so beats sending a request the model cannot hold and
+        # reporting whatever comes back from the failure.
+        return [f"hygiene: {len(live)} live directives — past {max_live} the pairs (n²) are "
+                "more than one request can carry. Withdraw the stale ones first."]
+    if not live:
+        return []
+    questions = {}
+    for i in range(len(live)):
+        questions.update(directive_questions([f"audience_{i}", f"lifetime_{i}"], i=i))
+        for j in range(i + 1, len(live)):
+            questions.update(directive_questions([f"conflict_{i}_{j}"], i=i, j=j))
+    answers, meta = judge(
+        hp, "directive", {"directives": [directive_as_state(d) for d in live]}, questions
+    )
+    jev_directive_meter(hp, meta)
+    if answers is None:
+        return [f"hygiene: the judge did not answer ({meta['reason']})"]
+    recheck_at = float(policy.get("recheck_at", 1.0))
+    report_at = float(policy.get("report_at", 1.0))
+    flagged = []
+    for i in range(len(live)):
+        for j in range(i + 1, len(live)):
+            p = jev_noul(answers, f"conflict_{i}_{j}")
+            if p is None or p < recheck_at:
+                continue
+            p2 = directive_recheck(hp, live[i], live[j])
+            if p2 is not None and p2 >= report_at:
+                flagged.append((p2, live[i], live[j]))
+    notes = [f"note: {a['id']} may conflict with {b['id']} ({p:.2f})"
+             for p, a, b in sorted(flagged, key=lambda x: -x[0])]
+    for i, d in enumerate(live):
+        notes += directive_axis_notes(answers, d, policy, f"_{i}", f"{d['id']}: ")
+    return notes
+
+
 IN_FLIGHT_WINDOW_H = 24
 
 
@@ -1265,6 +1443,12 @@ def cmd_log(args):
     log_and_print(args.hp, e)
     if args.ev == "directive":
         # After the write, so the notes describe the set the next session will actually carry.
+        # The judge's notes come first because they are about this directive; the volume notes
+        # are about the set it just joined. A withdrawal carries no text to read, so only an
+        # active write is judged.
+        if e.get("state") == "active" and e.get("text"):
+            for note in directive_content_notes(args.hp, e):
+                print(note, file=sys.stderr)
         for note in directive_volume_notes(args.hp):
             print(note, file=sys.stderr)
     # Write-time notes (never refusals — the record always went through, principle 3):
@@ -1309,16 +1493,22 @@ def cmd_directive_list(args):
         ds = [d for d in ds if d.get("state") == "active"]
     if args.json:
         print(json.dumps(ds, ensure_ascii=False, indent=2))
-        return
-    for d in ds:
-        aud = d.get("audience")
-        tag = f"/{aud}" if aud and aud != "all" else ""
-        print(
-            f"{d['id']}  [{d.get('state', '?')}/{d.get('lifetime', '?')}{tag}]  {d.get('text', '')}"
-        )
+    else:
+        for d in ds:
+            aud = d.get("audience")
+            tag = f"/{aud}" if aud and aud != "all" else ""
+            print(
+                f"{d['id']}  [{d.get('state', '?')}/{d.get('lifetime', '?')}{tag}]  "
+                f"{d.get('text', '')}"
+            )
     # Reviewing the set is the other moment the author can act on what it costs. On stderr, so
-    # the listing itself stays a clean, pipeable record of the directives.
-    for note in directive_volume_notes(args.hp):
+    # the listing itself stays a clean, pipeable record of the directives. --hygiene asks the
+    # judge the same question about the content; it was asked for explicitly, so it answers
+    # beside a --json listing too, where the volume notes stay out of the way as they always did.
+    notes = directive_hygiene_notes(args.hp) if args.hygiene else []
+    if not args.json:
+        notes += directive_volume_notes(args.hp)
+    for note in notes:
         print(note, file=sys.stderr)
 
 
@@ -2729,6 +2919,13 @@ def build_parser():
     a = d.add_parser("list", help="list (derived from the ledger)")
     a.add_argument("--active", action="store_true")
     a.add_argument("--json", action="store_true")
+    a.add_argument(
+        "--hygiene",
+        action="store_true",
+        help="also have the judge read the live set: probable conflicts between two "
+             "directives, and an audience or lifetime that reads differently from the "
+             "stored one (needs TYPESAFE_API_KEY; notes only, nothing is changed)",
+    )
     a.set_defaults(fn=cmd_directive_list)
     a = d.add_parser("withdraw", help="withdraw a directive the user is done with")
     a.add_argument("id")

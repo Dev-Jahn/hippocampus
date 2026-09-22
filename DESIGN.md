@@ -254,7 +254,9 @@ hippo task show <id> [--json] | task drop <id>
 hippo log <ev> [typed flags…]               # dispatch|outcome|review|review-status
 hippo log raw '<json>'                      # validate, then append
 hippo log tail [-n N] [--ev TYPE]           # read recent records
-hippo directive list [--active] [--json]
+hippo directive list [--active] [--json] [--hygiene]
+                                            # --hygiene: the judge reads the live set for
+                                            #   conflicts and axis mismatches (§6, fourth rule)
 hippo directive add [typed flags…]          # auto-id derived from text when --id is omitted
 hippo directive withdraw <directive-id>
 hippo prior show
@@ -678,7 +680,7 @@ appended —
 of hand-copied into every brief. The depth line follows `HIPPO_DEPTH` (§9.5): at depth ≥ 1 it
 grants dispatching children instead, and notes they start at depth 0.
 
-Three rules govern the directive block:
+Four rules govern the directive block:
 
 - **Nothing is folded away.** Every active directive addressed to the reader is injected, in
   full, durable first (audience §9.4: a lane's capsule carries `executor|all`, main's carries
@@ -702,6 +704,17 @@ Three rules govern the directive block:
   (2026-08-02), a clerk once withdrew a live hold because an assistant report mentioned its
   keyword. Automation that decides is the failure mode; visibility is the fix, and the verdict
   stays with main and the user.
+- **Content is judged, never enforced.** The three rules above count characters and days; what
+  the directives *say* went unread, and an obedient model is most dangerous where two live
+  clauses contradict each other (measured: a fail-closed NO-GO out of two GPU clauses). At
+  `directive add` and at `directive list --hygiene` the judge (§3.9) reads the whole live set and
+  notes probable conflicts and audience/lifetime mismatches. A note is the whole of it: the
+  stored value never changes, nothing is refused, and with no key there is no judge and no note.
+  The threshold is deliberately conservative and the reading is two-stage — a probe over this
+  repo's live set (8 directives + 3 planted, 77 questions, 0.9s) ranked the two planted conflicts
+  first (0.83, 0.82) and the planted non-conflict under 0.25, but scored two *unrelated* pairs at
+  0.66-0.74 with the whole set in view, so a pair that stage 1 flags is asked again alone
+  (`recheck_at` 0.5) and only reported when it survives (`report_at` 0.7).
 
 ## 7. Testing policy
 
@@ -796,7 +809,9 @@ measured on a consuming project) handed to a literal-minded worker is a token fi
 
 `directive --audience main|executor|all`, defaulting to `all`. A narrow default fails by silently
 hiding a constraint from the worker that needed it; a wide default fails by noise, which the
-existing volume nudges (§6) already surface.
+existing volume nudges (§6) already surface. The audience note of §6's fourth rule is how that
+wide default gets narrowed in practice: nobody types `--audience` while writing a rule, so the
+judge reads the text afterwards and says which axis value it sounds like.
 
 ### 9.5 Depth, so the spiral is visible instead of forbidden
 
