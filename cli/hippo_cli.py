@@ -2032,11 +2032,14 @@ def run_dispatch(argv):
 # --- batch dispatch (DESIGN §3.6 — batch waves) --------------------------------
 
 BATCH_USAGE = (
-    "usage: hippo dispatch --batch <manifest.yaml> [--concurrency N] [--resume | --fresh] "
-    "[--dry-run]\n"
+    "usage: hippo dispatch --batch <manifest.yaml> [--concurrency N] "
+    "[--resume [--causes a,b] | --fresh] [--dry-run | --harvest]\n"
     "       the manifest is per-wave data, authored fresh like a brief — never standing config\n"
     "       --resume continues an existing journal (done entries skip, the rest relaunch); "
-    "--fresh sets it aside"
+    "--fresh sets it aside\n"
+    "       --causes narrows a resume to the failure causes named (capability|spec|"
+    "environment|transient)\n"
+    "       --harvest launches nothing: it triages every exited entry and prints the table"
 )
 
 # Everything a manifest entry may set, with the built-in value where one exists. kind and
@@ -2062,16 +2065,21 @@ BATCH_LOCK = threading.RLock()
 
 
 def parse_batch_argv(argv):
-    manifest = concurrency = None
-    flags = {"resume": False, "fresh": False, "dry_run": False}
+    manifest = concurrency = causes = None
+    flags = {"resume": False, "fresh": False, "dry_run": False, "harvest": False}
     i, n = 0, len(argv)
     while i < n:
         a = argv[i]
-        if a in ("--batch", "--concurrency"):
+        if a in ("--batch", "--concurrency", "--causes"):
             if i + 1 >= n:
                 die(f"dispatch --batch: {a} has no value\n{BATCH_USAGE}", 2)
             if a == "--batch":
                 manifest = argv[i + 1]
+            elif a == "--causes":
+                causes = [c.strip() for c in argv[i + 1].split(",") if c.strip()]
+                if not causes or any(c not in CAUSES for c in causes):
+                    die(f"dispatch --batch: --causes takes a comma list of "
+                        f"{'|'.join(CAUSES)}: {argv[i + 1]!r}\n{BATCH_USAGE}", 2)
             else:
                 try:
                     concurrency = int(argv[i + 1])
@@ -2081,16 +2089,26 @@ def parse_batch_argv(argv):
                 if concurrency < 1:
                     die(f"dispatch --batch: --concurrency must be >= 1\n{BATCH_USAGE}", 2)
             i += 2
-        elif a in ("--resume", "--fresh", "--dry-run"):
+        elif a in ("--resume", "--fresh", "--dry-run", "--harvest"):
             flags[a[2:].replace("-", "_")] = True
             i += 1
         else:
             die(BATCH_USAGE, 2)
     if flags["resume"] and flags["fresh"]:
         die(f"dispatch --batch: --resume and --fresh are mutually exclusive\n{BATCH_USAGE}", 2)
+    clash = [f"--{k.replace('_', '-')}"
+             for k in ("resume", "fresh", "dry_run") if flags["harvest"] and flags[k]]
+    if clash:
+        die(f"dispatch --batch: --harvest launches nothing, so it cannot be combined with "
+            f"{', '.join(clash)}\n{BATCH_USAGE}", 2)
+    if causes is not None and not flags["resume"]:
+        # A filter over what --resume relaunches. On its own it would read as a filter and do
+        # nothing, which is the one thing a flag must never do.
+        die(f"dispatch --batch: --causes narrows a resume — it needs --resume\n"
+            f"{BATCH_USAGE}", 2)
     if not manifest:
         die(BATCH_USAGE, 2)
-    return manifest, concurrency, flags["resume"], flags["fresh"], flags["dry_run"]
+    return manifest, concurrency, flags, causes
 
 
 def load_manifest(mp):
@@ -2295,9 +2313,11 @@ def claude_usage(out_path, manifest_model):
 
 
 def journal_state(journal):
-    """Previous attempts per id, plus the ids that are DONE (latest exit line has rc==0 and
-    check_rc null-or-0). A relaunch mints a NEW dispatch id — two launches are two facts."""
-    attempts, latest_exit = {}, {}
+    """Previous attempts per id, the ids that are DONE (latest exit line has rc==0 and
+    check_rc null-or-0), and the latest exit and triage record per id. A relaunch mints a NEW
+    dispatch id — two launches are two facts, and two triages of one lane are two facts too:
+    the latest is what a reader reads, and neither replaces the other in the file."""
+    attempts, latest_exit, latest_triage = {}, {}, {}
     for line in journal.read_text(encoding="utf-8").splitlines():
         try:
             rec = json.loads(line)
@@ -2307,9 +2327,429 @@ def journal_state(journal):
             attempts[rec.get("id")] = max(attempts.get(rec.get("id"), 0), rec["attempt"])
         if rec.get("event") == "exit":
             latest_exit[rec.get("id")] = rec
+        elif rec.get("event") == "triage":
+            latest_triage[rec.get("id")] = rec
     done = {i for i, r in latest_exit.items()
             if r.get("rc") == 0 and r.get("check_rc") in (None, 0)}
-    return attempts, done
+    return attempts, done, latest_exit, latest_triage
+
+
+# --- harvest triage (DESIGN §3.6 — the judge reads, main routes) --------------
+
+TRIAGE_STDERR_TAIL = 4000
+TRIAGE_GIT_LINES = 80
+TRIAGE_GIT_TIMEOUT = 30
+# Trim order and caps for an over-budget state, applied only as far as the budget needs.
+TRIAGE_TRIM = (("stderr_tail", 1000), ("brief", 6000), ("changes", 3000))
+CLUSTER_EXCERPT_LINES = 40
+CLUSTER_ERROR_RE = re.compile(r"(?i)(error|traceback|failed|exception|no such|not found)")
+# codex's stderr opens with a launch banner and closes with the "tokens used" footer. Neither
+# says anything about why a lane ended as it did, and accuracy drops with irrelevant material
+# in the state (§3.9) — so exactly this is filtered out, and nothing else is.
+CODEX_NOISE_RE = re.compile(
+    r"^(?:\[[^]]*\]\s*)?(?:-{3,}$|workdir:|model:|provider:|approval:|sandbox:"
+    r"|reasoning effort:|reasoning summaries:|session id:|tokens used$|OpenAI Codex v)"
+)
+# Reading order for the table: what needs main's eyes first, what needs them last.
+ROUTE_ORDER = ("escalate", "no-go-candidate", "failed", "accept-candidate")
+CAUSES = ("capability", "spec", "environment", "transient")
+# The two a relaunch can actually clear. A capability or spec failure needs a different brief,
+# and re-running it unchanged buys the same failure twice.
+RELAUNCHABLE_CAUSES = ("transient", "environment")
+
+
+def _num(v):
+    """A number the judge actually returned, or None. A bool is not one."""
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _thr(policy, key, default):
+    """A threshold from the spec's `policy` map, or the built-in. The spec is where a person
+    tunes it; the comparison happens here, in code, always (§2 judge guardrails)."""
+    v = _num(policy.get(key))
+    return default if v is None else v
+
+
+def _read_text(path):
+    """A lane's output file, or None when there is none — a gap stays a gap."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def stderr_excerpt(path, limit=TRIAGE_STDERR_TAIL):
+    """The tail of a lane's stderr with the codex banner and footer dropped."""
+    text = _read_text(path)
+    if text is None:
+        return None
+    keep, prev = [], ""
+    for ln in text.splitlines():
+        noise = CODEX_NOISE_RE.match(ln.strip()) or (
+            prev == "tokens used" and ln.strip().replace(",", "").isdigit())
+        prev = ln.strip()
+        if not noise:
+            keep.append(ln)
+    return "\n".join(keep)[-limit:]
+
+
+def lane_dir(en, cwd):
+    """Where the lane worked: a codex lane carries `-C <worktree>` in its args (dispatch skill
+    §5), a claude lane carries none and worked in the batch's own cwd."""
+    args = en.get("args") or []
+    for i, a in enumerate(args):
+        raw = None
+        if a == "-C" and i + 1 < len(args):
+            raw = args[i + 1]
+        elif a.startswith("-C") and len(a) > 2:
+            raw = a[2:]
+        if raw:
+            p = Path(raw)
+            return p if p.is_absolute() else Path(cwd) / p
+    return Path(cwd)
+
+
+def git_changes(d):
+    """What the lane actually changed: `git status --short` plus `git diff --stat HEAD`, or
+    None when that directory is not a git repository. A git failure never breaks a harvest —
+    the point of reading the tree is to catch scope creep the report did not mention, and an
+    unreadable tree is simply no evidence either way."""
+    def git(*args):
+        try:
+            r = subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True,
+                               timeout=TRIAGE_GIT_TIMEOUT)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return r.stdout if r.returncode == 0 else None
+
+    status = git("status", "--short")
+    if status is None:
+        return None
+    # A repository with no commit yet has no HEAD to diff against; its status still counts.
+    diff = git("diff", "--stat", "HEAD") or ""
+    return "\n".join(status.splitlines()[:TRIAGE_GIT_LINES]
+                     + diff.splitlines()[:TRIAGE_GIT_LINES])
+
+
+def fit_triage_state(state):
+    """Fit a triage state to JEV_STATE_BUDGET_CHARS, trimming in one fixed order and only as
+    far as the budget needs → the list of what was trimmed. `report` goes last and is cut from
+    the HEAD, because a lane's summary of itself is at the end. Nothing is shortened silently:
+    what was cut is named in the triage record, and an oversize state that no trim rescues
+    reaches `judge` intact and comes back as the over-budget failure it is (§3.9)."""
+    def size():
+        return len(json.dumps(state, ensure_ascii=False))
+
+    trimmed = []
+    for key, cap in TRIAGE_TRIM:
+        if size() <= JEV_STATE_BUDGET_CHARS:
+            return trimmed
+        v = state.get(key)
+        if isinstance(v, str) and len(v) > cap:
+            state[key] = v[:cap]
+            trimmed.append(key)
+    if size() <= JEV_STATE_BUDGET_CHARS or not state.get("report"):
+        return trimmed
+    trimmed.append("report")
+    while state["report"] and size() > JEV_STATE_BUDGET_CHARS:
+        state["report"] = state["report"][size() - JEV_STATE_BUDGET_CHARS + 512:]
+    return trimmed
+
+
+def triage_state(en, ex, outdir, cwd, claim):
+    """One finished lane, whole, as the judge receives it → (state, trimmed).
+
+    Large context is the instrument's point (§3.9): the entire report, the entire brief and
+    the entire check output go in. Code filters only what is irrelevant — codex's banner
+    noise — and never shrinks what is not."""
+    eid = en["id"]
+    state = {
+        "scope": en.get("scope"),
+        "kind": en.get("kind"),
+        "brief": en.get("prompt"),
+        "exit": {"rc": ex.get("rc"), "check_rc": ex.get("check_rc"),
+                 "timed_out": bool(ex.get("timed_out"))},
+        "claim": claim,
+        "report": _read_text(outdir / f"{eid}.out"),
+        "stderr_tail": stderr_excerpt(outdir / f"{eid}.err"),
+        "check_output": _read_text(outdir / f"{eid}.check"),
+        "changes": git_changes(lane_dir(en, cwd)),
+    }
+    return state, fit_triage_state(state)
+
+
+def triage_answers(questions, answers):
+    """The reply compacted to what the journal keeps: a noul is its probability, a choice and
+    a score keep their value and their confidence. An answer whose shape is not what the
+    question asked for lands as null — the reader sees the gap, never an invented number."""
+    out = {}
+    for qid, q in questions.items():
+        a, kind, val = answers.get(qid), q.get("type"), None
+        if isinstance(a, dict):
+            if kind == "noul":
+                val = _num(a.get("noul"))
+            elif kind == "choice" and isinstance(a.get("choice"), str):
+                val = {"choice": a["choice"], "confidence": _num(a.get("confidence"))}
+            elif kind == "score" and _num(a.get("score")) is not None:
+                val = {"score": _num(a["score"]), "confidence": _num(a.get("confidence"))}
+        out[qid] = val
+    return out
+
+
+def triage_route(ex, ans, policy):
+    """The route and the verify hint → (route, verify). Computed here and only here: the judge
+    answers, the policy decides (§2). `failed` comes from the exit codes rather than from any
+    probability — a rc is a fact and outranks a judgment about one. A probability the reply
+    did not carry fails its comparison, so a half-answered lane lands in `escalate`, the
+    bucket that costs main one read, and never in accept."""
+    def ge(v, t):
+        return isinstance(v, float) and v >= t
+
+    def le(v, t):
+        return isinstance(v, float) and v <= t
+
+    risk = ans.get("risk")
+    risk = risk.get("score") if isinstance(risk, dict) else None
+    evidence = ans.get("evidence")
+    if ex.get("rc") != 0 or ex.get("check_rc") not in (None, 0):
+        route = "failed"
+    elif ge(ans.get("reports_blocked"), _thr(policy, "no_go_at", 0.7)):
+        route = "no-go-candidate"
+    elif (ge(ans.get("claims_done"), _thr(policy, "done_at", 0.7))
+          and le(ans.get("reports_blocked"), _thr(policy, "blocked_below", 0.2))
+          and le(ans.get("needs_decision"), _thr(policy, "decision_below", 0.3))
+          and le(ans.get("scope_creep"), _thr(policy, "creep_below", 0.3))):
+        route = "accept-candidate"
+    else:
+        route = "escalate"
+    # A hint that this lane deserves a verification lane (dispatch skill §4), never a gate.
+    verify = ge(risk, _thr(policy, "verify_risk_at", 2.0)) or (
+        isinstance(evidence, float) and evidence < _thr(policy, "evidence_below", 0.3))
+    return route, verify
+
+
+def triage_entry(hp, en, ex, outdir, cwd, claim, jrnl):
+    """One calibrated read of a whole finished lane → its triage journal record (§3.6).
+
+    The judge reads the report so that main does not have to; what comes back is a route —
+    evidence of the same standing as a check rc, never a verdict. A judge failure is a null
+    route and an ok:false metering row: the gap is the record, and the wave is untouched."""
+    state, trimmed = triage_state(en, ex, outdir, cwd, claim)
+    questions = jev_questions("harvest")
+    answers, meta = judge(hp, "harvest", state, questions)
+    if hp is not None:
+        with BATCH_LOCK:
+            append_event(hp, {"ev": "clerk", "name": "jev-harvest", "ok": meta["ok"],
+                              "ms": meta["ms"], "tokens": meta["tokens"]}, src="wrapper")
+    rec = {"t": now_iso(), "event": "triage", "id": en["id"], "attempt": ex.get("attempt"),
+           "dispatch": ex.get("dispatch"), "route": None, "verify": None, "answers": None,
+           "trimmed": trimmed, "jev": meta}
+    if answers is not None:
+        rec["answers"] = triage_answers(questions, answers)
+        rec["route"], rec["verify"] = triage_route(ex, rec["answers"], jev_policy("harvest"))
+    jrnl(rec)
+    return rec
+
+
+def triage_cause(rec):
+    """The cause a triage record names, or None when there is no triage or it named none."""
+    c = ((rec or {}).get("answers") or {}).get("cause")
+    return c.get("choice") if isinstance(c, dict) else None
+
+
+def cluster_excerpt(en, outdir):
+    """What one failure looks like, in as few lines as still identify it: the tail of the
+    check output when there was a check, else of stderr, plus the first line of the report
+    that names an error. Short on purpose — the question asked of it is sameness, and the
+    rest of a report is volume without signal for that one."""
+    text = _read_text(outdir / f"{en['id']}.check")
+    if text is None:
+        text = stderr_excerpt(outdir / f"{en['id']}.err") or ""
+    parts = ["\n".join(text.splitlines()[-CLUSTER_EXCERPT_LINES:])]
+    for ln in (_read_text(outdir / f"{en['id']}.out") or "").splitlines():
+        if CLUSTER_ERROR_RE.search(ln):
+            parts.append(ln)
+            break
+    return "\n".join(p for p in parts if p.strip())
+
+
+def cluster_failures(hp, failed, jrnl):
+    """Greedy one-pass clustering of a wave's failures → id → cluster name (§3.6).
+
+    Each failure is asked once against the representatives found so far, and the first one
+    above `same_cause_at` takes it. One pass and a high threshold, because the reason to
+    cluster is to stop paying N repair lanes for one defect (measured: 130 identical import
+    failures, one missing pytest.ini) — not to find the optimal partition. A wrong merge
+    hides a defect behind another one's diagnosis; a wrong split costs a second read."""
+    at = _thr(jev_policy("failure-cluster"), "same_cause_at", 0.7)
+    reps, members = [], []
+    for item in failed:
+        hit = None
+        if reps:
+            questions = {}
+            for k in range(len(reps)):
+                questions.update(jev_questions("failure-cluster", k=k))
+            state = {"a": item, "reps": reps}
+            answers, meta = judge(hp, "failure-cluster", state, questions)
+            if hp is not None:
+                with BATCH_LOCK:
+                    append_event(hp, {"ev": "clerk", "name": "jev-cluster", "ok": meta["ok"],
+                                      "ms": meta["ms"], "tokens": meta["tokens"]},
+                                 src="wrapper")
+            # A judge failure is not evidence of sameness: the entry keeps its own cluster.
+            for k in range(len(reps)):
+                a = (answers or {}).get(f"same_{k}")
+                p = _num(a.get("noul")) if isinstance(a, dict) else None
+                if p is not None and p >= at:
+                    hit = k
+                    break
+        if hit is None:
+            reps.append(item)
+            members.append([item["id"]])
+        else:
+            members[hit].append(item["id"])
+    out = {}
+    for k, (rep, ids) in enumerate(zip(reps, members), 1):
+        name = f"c{k}"
+        out.update({i: name for i in ids})
+        jrnl({"t": now_iso(), "event": "cluster", "cluster": name, "cause": rep["cause"],
+              "members": ids, "excerpt": one_line(rep["excerpt"], 200)})
+    return out
+
+
+def _pp(v):
+    """A probability as the table prints it: `.91`, or `-` when there is none."""
+    return f"{v:.2f}".lstrip("0") if isinstance(v, float) else "-"
+
+
+def _rel(p, cwd):
+    try:
+        return str(Path(p).relative_to(cwd))
+    except ValueError:
+        return str(p)
+
+
+def check_mark(check_rc):
+    return "-" if check_rc is None else ("pass" if check_rc == 0 else "fail")
+
+
+def harvest_row(r, clusters, outdir, cwd):
+    """One table line. The report column points where the diagnosis actually is: stderr for a
+    lane that died, the check output when only the check did, the report otherwise."""
+    en, ex, ans = r["en"], r["ex"], r["answers"]
+    if ex.get("rc") != 0:
+        ext = "err"
+    elif ex.get("check_rc") not in (None, 0):
+        ext = "check"
+    else:
+        ext = "out"
+    cause = ans.get("cause") if isinstance(ans.get("cause"), dict) else {}
+    if r["route"] == "failed":
+        route = f"failed {clusters.get(en['id'], '-')} {cause.get('choice') or '-'}"
+        numbers = f"cause {_pp(cause.get('confidence'))}"
+    elif ans:
+        route = r["route"] or "-"
+        numbers = (f"done {_pp(ans.get('claims_done'))} "
+                   f"blocked {_pp(ans.get('reports_blocked'))} "
+                   f"ask {_pp(ans.get('needs_decision'))} "
+                   f"creep {_pp(ans.get('scope_creep'))}")
+    else:
+        route, numbers = r["route"] or "-", "-"
+    report = _rel(outdir / f"{en['id']}.{ext}", cwd)
+    return [en["id"], str(ex.get("rc")), check_mark(ex.get("check_rc")),
+            r["claim"] or "-", route, "yes" if r["verify"] else "-", numbers,
+            f"→ {report}"]
+
+
+def run_harvest(mp, entries, journal, outdir):
+    """`--batch <manifest> --harvest`: launches nothing, reads everything (DESIGN §3.6).
+
+    Every exited entry is triaged again — two harvests are two facts, and the latest is what
+    a reader reads — the failures are clustered, and the result is one table main can scan
+    instead of N reports main would have to open. With the judge off the deterministic half
+    still prints: the table is a reading of the journal first and a reading of the judge
+    second, and the half that needs no key must not vanish with it."""
+    if not journal.exists():
+        die(f"dispatch --batch --harvest: no journal yet: {journal}", 2)
+    hp = find_hippo()
+    if hp is None:
+        print("dispatch --batch --harvest: no .hippo/ — no claims to show, no metering rows",
+              file=sys.stderr)
+    on = jev_backend(hp) != "off"
+    if not on:
+        print("--harvest: judge off — no TYPESAFE_API_KEY; showing the deterministic part "
+              "only", file=sys.stderr)
+    cwd = Path.cwd()
+    _, _, exits, _ = journal_state(journal)
+    claims = executor_claims(read_ledger(hp)) if hp is not None else {}
+
+    def jrnl(rec):
+        with journal.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    rows, failed = [], []
+    for en in entries:
+        ex = exits.get(en["id"])
+        if ex is None:
+            continue  # never exited: there is nothing to read yet
+        r = {"en": en, "ex": ex, "claim": claims.get(ex.get("dispatch")),
+             "route": None, "verify": None, "answers": {}}
+        if on:
+            rec = triage_entry(hp, en, ex, outdir, cwd, r["claim"], jrnl)
+            r.update(route=rec["route"], verify=rec["verify"], answers=rec["answers"] or {})
+        rows.append(r)
+        if r["route"] == "failed":
+            failed.append({"id": en["id"], "cause": triage_cause(r),
+                           "excerpt": cluster_excerpt(en, outdir)})
+    clusters = cluster_failures(hp, failed, jrnl) if failed else {}
+
+    rows.sort(key=lambda r: ROUTE_ORDER.index(r["route"])
+              if r["route"] in ROUTE_ORDER else len(ROUTE_ORDER))
+    head = ["id", "rc", "check", "claim", "route", "verify", "key numbers", "→ report"]
+    table = [harvest_row(r, clusters, outdir, cwd) for r in rows]
+    widths = [max(len(line[i]) for line in [head] + table) for i in range(len(head))]
+    for line in [head] + table:
+        print("  ".join(c.ljust(w) for c, w in zip(line, widths)).rstrip())
+
+    counts = collections.Counter(r["route"] or "-" for r in rows)
+    verdicts = mp.parent / f"{mp.stem}.verdicts.jsonl"
+    vrows = [{"entry": r["en"]["id"], "attempt": r["ex"].get("attempt"), "result": "accepted",
+              "note": f"triage accept-candidate: done {r['answers'].get('claims_done'):.2f}, "
+                      f"check {check_mark(r['ex'].get('check_rc'))}; confirmed by main"}
+             for r in rows if r["route"] == "accept-candidate"
+             and isinstance(r["answers"].get("claims_done"), float)]
+    if on:
+        # Rewritten every harvest, never appended to: a stale row from an earlier harvest
+        # would be piped into the ledger as this one's verdict.
+        verdicts.write_text("".join(json.dumps(v, ensure_ascii=False) + "\n" for v in vrows),
+                            encoding="utf-8")
+    if rows and on:
+        print()
+        print("routes: " + ", ".join(f"{k} {n}" for k, n in counts.most_common()))
+    by_cluster = collections.Counter(clusters.values())
+    for name in sorted(by_cluster, key=lambda n: int(n[1:])):
+        # Assignment is greedy, so a cluster's first member is the representative it was
+        # opened with — the excerpt every other member was judged the same as.
+        rep = next(f for f in failed if clusters.get(f["id"]) == name)
+        n = by_cluster[name]
+        print(f"{name} · {rep['cause'] or '-'} · {n} lane{'' if n == 1 else 's'} · "
+              f"{one_line(rep['excerpt'], 120)}")
+    relaunchable = sorted({f["cause"] for f in failed
+                           if f["cause"] in RELAUNCHABLE_CAUSES})
+    if relaunchable:
+        print(f"hippo dispatch --batch {_rel(mp, cwd)} --resume --causes "
+              + ",".join(relaunchable))
+    if vrows:
+        print(f"hippo log outcome --from-batch {_rel(journal, cwd)} < {_rel(verdicts, cwd)}")
+    summary = {"total": len(entries), "harvested": len(rows),
+               "clusters": len(by_cluster), "verdicts": str(verdicts) if on else None,
+               "journal": str(journal), "outdir": str(outdir)}
+    if on and rows:
+        summary["routes"] = dict(counts)
+    print(json.dumps(summary, ensure_ascii=False))
+    # Launching nothing, it has nothing to fail at: what the lanes did is in the table, and
+    # an rc that mixed the two would make "did the harvest run" unanswerable.
+    sys.exit(0)
 
 
 def run_batch(argv):
@@ -2317,7 +2757,7 @@ def run_batch(argv):
     id capture, parent stamping, usage collection, breaker checks, journaling, resume — in
     one wrapper call. Selection (the manifest) and judgment (verdicts) stay with the model:
     a check result is journal evidence and batch never writes ev:outcome."""
-    manifest, cli_conc, resume, fresh, dry_run = parse_batch_argv(argv)
+    manifest, cli_conc, flags, causes = parse_batch_argv(argv)
     mp = Path(manifest)
     concurrency, entries = load_manifest(mp)
     if cli_conc is not None:
@@ -2326,13 +2766,17 @@ def run_batch(argv):
     outdir = mp.parent / f"{mp.stem}.out"
     total = len(entries)
 
-    def summary(launched, ok, failed, skipped, stopped):
-        return json.dumps(
-            {"total": total, "launched": launched, "ok": ok, "failed": failed,
-             "skipped": skipped, "stopped": stopped, "journal": str(journal),
-             "outdir": str(outdir)}, ensure_ascii=False)
+    def summary(launched, ok, failed, skipped, stopped, routes=None):
+        body = {"total": total, "launched": launched, "ok": ok, "failed": failed,
+                "skipped": skipped, "stopped": stopped, "journal": str(journal),
+                "outdir": str(outdir)}
+        if routes:
+            body["routes"] = dict(routes)
+        return json.dumps(body, ensure_ascii=False)
 
-    if dry_run:
+    if flags["harvest"]:
+        run_harvest(mp, entries, journal, outdir)
+    if flags["dry_run"]:
         for en in entries:
             print(f"{en['id']} exec={en['executor']}/{en['model']}/{en['effort']} "
                   f"prompt={len(en['prompt'].encode('utf-8'))}B "
@@ -2340,13 +2784,13 @@ def run_batch(argv):
         print(summary(0, 0, 0, 0, False))
         sys.exit(0)
 
-    attempts, done_ids = {}, set()
+    attempts, done_ids, triages = {}, set(), {}
     if journal.exists():
-        if fresh:
+        if flags["fresh"]:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             journal.rename(journal.with_name(f"{journal.name}.{stamp}.bak"))
-        elif resume:
-            attempts, done_ids = journal_state(journal)
+        elif flags["resume"]:
+            attempts, done_ids, _, triages = journal_state(journal)
         else:
             die(f"dispatch --batch: journal exists — --resume continues it, --fresh starts "
                 f"over ({journal})", 2)
@@ -2358,8 +2802,8 @@ def run_batch(argv):
     parent = os.environ.get("HIPPO_DISPATCH", "")
     cwd = Path.cwd()
     stop = threading.Event()
-    state = {"launched": 0, "ok": 0, "failed": 0, "done": 0,
-             "warned": False, "stopped": False}
+    state = {"launched": 0, "ok": 0, "failed": 0, "done": 0, "warned": False,
+             "stopped": False, "triaged": 0, "routes": collections.Counter()}
 
     def jrnl(rec):
         with BATCH_LOCK:
@@ -2454,13 +2898,27 @@ def run_batch(argv):
             rec["timed_out"] = True
         rec["tokens"] = usage["tokens"] if usage else None
         jrnl(rec)
+
+        # Triage at lane exit (§3.6): one calibrated read of the whole report, while the
+        # files are hot and main is not in the loop. With the judge off it does not exist —
+        # no record, no column, no changed line.
+        triaged, route = jev_backend(hp) != "off", None
+        if triaged:
+            claim = executor_claims(read_ledger(hp)).get(did) if hp is not None else None
+            route = triage_entry(hp, en, rec, outdir, cwd, claim, jrnl)["route"]
+
         ok = rc == 0 and check_rc in (None, 0)
         mark = "-" if check_rc is None else ("pass" if check_rc == 0 else "fail")
         with BATCH_LOCK:
             state["ok" if ok else "failed"] += 1
             state["done"] += 1
-            print(f"[{state['done']}/{total}] {en['id']} rc={rc} check={mark} {did}",
-                  file=sys.stderr)
+            line = f"[{state['done']}/{total}] {en['id']} rc={rc} check={mark} {did}"
+            if triaged:
+                # A triage that failed counts under "-": the gap is a fact about the wave too.
+                state["triaged"] += 1
+                state["routes"][route or "-"] += 1
+                line += f" triage={route or '-'}"
+            print(line, file=sys.stderr)
 
     skipped = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
@@ -2470,12 +2928,21 @@ def run_batch(argv):
                 jrnl({"t": now_iso(), "event": "skip", "id": en["id"]})
                 skipped += 1
                 continue
+            cause = triage_cause(triages.get(en["id"]))
+            if causes is not None and cause is not None and cause not in causes:
+                # A resume narrowed to the causes a relaunch can actually clear. An entry with
+                # no triage, or one whose triage named no cause, still relaunches: a filter
+                # that cannot read the cause must not be the reason a lane is dropped.
+                jrnl({"t": now_iso(), "event": "skip", "id": en["id"],
+                      "why": f"cause {cause}"})
+                skipped += 1
+                continue
             futs.append(pool.submit(run_entry, en, attempts.get(en["id"], 0) + 1))
         for f in concurrent.futures.as_completed(futs):
             f.result()  # a wrapper bug dies loudly, never as a silently thinner wave
 
     print(summary(state["launched"], state["ok"], state["failed"], skipped,
-                  state["stopped"]))
+                  state["stopped"], state["routes"] if state["triaged"] else None))
     sys.exit(2 if state["stopped"] else (1 if state["failed"] else 0))
 
 
