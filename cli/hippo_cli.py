@@ -2511,8 +2511,10 @@ def cmd_scribe(args):
         save_cursor()
         return
 
-    # 3b. The judge gate (DESIGN §3.5.3b). The prefilter answers "did anything happen"; this
-    # answers "is any of it the scribe's business", which is a judgment and so not a regex.
+    # 3b. The judge gate (DESIGN §3.5.3b): five yes/no judgments over the digest, metered and
+    # handed to the clerk as advisory hints. It never decides whether the clerk runs — measured
+    # on 90 real windows, a skip rule at any useful floor lost ~14% of real events to save ~1
+    # clerk call in 30 (almost every window that passes the prefilter holds substantive work).
     # With the backend off the gate does not exist — no row, no note, no change in behavior.
     hints = ""
     if jev_backend(hp) != "off":
@@ -2530,10 +2532,6 @@ def cmd_scribe(args):
             probs = {q: float(answers[q]["noul"]) for q in questions
                      if isinstance(answers.get(q), dict)
                      and isinstance(answers[q].get("noul"), (int, float))}
-            floor = jev_policy("scribe-gate").get("skip_when_all_below")
-            if floor is not None and probs and all(p < float(floor) for p in probs.values()):
-                save_cursor()
-                return
             if probs:
                 hints = (
                     "# gate hints\n\nadvisory probabilities from a separate judge over the "

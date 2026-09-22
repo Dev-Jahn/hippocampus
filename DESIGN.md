@@ -329,11 +329,17 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
    delegated work, a pasted external review with a sha, a worker launched, substantive work
    finished or failed. The call is self-metered like any clerk
    (`ev:clerk name:jev-gate ok ms tokens`, `src:scribe`), whether it succeeded or not.
-   When every answer is below `policy.skip_when_all_below`, the cursor advances and the turn
-   clerk is not called at all — the window had nothing in it worth a scribe. Otherwise the
+   The gate **never decides whether the clerk runs**. The first draft skipped the clerk when
+   every answer was low; measured before shipping (2026-09-23) on 90 windows of a consuming
+   project's transcripts, cut just before each scribe-written event, a 0.2 floor cleared for
+   18/19 directives, 16/19 outcomes, 9/9 dispatches and 8/12 reviews — so a skip rule would have
+   dropped about one real event in seven — while of 31 windows where the clerk recorded nothing,
+   exactly one had every answer under 0.2: one clerk call in thirty saved. Almost every window
+   that passes the prefilter holds substantive work, and the worklog line is wanted for it. So the
    probabilities ride into the clerk's payload as a `# gate hints` section between the dispatch
    roster and the digest, marked advisory, with the digest still the only evidence (the clerk
-   prompt says so in its own words). A failed judge inserts no section, so the clerk sees exactly
+   prompt says so in its own words), and the token saving of this layer is nil by design — its
+   value is the hints and the metered signal checkup can read. A failed judge inserts no section, so the clerk sees exactly
    what it sees today, and the reason lands on stderr. With the backend off the gate does not
    exist: no row, no section, no change in behavior. Measured live on the suite's fake transcript
    (2026-09-23): 570–640ms and 873 tokens for all five questions in one request.

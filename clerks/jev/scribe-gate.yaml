@@ -20,10 +20,12 @@ questions:
       "false": Delegated work is only reported, described, or still running, with nobody judging it
   external_review:
     type: noul
-    instructions: Does `digest` contain a pasted external review reply that names a commit sha?
+    instructions: >-
+      Are the findings of an external review of this project's work — from a reviewer, a
+      ChatGPT or Codex review, or a review file — pasted, quoted, or read in `digest`?
     criteria:
-      "true": A review reply from outside this session is quoted and a commit sha appears with it
-      "false": No pasted external review, or a review with no commit sha anywhere near it
+      "true": An external review's findings are present in this window, quoted or read from a file
+      "false": No external review appears; at most a review is mentioned or planned
   launch:
     type: noul
     instructions: >-
@@ -40,7 +42,10 @@ questions:
     criteria:
       "true": Something was built, changed, merged, measured, found out, or went wrong
       "false": The window is reading, searching, planning, or talking, with nothing concluded
-policy:
-  # Below this, every question says "nothing of the sort happened" and the clerk is skipped.
-  # It is deliberately low: a missed event costs a record, a needless clerk call costs tokens.
-  skip_when_all_below: 0.2
+# No policy: the gate never decides whether the clerk runs. Measured (2026-09-23) on 90 windows of
+# a consuming project's transcripts, cut just before each scribe-written event: at a 0.2 floor the
+# matching question cleared it for 18/19 directives, 16/19 outcomes, 9/9 dispatches and 8/12
+# reviews (the old, literal review wording — hence the rewording above) — a skip rule would have
+# dropped ~14% of real events — while of 31 windows where the clerk recorded nothing, only one had
+# every question under 0.2, so the same rule would have saved ~1 clerk call in 30. The answers ride
+# into the clerk as advisory hints and are metered; that is the whole of it.

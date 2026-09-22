@@ -201,7 +201,8 @@ def test_the_shipped_gate_spec_asks_exactly_the_ids_the_hints_name(cli):
     for qid, q in questions.items():
         assert q["type"] == "noul", qid
         assert set(q["criteria"]) == {"true", "false"}, qid
-    assert cli.jev_policy("scribe-gate")["skip_when_all_below"] == 0.2
+    # The gate never decides whether the clerk runs (§3.5.3b) — no threshold to read.
+    assert "skip_when_all_below" not in cli.jev_policy("scribe-gate")
 
 
 # --------------------------------------------------------------------------
@@ -236,24 +237,27 @@ def _payload(capture):
     return "# live directives\n" + text.rsplit("\n# live directives\n", 1)[1]
 
 
-def test_gate_skips_the_clerk_when_every_answer_is_low(
+def test_a_low_gate_still_runs_the_clerk_with_low_hints(
     tmp_project, run_hippo, fake_transcript, valid_mock_output, tmp_path
 ):
+    """§3.5.3b: the gate never decides whether the clerk runs — measured, a skip rule would
+    have dropped about one real event in seven to save one clerk call in thirty."""
     jev = _mock_file(tmp_path, {"default": {"noul": 0.01}})
+    capture = tmp_path / "clerk.capture"
     proc = run_hippo(
         ["scribe", "--transcript", str(fake_transcript), "--session", "sess-low"],
         cwd=tmp_project,
-        env=_env(valid_mock_output, jev),
+        env=_env(valid_mock_output, jev, clerk_capture=capture),
     )
     assert proc.returncode == 0, proc.stderr
 
     gate = _clerk_rows(tmp_project, "jev-gate")
     assert len(gate) == 1 and gate[0]["ok"] is True
     assert gate[0]["src"] == "scribe"
-    assert _clerk_rows(tmp_project, "turn-scribe") == [], "a low gate must skip the clerk"
-    assert [e for e in read_ledger(tmp_project) if e.get("ev") == "dispatch"] == []
+    assert len(_clerk_rows(tmp_project, "turn-scribe")) == 1, "the clerk runs whatever the gate says"
+    assert "- user_instruction: 0.01" in _payload(capture)
     assert json.loads(cursors_path(tmp_project).read_text(encoding="utf-8"))["sess-low"] > 0
-    assert not worklog_path(tmp_project).exists(), "nothing ran, so nothing to log"
+    assert worklog_path(tmp_project).exists()
 
 
 def test_gate_hints_ride_into_the_clerk_payload(
