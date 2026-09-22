@@ -1551,6 +1551,60 @@ def event_time(e):
         return None
 
 
+def prior_cells(rows, prices=None):
+    """The kind × exec cells: the dispatch ⋈ first-outcome join, counted and priced.
+
+    Both readers of the ledger's routing evidence come through here — PRIORS.md renders these
+    cells, and plan mode (§3.6) reads the same ones to move a suggestion. A second
+    implementation of the join would be a second answer to the same question."""
+    prices = prices or load_prices()
+    first = {}
+    # Self-reported outcomes are claims, not verdicts (§9.2): they enter no cell, no
+    # attribution count, no unjoined count. The scorecard folds only judgments.
+    for e in rows:  # the ledger is append-only, so file order is chronological
+        if e.get("ev") == "outcome" and e.get("src") != "executor":
+            first.setdefault(e.get("ref"), e)
+    usage = {}
+    for e in rows:  # one usage per dispatch from the wrapper; last wins if re-recorded
+        if e.get("ev") == "usage":
+            usage[e.get("ref")] = e
+
+    cells = {}
+    for d in rows:
+        if d.get("ev") != "dispatch":
+            continue
+        f = first.get(d.get("id"))
+        if not f:
+            continue
+        b = cells.setdefault((d.get("kind"), d.get("exec")),
+                             {"judged": 0, "accepted": 0, "revised": 0, "refuted": 0,
+                              "no-go": 0, "lost": 0, "rework": 0, "tokens": 0, "usd": 0.0,
+                              "priced": 0, "unpriced": 0,
+                              "unpriced_models": collections.Counter()})
+        b["judged"] += 1
+        b[f.get("result")] = b.get(f.get("result"), 0) + 1
+        b["rework"] += int(f.get("rework") or 0)
+        # Cost lands on the kind × exec cell only (§9.6): tokens always; dollars only when
+        # the sheet can price them honestly — an unpriced row is counted and named, not guessed.
+        u = usage.get(d.get("id"))
+        if u:
+            b["tokens"] += int(u.get("tokens") or 0)
+            usd = price_usd(u, prices)
+            if usd is None:
+                b["unpriced"] += 1
+                b["unpriced_models"][u.get("model") or "(no model)"] += 1
+            else:
+                b["usd"] += usd
+                b["priced"] += 1
+    return cells
+
+
+def prior_n(b):
+    """The denominator of a first-pass rate: a no-go never started and a lost result was never
+    seen, so neither is a judgment of the work."""
+    return b["judged"] - b["no-go"] - b["lost"]
+
+
 def prior_facts(rows, now, prices=None):
     """Every number in PRIORS.md, computed here instead of by the clerk.
 
@@ -1570,40 +1624,17 @@ def prior_facts(rows, now, prices=None):
     for e in outs:  # the ledger is append-only, so file order is chronological
         first.setdefault(e.get("ref"), e)
     known = {e.get("id") for e in disp}
-    usage = {}
-    for e in rows:  # one usage per dispatch from the wrapper; last wins if re-recorded
-        if e.get("ev") == "usage":
-            usage[e.get("ref")] = e
 
-    cells, per_exec = {}, {}
-    unpriced_models = collections.Counter()
-    for d in disp:
-        f = first.get(d.get("id"))
-        if not f:
-            continue
-        for bucket, key in ((cells, (d.get("kind"), d.get("exec"))), (per_exec, d.get("exec"))):
-            b = bucket.setdefault(key, {"judged": 0, "accepted": 0, "revised": 0, "refuted": 0,
-                                        "no-go": 0, "lost": 0, "rework": 0,
-                                        "tokens": 0, "usd": 0.0, "priced": 0, "unpriced": 0})
-            b["judged"] += 1
-            b[f.get("result")] = b.get(f.get("result"), 0) + 1
-            b["rework"] += int(f.get("rework") or 0)
-        # Cost lands on the kind × exec cell only (§9.6): tokens always; dollars only when
-        # the sheet can price them honestly — an unpriced row is counted and named, not guessed.
-        u = usage.get(d.get("id"))
-        if u:
-            b = cells[(d.get("kind"), d.get("exec"))]
-            b["tokens"] += int(u.get("tokens") or 0)
-            usd = price_usd(u, prices)
-            if usd is None:
-                b["unpriced"] += 1
-                unpriced_models[u.get("model") or "(no model)"] += 1
-            else:
-                b["usd"] += usd
-                b["priced"] += 1
-
-    def rate(b):
-        return b["judged"] - b["no-go"] - b["lost"]
+    cells = prior_cells(rows, prices)
+    # Per exec is the same join one axis wider, so it is folded from the cells rather than
+    # counted a second time — one counting rule, one place it can be wrong.
+    per_exec, unpriced_models = {}, collections.Counter()
+    for (_, ex), b in cells.items():
+        p = per_exec.setdefault(ex, {"judged": 0, "accepted": 0, "revised": 0, "refuted": 0,
+                                     "no-go": 0, "lost": 0})
+        for k in p:
+            p[k] += b[k]
+        unpriced_models.update(b["unpriced_models"])
 
     # Cells under the threshold are named but never given a rate: a percentage over n=1 reads as
     # evidence and is not one. Naming them keeps the omission visible instead of silent.
@@ -1615,8 +1646,8 @@ def prior_facts(rows, now, prices=None):
              "| verdicts |",
              "|---|---|---:|---:|---:|---:|---:|---:|---:|---|"]
     thin = []
-    for (kind, ex), b in sorted(cells.items(), key=lambda kv: -rate(kv[1])):
-        n = rate(b)
+    for (kind, ex), b in sorted(cells.items(), key=lambda kv: -prior_n(kv[1])):
+        n = prior_n(b)
         if n < PRIOR_MIN_SAMPLE:
             thin.append(f"{kind}×{ex} (n={n})")
             continue
@@ -2033,13 +2064,14 @@ def run_dispatch(argv):
 
 BATCH_USAGE = (
     "usage: hippo dispatch --batch <manifest.yaml> [--concurrency N] "
-    "[--resume [--causes a,b] | --fresh] [--dry-run | --harvest]\n"
+    "[--resume [--causes a,b] | --fresh] [--dry-run | --harvest | --plan]\n"
     "       the manifest is per-wave data, authored fresh like a brief — never standing config\n"
     "       --resume continues an existing journal (done entries skip, the rest relaunch); "
     "--fresh sets it aside\n"
     "       --causes narrows a resume to the failure causes named (capability|spec|"
     "environment|transient)\n"
-    "       --harvest launches nothing: it triages every exited entry and prints the table"
+    "       --harvest launches nothing: it triages every exited entry and prints the table\n"
+    "       --plan launches nothing: it measures each brief and suggests an exec per entry"
 )
 
 # Everything a manifest entry may set, with the built-in value where one exists. kind and
@@ -2066,7 +2098,8 @@ BATCH_LOCK = threading.RLock()
 
 def parse_batch_argv(argv):
     manifest = concurrency = causes = None
-    flags = {"resume": False, "fresh": False, "dry_run": False, "harvest": False}
+    flags = {"resume": False, "fresh": False, "dry_run": False, "harvest": False,
+             "plan": False}
     i, n = 0, len(argv)
     while i < n:
         a = argv[i]
@@ -2089,18 +2122,22 @@ def parse_batch_argv(argv):
                 if concurrency < 1:
                     die(f"dispatch --batch: --concurrency must be >= 1\n{BATCH_USAGE}", 2)
             i += 2
-        elif a in ("--resume", "--fresh", "--dry-run", "--harvest"):
+        elif a in ("--resume", "--fresh", "--dry-run", "--harvest", "--plan"):
             flags[a[2:].replace("-", "_")] = True
             i += 1
         else:
             die(BATCH_USAGE, 2)
     if flags["resume"] and flags["fresh"]:
         die(f"dispatch --batch: --resume and --fresh are mutually exclusive\n{BATCH_USAGE}", 2)
-    clash = [f"--{k.replace('_', '-')}"
-             for k in ("resume", "fresh", "dry_run") if flags["harvest"] and flags[k]]
-    if clash:
-        die(f"dispatch --batch: --harvest launches nothing, so it cannot be combined with "
-            f"{', '.join(clash)}\n{BATCH_USAGE}", 2)
+    # --harvest and --plan each launch nothing, so neither combines with a launching mode nor
+    # with the other: one call, one thing it did.
+    for mode in ("harvest", "plan"):
+        clash = [f"--{k.replace('_', '-')}"
+                 for k in ("resume", "fresh", "dry_run", "harvest", "plan")
+                 if k != mode and flags[mode] and flags[k]]
+        if clash:
+            die(f"dispatch --batch: --{mode} launches nothing, so it cannot be combined with "
+                f"{', '.join(clash)}\n{BATCH_USAGE}", 2)
     if causes is not None and not flags["resume"]:
         # A filter over what --resume relaunches. On its own it would read as a filter and do
         # nothing, which is the one thing a flag must never do.
@@ -2111,9 +2148,12 @@ def parse_batch_argv(argv):
     return manifest, concurrency, flags, causes
 
 
-def load_manifest(mp):
+def load_manifest(mp, plan=False):
     """(concurrency, fully-resolved entries). Fail-closed and total: every problem is
-    collected, then one die — a manifest that half-validates must not launch half a wave."""
+    collected, then one die — a manifest that half-validates must not launch half a wave.
+
+    In plan mode `model` and `effort` are what is being suggested, so an entry may leave them
+    unset; everything else validates exactly as it does for a launch."""
     if not mp.is_file():
         die(f"dispatch --batch: no such manifest: {mp}", 2)
     try:
@@ -2186,13 +2226,16 @@ def load_manifest(mp):
         for k in sorted(set(en) - set(MANIFEST_DEFAULTS) - set(ENTRY_KEYS), key=repr):
             problems.append(f"{where}: unknown key: {k}")
         cfg = {**base, **{k: v for k, v in en.items() if k in MANIFEST_DEFAULTS}}
+        # Unset is exactly None, so `model: ""` is still the error it is for a launch.
+        unset = {f for f in ("model", "effort") if plan and cfg[f] is None}
         for f in ("kind", "model"):
-            if not isinstance(cfg[f], str) or not cfg[f].strip():
+            if f not in unset and (not isinstance(cfg[f], str) or not cfg[f].strip()):
                 problems.append(f"{where}: {f} is required (in defaults or the entry)")
         if cfg["executor"] not in BATCH_EXECUTORS:
             problems.append(f"{where}: executor must be {'|'.join(BATCH_EXECUTORS)} "
                             f"(the adapters that exist): {cfg['executor']!r}")
-        if not isinstance(cfg["effort"], str) or not cfg["effort"].strip():
+        if "effort" not in unset and (
+                not isinstance(cfg["effort"], str) or not cfg["effort"].strip()):
             problems.append(f"{where}: effort must be a non-empty string: {cfg['effort']!r}")
         for f in ("depth", "timeout"):
             if isinstance(cfg[f], bool) or not isinstance(cfg[f], int):
@@ -2661,6 +2704,83 @@ def harvest_row(r, clusters, outdir, cwd):
             f"→ {report}"]
 
 
+# A finding starts at a bullet, a numbered item or a heading and runs to the next one — the
+# shape a verification report actually has. Prose with none of them is not a list of findings,
+# and splitting it on sentences would invent boundaries the lane did not write.
+FINDING_START_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)]|#{1,6})\s+")
+# One request carries two questions per finding. The cap is the request's size, not a judgment
+# about the report: past it the first 60 are ranked and the rest are named on stderr.
+FINDINGS_MAX = 60
+
+
+def split_findings(report):
+    """A verifier's report split into findings. Nothing is paraphrased and nothing is dropped:
+    a finding is the lines from its bullet to the next one, so what gets ranked is what the
+    lane wrote."""
+    blocks = []
+    for ln in (report or "").splitlines():
+        if FINDING_START_RE.match(ln):
+            blocks.append([ln])
+        elif blocks:
+            blocks[-1].append(ln)
+    return [t for t in ("\n".join(b).strip() for b in blocks) if t]
+
+
+def rank_findings(hp, en, report, attempt, jrnl):
+    """A verification lane's findings, scored and sorted → the ranking (§3.6).
+
+    A verifier is told to report everything and let the collection side filter (dispatch skill
+    §4), and that filtering was a main turn per verifier. Here it is one request that scores
+    each finding on its own, so main reads the top of a sorted list instead of the whole
+    report. Severity and reality are separate questions on purpose: a confident style
+    preference is not a blocking defect."""
+    findings = split_findings(report)
+    if not findings:
+        return []  # a prose report has no findings to rank, and nothing is asked about it
+    if len(findings) > FINDINGS_MAX:
+        print(f"{en['id']}: {len(findings)} findings — ranking the first {FINDINGS_MAX}",
+              file=sys.stderr)
+        findings = findings[:FINDINGS_MAX]
+    questions = {}
+    for k in range(len(findings)):
+        questions.update(jev_questions("verify", k=k))
+    answers, meta = judge(hp, "verify", {"scope": en.get("scope"), "findings": findings},
+                          questions)
+    if hp is not None:
+        with BATCH_LOCK:
+            append_event(hp, {"ev": "clerk", "name": "jev-verify", "ok": meta["ok"],
+                              "ms": meta["ms"], "tokens": meta["tokens"]}, src="wrapper")
+    if answers is None:
+        # The ok:false row is the record. An empty ranking would read as a report that found
+        # nothing, which is the opposite of what happened.
+        return []
+    ans = triage_answers(questions, answers)
+    ranked = []
+    for k, text in enumerate(findings):
+        sev = ans.get(f"severity_{k}")
+        ranked.append({"k": k, "severity": sev.get("score") if isinstance(sev, dict) else None,
+                       "real": ans.get(f"real_{k}"),
+                       # Folded to one line: the head is a table cell, and the whole finding
+                       # is still in the lane's own report.
+                       "head": one_line(text, 100)})
+
+    def order(f):
+        # An unanswered finding sorts last: a gap is not a severity of zero.
+        return (-(f["severity"] if f["severity"] is not None else -1.0),
+                -(f["real"] if f["real"] is not None else -1.0))
+
+    ranked.sort(key=order)
+    jrnl({"t": now_iso(), "event": "findings", "id": en["id"], "attempt": attempt,
+          "ranked": ranked})
+    return ranked
+
+
+def finding_line(f):
+    """One ranked finding, printed under its entry's row in the harvest table."""
+    sev = f"{f['severity']:.1f}" if isinstance(f["severity"], float) else "-"
+    return f"  ▸ {sev} real {_pp(f['real'])}  {f['head']}"
+
+
 def run_harvest(mp, entries, journal, outdir):
     """`--batch <manifest> --harvest`: launches nothing, reads everything (DESIGN §3.6).
 
@@ -2693,10 +2813,13 @@ def run_harvest(mp, entries, journal, outdir):
         if ex is None:
             continue  # never exited: there is nothing to read yet
         r = {"en": en, "ex": ex, "claim": claims.get(ex.get("dispatch")),
-             "route": None, "verify": None, "answers": {}}
+             "route": None, "verify": None, "answers": {}, "findings": []}
         if on:
             rec = triage_entry(hp, en, ex, outdir, cwd, r["claim"], jrnl)
             r.update(route=rec["route"], verify=rec["verify"], answers=rec["answers"] or {})
+        if on and en.get("kind") == "verify":
+            r["findings"] = rank_findings(hp, en, _read_text(outdir / f"{en['id']}.out"),
+                                          ex.get("attempt"), jrnl)
         rows.append(r)
         if r["route"] == "failed":
             failed.append({"id": en["id"], "cause": triage_cause(r),
@@ -2708,8 +2831,19 @@ def run_harvest(mp, entries, journal, outdir):
     head = ["id", "rc", "check", "claim", "route", "verify", "key numbers", "→ report"]
     table = [harvest_row(r, clusters, outdir, cwd) for r in rows]
     widths = [max(len(line[i]) for line in [head] + table) for i in range(len(head))]
-    for line in [head] + table:
-        print("  ".join(c.ljust(w) for c, w in zip(line, widths)).rstrip())
+
+    def fmt(line):
+        return "  ".join(c.ljust(w) for c, w in zip(line, widths)).rstrip()
+
+    ranked = any(r["findings"] for r in rows)
+    top = int(_thr(jev_policy("verify"), "show_top", 5)) if ranked else 0
+    print(fmt(head))
+    for r, line in zip(rows, table):
+        print(fmt(line))
+        # A verification lane's findings ride under its own row, worst first: the table stays
+        # one read, and the ranking is next to the lane it is about.
+        for f in r["findings"][:top]:
+            print(finding_line(f))
 
     counts = collections.Counter(r["route"] or "-" for r in rows)
     verdicts = mp.parent / f"{mp.stem}.verdicts.jsonl"
@@ -2752,6 +2886,220 @@ def run_harvest(mp, entries, journal, outdir):
     sys.exit(0)
 
 
+# --- plan mode (DESIGN §3.6 — the judge measures the brief, code prices it) ---
+
+PLAN_TIERS = ("cheap", "mid", "top")
+
+
+def price_ladder(executor, prices):
+    """The executor's three tiers, read off the price sheet: the cheapest input price is
+    `cheap`, the most expensive is `top`, the second most expensive is `mid`. Read at call
+    time, so a price refresh moves the ladder — the frozen version of this is the routing.yaml
+    the NOT-list retired (§4)."""
+    prefix = "claude-" if executor == "claude" else "gpt-"
+    models = sorted((m for m in prices["models"] if str(m).startswith(prefix)),
+                    key=lambda m: (prices["models"][m].get("input", 0.0), str(m)))
+    if not models:
+        return {}
+    # A sheet carrying one or two models for this executor still has three tiers: they
+    # collapse onto what exists rather than naming a model that does not.
+    return dict(zip(PLAN_TIERS, (models[0], models[max(0, len(models) - 2)], models[-1])))
+
+
+def entry_exec(en):
+    """The exec an entry already names, or None when plan mode is being asked to fill it in."""
+    return f"{en['executor']}/{en['model']}/{en['effort'] or '-'}" if en["model"] else None
+
+
+def plan_scores(ans):
+    """The three difficulty scores, or None when the reply did not carry all three. A score
+    that did not come back is not a low one, so a partial reply suggests nothing at all."""
+    out = []
+    for qid in ("scope", "novelty", "spec"):
+        a = ans.get(qid)
+        v = _num(a.get("score")) if isinstance(a, dict) else None
+        if v is None:
+            return None
+        out.append(v)
+    return out
+
+
+def plan_tier(scores, policy):
+    """The tier this brief's difficulty demands, before any evidence. The judge scored the
+    three ladders; every comparison against them happens here (§2 judge guardrails)."""
+    scope, novelty, spec = scores
+    if (novelty >= _thr(policy, "top_novelty", 2.0) or spec >= _thr(policy, "top_spec", 2.0)
+            or scope >= _thr(policy, "top_scope", 2.5)):
+        return "top"
+    if novelty >= _thr(policy, "mid_novelty", 1.0) or scope >= _thr(policy, "mid_scope", 1.5):
+        return "mid"
+    return "cheap"
+
+
+def plan_kinds():
+    """The kind vocabulary, read from the spec's own `kind_fit` criteria. The scribe's table is
+    copied into exactly one place, and a second copy in code is how two of them drift."""
+    return set(jev_spec("route")["questions"]["kind_fit"].get("criteria") or {})
+
+
+def plan_evidence(cells, kind, ex):
+    """What the ledger says about this kind × exec → (the text the table prints, the first-pass
+    rate or None). A cell under the sample threshold is named with its n rather than dropped:
+    the reader must be able to tell a thin cell from an absent one (§3.6b), and neither of them
+    moves a suggestion."""
+    b = cells.get((kind, ex))
+    if b is None:
+        return "no evidence", None
+    n = prior_n(b)
+    if n < PRIOR_MIN_SAMPLE:
+        return f"no evidence (n={n})", None
+    return f"priors {kind}×{ex} {b['accepted']}/{n}", b["accepted"] / n
+
+
+def plan_adjust(en, effort, tier, ladder, cells, policy):
+    """Difficulty picked a tier; the ledger moves it at most one step → (tier, evidence, note).
+
+    The candidate's own record is read first: a tier this kind keeps failing at argues against
+    itself more directly than a cheaper tier's record argues for the drop. Then the cheapest
+    tier whose record clears the bar, which is the question §9.6 said routing actually asks."""
+    def ex_of(t):
+        return f"{en['executor']}/{ladder[t]}/{effort}"
+
+    i = PLAN_TIERS.index(tier)
+    text, rate = plan_evidence(cells, en["kind"], ex_of(tier))
+    below = _thr(policy, "bump_below", 0.5)
+    if rate is not None and rate < below and i + 1 < len(PLAN_TIERS):
+        up = PLAN_TIERS[i + 1]
+        note = f"{tier} → {up}: {text} is under {below:.2f} first-pass"
+        return up, plan_evidence(cells, en["kind"], ex_of(up))[0], note
+    at = _thr(policy, "drop_at", 0.8)
+    for t in PLAN_TIERS[:i]:
+        t_text, t_rate = plan_evidence(cells, en["kind"], ex_of(t))
+        if t_rate is not None and t_rate >= at:
+            return t, t_text, f"{tier} → {t}: {t_text} is at or over {at:.2f} first-pass"
+    return tier, text, None
+
+
+def plan_entry(hp, en, cells, ladder, policy):
+    """One entry: one request about its brief, then everything code derives from the answers
+    (§3.6) → the table row, the notes it earned and the `.plan.jsonl` record."""
+    questions = jev_questions("route")
+    state = {"scope": en.get("scope"), "kind": en.get("kind"), "brief": en.get("prompt")}
+    answers, meta = judge(hp, "route", state, questions)
+    if hp is not None:
+        append_event(hp, {"ev": "clerk", "name": "jev-plan", "ok": meta["ok"],
+                          "ms": meta["ms"], "tokens": meta["tokens"]}, src="wrapper")
+    ans = triage_answers(questions, answers) if answers is not None else {}
+    scores = plan_scores(ans)
+    notes, tier, model, effort = [], None, None, None
+    if scores is not None and ladder:
+        effort = "high" if scores[1] >= _thr(policy, "high_effort_novelty", 2.0) else "medium"
+        tier, evidence, note = plan_adjust(en, effort, plan_tier(scores, policy), ladder,
+                                           cells, policy)
+        model = ladder[tier]
+        if note:
+            notes.append(note)
+    else:
+        # No difficulty, no suggestion — inventing a tier out of a failed request is the one
+        # thing this must not do. What the entry already routes to is still worth its evidence.
+        cur = entry_exec(en)
+        evidence = plan_evidence(cells, en["kind"], cur)[0] if cur else "-"
+    verifiable = ans.get("verifiable")
+    if (isinstance(verifiable, float) and verifiable < _thr(policy, "check_below", 0.3)
+            and not en["check"]):
+        notes.append("add a check — the brief names no machine-verifiable completion")
+    fit = ans.get("kind_fit") if isinstance(ans.get("kind_fit"), dict) else {}
+    conf = fit.get("confidence")
+    # PRIORS aggregates on kind, so a stray tag is a column of one — worth saying while the
+    # manifest is still being edited, and only when the judge is confident about the reading.
+    if (en["kind"] not in plan_kinds() and isinstance(conf, float)
+            and conf >= _thr(policy, "kind_at", 0.7)):
+        notes.append(f'kind "{en["kind"]}" reads as {fit["choice"]} ({conf:.2f})')
+
+    def cell(qid):
+        a = ans.get(qid)
+        v = a.get("score") if isinstance(a, dict) else None
+        return f"{v:.2f}" if isinstance(v, float) else "-"
+
+    row = [en["id"], cell("scope"), cell("novelty"), cell("spec"), _pp(verifiable),
+           entry_exec(en) or "-",
+           f"{en['executor']}/{model}/{effort}" if model else "-", evidence]
+    rec = {"t": now_iso(), "id": en["id"],
+           "difficulty": {q: ans.get(q) for q in ("scope", "novelty", "spec", "verifiable")},
+           "kind_fit": ans.get("kind_fit"), "suggested": {"model": model, "effort": effort},
+           "evidence": evidence, "jev": meta}
+    return {"id": en["id"], "row": row, "notes": notes, "rec": rec, "tier": tier}
+
+
+def run_plan(mp, entries):
+    """`--batch <manifest> --plan`: launches nothing, suggests a routing (DESIGN §3.6).
+
+    §9.6 turned routing into "the cheapest exec that clears the bar", and PRIORS answers half
+    of it — what a kind × exec has cost and returned. The half it cannot know before a launch
+    is how hard *this* brief is, which main has been guessing. The judge measures the brief,
+    code maps that onto the price sheet and the ledger's cells, and main edits the manifest:
+    the suggestion is computed fresh per wave and expires with it, which is the shape
+    routing.yaml was retired in favour of (§4)."""
+    hp = find_hippo()
+    if hp is None:
+        print("dispatch --batch --plan: no .hippo/ — no priors to read, no metering rows",
+              file=sys.stderr)
+    on = jev_backend(hp) != "off"
+    if not on:
+        print("--plan: judge off — no TYPESAFE_API_KEY; showing the deterministic part only",
+              file=sys.stderr)
+    prices = load_prices()
+    cells = prior_cells(read_ledger(hp), prices) if hp is not None else {}
+    policy = jev_policy("route")
+
+    ladders = {}
+    for ex in dict.fromkeys(en["executor"] for en in entries):
+        ladders[ex] = price_ladder(ex, prices)
+        print(f"ladder {ex}: "
+              + (" · ".join(f"{t} {ladders[ex][t]}" for t in PLAN_TIERS) if ladders[ex]
+                 else f"no {ex} model on the price sheet — no suggestion"))
+
+    rows = []
+    for en in entries:
+        if on:
+            rows.append(plan_entry(hp, en, cells, ladders[en["executor"]], policy))
+            continue
+        # The deterministic half: what the manifest already routes to, and what the ledger
+        # says about it. It must not vanish with the key (§3.9).
+        cur = entry_exec(en)
+        rows.append({"id": en["id"], "notes": [], "rec": None, "tier": None,
+                     "row": [en["id"], "-", "-", "-", "-", cur or "-", "-",
+                             plan_evidence(cells, en["kind"], cur)[0] if cur else "-"]})
+
+    head = ["id", "scope", "novelty", "spec", "verifiable", "exec now", "suggested",
+            "evidence"]
+    table = [r["row"] for r in rows]
+    widths = [max(len(line[i]) for line in [head] + table) for i in range(len(head))]
+    for line in [head] + table:
+        print("  ".join(c.ljust(w) for c, w in zip(line, widths)).rstrip())
+    notes = [(r["id"], n) for r in rows for n in r["notes"]]
+    if notes:
+        print()
+        for eid, note in notes:
+            print(f"{eid}: {note}")
+
+    plan = mp.parent / f"{mp.stem}.plan.jsonl"
+    if on:
+        # Rewritten every run, never appended to: a wave has one routing decision, and a stale
+        # record beside a fresh one would be joined as this wave's.
+        plan.write_text("".join(json.dumps(r["rec"], ensure_ascii=False) + "\n" for r in rows),
+                        encoding="utf-8")
+    tiers = collections.Counter(r["tier"] for r in rows if r["tier"])
+    summary = {"total": len(entries), "suggested": sum(tiers.values()),
+               "plan": str(plan) if on else None, "manifest": str(mp)}
+    if tiers:
+        summary["tiers"] = dict(tiers)
+    print(json.dumps(summary, ensure_ascii=False))
+    # It launched nothing and it changed nothing: the manifest is main's to edit. A nonzero rc
+    # here could only mean the judge was off, which the stderr line already says.
+    sys.exit(0)
+
+
 def run_batch(argv):
     """DESIGN §3.6, batch waves: the deterministic half of a fleet — fan-out, concurrency,
     id capture, parent stamping, usage collection, breaker checks, journaling, resume — in
@@ -2759,7 +3107,7 @@ def run_batch(argv):
     a check result is journal evidence and batch never writes ev:outcome."""
     manifest, cli_conc, flags, causes = parse_batch_argv(argv)
     mp = Path(manifest)
-    concurrency, entries = load_manifest(mp)
+    concurrency, entries = load_manifest(mp, plan=flags["plan"])
     if cli_conc is not None:
         concurrency = cli_conc
     journal = mp.parent / f"{mp.stem}.journal.jsonl"
@@ -2774,6 +3122,8 @@ def run_batch(argv):
             body["routes"] = dict(routes)
         return json.dumps(body, ensure_ascii=False)
 
+    if flags["plan"]:
+        run_plan(mp, entries)
     if flags["harvest"]:
         run_harvest(mp, entries, journal, outdir)
     if flags["dry_run"]:

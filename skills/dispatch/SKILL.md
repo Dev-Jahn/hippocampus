@@ -12,15 +12,19 @@ measurement against the Opus 5 guide.
 
 1. `hippo prior show` — check which (model, effort) measured better for this kind. A prior is
    advice: main still decides the final routing from the difficulty and volume of the work at hand.
-2. `hippo task` — what can start now: a lane whose task shows a `waiting on:` line still has an
+2. `hippo dispatch --batch <manifest> --plan` — with a manifest already drafted, this measures
+   each brief and suggests the cheapest exec the priors support, per entry, with a note where a
+   brief names no check or carries a kind PRIORS cannot aggregate. It launches nothing and it
+   does not touch the manifest: read the table, edit the manifest, then launch.
+3. `hippo task` — what can start now: a lane whose task shows a `waiting on:` line still has an
    unfinished dep and belongs in a later wave.
-3. `hippo directive list --active` — check what the lanes will see. Directives whose audience
+4. `hippo directive list --active` — check what the lanes will see. Directives whose audience
    includes executors reach every lane through its own capsule (`status --inject`, re-injected
    after compaction) — **do not copy them into briefs**; one source, no drift. Hand-fold a
    constraint only where hooks cannot run and the lane might skip the bootstrap. **Grep COMMON
    against the individual brief for conflicting clauses** (contradictory clauses once produced
    a fail-closed NO-GO).
-4. Asset preflight: main verifies that the files, models and data the brief names actually exist.
+5. Asset preflight: main verifies that the files, models and data the brief names actually exist.
 
 ## 1. Role routing
 
@@ -126,7 +130,7 @@ the launch/harvest loop driving it ~$13 in context re-feeds):
 
 ```bash
 hippo dispatch --batch wave.yaml [--concurrency N] [--resume [--causes a,b] | --fresh]
-                                 [--dry-run | --harvest]
+                                 [--dry-run | --harvest | --plan]
 ```
 
 ```yaml
@@ -212,6 +216,9 @@ clause is why depth 0 lanes still receive it — from the capsule, not from your
 - **Never put a severity ceiling or a "be conservative" instruction in a verifier's brief** — a
   literal-minded model obeys and genuinely reports less. Write "report every finding; filtering
   happens on the collection side".
+- That filtering is `hippo dispatch --batch <manifest> --harvest`: a `verify` lane's findings
+  come back ranked under its row, each scored for severity and for whether it is a defect at all
+  rather than a preference or a question. Read the top of the list, not the whole report.
 - Record the outcome from the verifier's verdict:
   `hippo log outcome --ref <id> --result refuted --attr work --note "..."` — or
   `--ref task:<task-id>` when only one dispatch for that task is still awaiting a verdict.

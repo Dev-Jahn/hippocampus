@@ -1,0 +1,29 @@
+# verify: asked by `hippo dispatch --batch --harvest` over a verification lane's report
+# (DESIGN §3.6). The state is {scope, findings} — the report split into findings in code, one
+# per bullet or heading. Code renders both questions once per finding — `severity_0`, `real_0`,
+# `severity_1`, … — and sorts the ranking by severity, then by real. It exists because the
+# verification lane is told to report everything and let the collection side filter (dispatch
+# skill §4), and that filtering was a main turn per verifier.
+questions:
+  severity_{k}:
+    type: score
+    instructions: >-
+      How much does `findings[{k}]` matter for the work it reviews?
+    criteria:
+      - cosmetic
+      - minor — worth fixing, nothing depends on it
+      - major — wrong behaviour or a broken contract
+      - blocking — must be fixed before the work can be accepted
+  real_{k}:
+    type: noul
+    instructions: >-
+      Is `findings[{k}]` a defect in the reviewed work, rather than a style preference, a
+      question, or praise?
+    criteria:
+      "true": It reports something that is wrong with the work
+      "false": It states a preference, asks a question, or says what the work got right
+policy:
+  # How many of the ranked findings the harvest table prints under a verify entry. The rest stay
+  # in the journal record: the point is that main reads the top of a sorted list, not that the
+  # list is shortened.
+  show_top: 5

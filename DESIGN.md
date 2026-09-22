@@ -521,9 +521,38 @@ clear (a `capability` or `spec` failure needs a new brief, not another run), and
 `log outcome --from-batch` line for `<manifest>.verdicts.jsonl`, which `--harvest` writes with
 one row per `accept-candidate` and none for a failure — a failure needs a diagnosis, not a
 verdict. The note on each row says main confirmed it, because main is expected to read the
-table and pipe the file only if that is true. All of this exists only where the judge does:
-with no `TYPESAFE_API_KEY` there is no triage record, no column and no verdicts file, and
-`--harvest` prints the same table with its judged columns as `-` and one stderr line saying so.
+table and pipe the file only if that is true. A lane whose `kind` is `verify` is read once
+more: its report is split into findings in code (a finding is a bullet, a numbered item or a
+heading, plus the lines under it), each one is scored for severity and for whether it is a
+defect at all rather than a preference or a question, and the top five ride under that lane's
+row worst-first — the verifier is told to report everything and let the collection side filter
+(dispatch skill §4), and that filtering was a main turn per verifier. All of this exists only
+where the judge does: with no `TYPESAFE_API_KEY` there is no triage record, no ranking, no
+column and no verdicts file, and `--harvest` prints the same table with its judged columns as
+`-` and one stderr line saying so.
+
+**Plan mode.** `--batch <manifest> --plan` launches nothing either, and stands at the other end
+of the wave. §9.6 turned routing into "what is the cheapest exec that clears the bar", and
+PRIORS answers half of that — what a `kind × exec` has cost and returned. The half no ledger
+can know before a launch is how hard *this* brief is, which main has been guessing off the
+priors page. So the judge is asked five literal questions about each entry's brief — scope,
+novelty, how completely the goal is specified, whether a machine could confirm completion, and
+which kind of work it is — and code does everything after that: the tier the difficulty demands,
+the model that tier resolves to on `prices.yaml` (cheapest input price is `cheap`, the most
+expensive is `top`, the second most expensive is `mid`, read at call time so a price refresh
+moves the ladder), the effort, and then at most one step of adjustment from the ledger's own
+cells — a tier this kind keeps failing at goes up one, and the cheapest tier whose record clears
+the bar takes the work. A probe on real briefs (three algorithm briefs from a consuming project
+against one cross-cutting design brief, 20 questions, 0.7s) separated them cleanly: scope 0.9 vs
+3.0, design judgment 0.0 vs 2.8, spec gaps 0.1–0.3 vs 2.0, a named check 0.7–0.8 vs 0.1. The
+output is a table, the notes an entry earned (no `check` where the brief names nothing runnable,
+a `kind` outside the vocabulary PRIORS aggregates on) and `<manifest>.plan.jsonl`, one record per
+entry so a wave's routing decision can be joined to its outcomes later. **The manifest is not
+modified** — main edits it. A suggestion that rewrote the file would be the frozen config of §4
+with an extra step; this one is computed fresh per wave and expires with it. `model` and `effort`
+may be left out of a manifest that is going to be planned, since they are exactly what is being
+suggested, and with no key the command still prints the ladder, what each entry already routes
+to and the priors evidence for it, with the difficulty columns as `-`.
 
 ### 3.6b The distiller split — the clerk writes the page, the code does the sums
 
@@ -669,7 +698,7 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 | a hand-written PROGRESS.md | It goes stale. Replaced by worklog (generated) + ledger (facts) + PRIORS (distilled) |
 | typed refusal gates, frozen sidecars, remote verify | Record, never enforce (principle 3) |
 | installing a cron job automatically | A user who wants one sets it up. The plugin does not own a schedule |
-| routing.yaml / depth-tier model config | Retired 1.11.0 before being built: prices are `prices.yaml` facts, tier-worth is PRIORS `$/accepted`, the decision between them is main's — frozen config is the stale-instruction shape (§1 principle 9). The runaway worry it addressed is handled by the fan-out circuit breaker (§3.6) instead |
+| routing.yaml / depth-tier model config | Retired 1.11.0 before being built: prices are `prices.yaml` facts, tier-worth is PRIORS `$/accepted`, the decision between them is main's — frozen config is the stale-instruction shape (§1 principle 9). The runaway worry it addressed is handled by the fan-out circuit breaker (§3.6) instead. The shape it was retired in favour of is `--batch --plan` (§3.6): the same question answered per wave, computed fresh from the price sheet and the ledger, printed as a suggestion main edits into a manifest — never a file that outlives the wave |
 | generic bulk ledger ingest (`log --file`, a bulk endpoint) | It would enlarge the mutation grammar toward the retired ingest family above — facts enter through one door. The accepted shape is the journal-scoped `log outcome --from-batch` (§3.6), which narrows what a row may say instead of widening it |
 
 ## 5. After the MVP (recorded only; not being built now)

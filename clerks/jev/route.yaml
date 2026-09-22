@@ -1,0 +1,81 @@
+# route: asked once per manifest entry by `hippo dispatch --batch <manifest> --plan`
+# (DESIGN §3.6). The state is one object the code assembles: scope, kind, brief — the entry's
+# whole prompt. Every question measures the *brief*; nothing here knows a model, a price or a
+# prior. Code maps the answers onto the executor's ladder in `prices.yaml` and onto the ledger's
+# kind × exec cells, against the thresholds under `policy`. The judge measures, the policy
+# suggests, main edits the manifest — this command never writes it.
+questions:
+  scope:
+    type: score
+    instructions: >-
+      How much of the project does the work `brief` asks for touch?
+    criteria:
+      - a single function or file, fully specified
+      - a few files in one module
+      - several modules or a shared interface
+      - "cross-cutting: hooks, CLI, docs and tests together"
+  novelty:
+    type: score
+    instructions: >-
+      How much of the approach does `brief` leave for the worker to invent?
+    criteria:
+      - a textbook or well-known procedure with a reference
+      - standard engineering with some local decisions
+      - requires design judgment with several viable approaches
+      - "open-ended: the approach itself must be invented or negotiated"
+  spec:
+    type: score
+    instructions: >-
+      How completely does `brief` state what the finished work has to be?
+    criteria:
+      - inputs, outputs and acceptance check all stated
+      - mostly stated, minor gaps a worker can fill
+      - acceptance criteria vague or must be proposed
+      - the goal itself is unclear
+  verifiable:
+    type: noul
+    instructions: >-
+      Does `brief` name a concrete command, test or check by which a machine could confirm the
+      work was completed?
+    criteria:
+      "true": A command, a test or a check a machine could run is named
+      "false": Completion could only be judged by reading the result
+  # The vocabulary and the criteria are the scribe's table, copied (clerks/turn-scribe.md):
+  # PRIORS aggregates on kind, so an entry tagged outside it is a column of one.
+  kind_fit:
+    type: choice
+    instructions: Which category of work does `brief` ask for?
+    criteria:
+      impl: building something new
+      fix: correcting a defect
+      perf: making something faster or smaller
+      verify: adversarial check of another executor's output
+      audit: systematic sweep of existing state (assumptions, docs, coverage)
+      design: producing a design, not shipped code
+      research: reading and analysis to answer a question
+      spike: bounded exploration or measurement that ends in a decision
+      docs: documentation work
+      infra: tooling, CI, environment
+      chore: maintenance with no behavior change
+policy:
+  # Tier demand, applied in code in this order: top, then mid, else cheap. The scores are the
+  # 0-3 ladders above. Measured on four real briefs (2026-09-23): three algorithm briefs scored
+  # scope 0.9, novelty 0.0, spec 0.1-0.3 against a cross-cutting design brief's 3.0 / 2.8 / 2.0,
+  # so the gap these thresholds sit in is wide, not a hair's breadth.
+  top_novelty: 2.0
+  top_spec: 2.0
+  top_scope: 2.5
+  mid_novelty: 1.0
+  mid_scope: 1.5
+  # Effort is a separate axis from the model: a cheap model at high effort is a real routing.
+  high_effort_novelty: 2.0
+  # The evidence adjustment, read off the ledger's kind × exec cell for the candidate (and for
+  # the cheaper tiers) once the cell has n >= 4. A tier this kind keeps failing at is worth one
+  # step up; a cheaper tier this kind keeps passing at is the answer to §9.6's question.
+  bump_below: 0.5
+  drop_at: 0.8
+  # Below this, the brief names nothing a machine could run — worth a `check` before launch.
+  check_below: 0.3
+  # A kind outside the vocabulary is only worth a note when the judge is confident about what
+  # it should have been.
+  kind_at: 0.7

@@ -467,3 +467,139 @@ def test_the_outdir_files_are_where_the_state_comes_from(tmp_project, tmp_path, 
     assert sent["state"]["exit"] == {"rc": 0, "check_rc": 3, "timed_out": False}
     assert _records(manifest, "triage")[0]["route"] == "failed", "a rc outranks a judgment"
     assert (_outdir(manifest) / "ok-lane.check").exists()
+
+
+# --------------------------------------------------------------------------
+# (h) verifier findings — a verification lane reports everything, the judge ranks it
+# --------------------------------------------------------------------------
+
+# A verification lane's report: a prose preamble that is not a finding, then four findings in
+# three of the shapes a report uses (dash bullet, numbered item, star bullet).
+VERIFY_STUB = """\
+#!/bin/sh
+for a in "$@"; do last="$a"; done
+printf 'model: gpt-5.6-luna\\n' >&2
+case "$last" in
+  *PROSE*)
+    printf 'I read the whole diff and it holds together.\\n'
+    printf 'Nothing in it worried me.\\n' ;;
+  *)
+    printf 'I reviewed the retry path against the brief.\\n'
+    printf -- '- the retry loop swallows the timeout\\n'
+    printf '  so a hung call is reported as success\\n'
+    printf -- '- naming: prefer spans over ranges\\n'
+    printf '2. the cache key drops the tenant id\\n'
+    printf -- '* nice test coverage on the parser\\n' ;;
+esac
+exit 0
+"""
+
+# Distinct severities, so the ranking is checkable: the cache key (k=2) outranks the retry
+# loop (k=0), then the naming preference, then the praise.
+RANK = {
+    "severity_0": {"score": 2.9, "confidence": 0.8}, "real_0": {"noul": 0.95},
+    "severity_1": {"score": 0.4, "confidence": 0.7}, "real_1": {"noul": 0.2},
+    "severity_2": {"score": 3.0, "confidence": 0.9}, "real_2": {"noul": 0.9},
+    "severity_3": {"score": 0.1, "confidence": 0.9}, "real_3": {"noul": 0.05},
+}
+
+
+def _verify_lane(project, prompt="review the retry path"):
+    return _manifest(project, "wave.yaml", f"""\
+        defaults:
+          kind: verify
+          model: gpt-5.6-luna
+        entries:
+          - id: verifier
+            scope: "boundary check of the retry path"
+            prompt: "{prompt}"
+        """)
+
+
+def _harvested(run_hippo, project, tmp_path, manifest, answers, capture=None):
+    path = _stub(tmp_path, "codex", VERIFY_STUB)
+    assert _batch(run_hippo, project, manifest, env={"PATH": path}).returncode == 0
+    return _batch(run_hippo, project, manifest, "--harvest",
+                  env={"PATH": path,
+                       **_jev(_mock(tmp_path, {"answers": answers, "default": DEFAULT}),
+                              capture)})
+
+
+def test_verifier_findings_are_split_ranked_and_recorded(tmp_project, tmp_path, run_hippo):
+    manifest = _verify_lane(tmp_project)
+    capture = tmp_path / "sent.json"
+    proc = _harvested(run_hippo, tmp_project, tmp_path, manifest, {**ACCEPT, **RANK}, capture)
+    assert proc.returncode == 0, proc.stderr
+
+    # The findings request is the last one out: one severity and one real per finding.
+    sent = json.loads(capture.read_text(encoding="utf-8"))
+    assert list(sent["questions"]) == ["severity_0", "real_0", "severity_1", "real_1",
+                                       "severity_2", "real_2", "severity_3", "real_3"]
+    assert set(sent["state"]) == {"scope", "findings"}
+    findings = sent["state"]["findings"]
+    assert len(findings) == 4, "the prose preamble is not a finding"
+    assert findings[0] == ("- the retry loop swallows the timeout\n"
+                           "  so a hung call is reported as success"), "a finding runs on"
+    assert findings[2].startswith("2. the cache key")
+
+    rec = _records(manifest, "findings")
+    assert len(rec) == 1 and rec[0]["id"] == "verifier" and rec[0]["attempt"] == 1
+    assert [f["k"] for f in rec[0]["ranked"]] == [2, 0, 1, 3], "severity desc, then real desc"
+    assert rec[0]["ranked"][0]["severity"] == 3.0 and rec[0]["ranked"][0]["real"] == 0.9
+    assert rec[0]["ranked"][0]["head"] == "2. the cache key drops the tenant id"
+
+    assert [ln for ln in proc.stdout.splitlines() if ln.startswith("  ▸")] == [
+        "  ▸ 3.0 real .90  2. the cache key drops the tenant id",
+        "  ▸ 2.9 real .95  - the retry loop swallows the timeout so a hung call is reported "
+        "as success",
+        "  ▸ 0.4 real .20  - naming: prefer spans over ranges",
+        "  ▸ 0.1 real .05  * nice test coverage on the parser"]
+    # The ranking rides directly under the row it is about.
+    i, _ = _row(proc, "verifier")
+    assert _table(proc)[i + 1].startswith("  ▸ 3.0")
+
+    metered = [e for e in read_ledger(tmp_project) if e.get("name") == "jev-verify"]
+    assert len(metered) == 1 and metered[0]["ok"] is True and metered[0]["src"] == "wrapper"
+
+
+def test_a_prose_report_asks_nothing_and_records_nothing(tmp_project, tmp_path, run_hippo):
+    manifest = _verify_lane(tmp_project, prompt="PROSE review")
+    capture = tmp_path / "sent.json"
+    proc = _harvested(run_hippo, tmp_project, tmp_path, manifest, {**ACCEPT, **RANK}, capture)
+    assert proc.returncode == 0, proc.stderr
+
+    assert _records(manifest, "findings") == []
+    assert [ln for ln in proc.stdout.splitlines() if ln.startswith("  ▸")] == []
+    assert [e for e in read_ledger(tmp_project) if e.get("name") == "jev-verify"] == []
+    # The last request out is the triage one — no verify request was made at all.
+    assert "findings" not in json.loads(capture.read_text(encoding="utf-8"))["state"]
+
+
+def test_only_a_verify_entry_is_ranked(tmp_project, tmp_path, run_hippo):
+    """The same report under kind impl asks nothing: ranking is what a verification lane's
+    output is for, and every other lane's report is read by triage alone."""
+    manifest = _manifest(tmp_project, "wave.yaml", """\
+        defaults:
+          kind: impl
+          model: gpt-5.6-luna
+        entries:
+          - id: builder
+            scope: "not a verification lane"
+            prompt: "build the thing"
+        """)
+    proc = _harvested(run_hippo, tmp_project, tmp_path, manifest, {**ACCEPT, **RANK})
+    assert proc.returncode == 0, proc.stderr
+    assert _records(manifest, "findings") == []
+    assert [e for e in read_ledger(tmp_project) if e.get("name") == "jev-verify"] == []
+
+
+def test_with_the_judge_off_a_verify_lane_harvests_as_it_always_did(tmp_project, tmp_path,
+                                                                    run_hippo):
+    manifest = _verify_lane(tmp_project)
+    path = _stub(tmp_path, "codex", VERIFY_STUB)
+    assert _batch(run_hippo, tmp_project, manifest, env={"PATH": path}).returncode == 0
+    proc = _batch(run_hippo, tmp_project, manifest, "--harvest", env={"PATH": path})
+    assert proc.returncode == 0, proc.stderr
+    assert "judge off — no TYPESAFE_API_KEY" in proc.stderr
+    assert _records(manifest, "findings") == []
+    assert [ln for ln in proc.stdout.splitlines() if ln.startswith("  ▸")] == []
