@@ -34,6 +34,12 @@ TASK_STATUSES = ("pending", "active", "done", "dropped")
 OPEN_STATUSES = ("pending", "active")
 SCRIBE_TIMEOUT = 120  # DESIGN §3.5.4
 DISTILL_TIMEOUT = 300
+DISTILL_DAYS = 14  # the ledger window the distiller reads
+# Auto-distill at Stop (DESIGN §3.5.8): PRIORS was stale in every one of 28 projects measured,
+# `prior distill` having run 18 times ever. Due when the page is this old *and* this many new
+# verdicts have landed since the last distiller run.
+DISTILL_STALE_DAYS = 7
+DISTILL_MIN_NEW = 5
 REAP_GRACE = 15  # clerk_run.sh owns the real deadline; we outlive it to read its rc
 LOCK_WAIT = 3.0  # brief blocking retry so the tail of the last turn is not lost
 SUBSTANTIVE = re.compile(r"^(?:\[\d+\]\s*)?(TOOL|USER)\b")
@@ -613,7 +619,7 @@ def cmd_init(_args):
     hp.mkdir(parents=True)
     (hp / "failures").mkdir()
     # briefs/ is never read by hippo — created so the brief convention (§3.1) is discoverable
-    # instead of every wave reinventing an absolute scratchpad path. The COMMON.md seed is
+    # instead of every batch reinventing an absolute scratchpad path. The COMMON.md seed is
     # written once and never read back: it bootstraps every lane to the capsule, which is
     # where the usage contract actually lives (single source, generated).
     (hp / "briefs").mkdir()
@@ -1282,7 +1288,7 @@ def log_outcome_bulk(args):
     """`log outcome --from-batch <journal>`: verdict rows as stdin JSON-lines, resolved
     through the batch journal (§3.6) — serialization after verification, never verification.
 
-    One call replaces the N scalar calls a judged wave used to take (measured: 222), but the
+    One call replaces the N scalar calls a judged batch used to take (measured: 222), but the
     narrowing is the point, not the batching: a row resolves only through this journal's
     latest exited attempt, only onto a dispatch whose executor claim still awaits main's
     verdict. Everything exceptional — an earlier attempt, a deliberate re-verdict, a lane
@@ -1574,7 +1580,8 @@ def cmd_prior_show(args):
     print(
         p.read_text(encoding="utf-8").rstrip()
         if p.exists()
-        else "not yet — run hippo prior distill"
+        else f"not yet — the scribe writes it once {DISTILL_MIN_NEW} verdicts have landed "
+        "(or run hippo prior distill)"
     )
 
 
@@ -1815,15 +1822,20 @@ def prior_facts(rows, now, prices=None):
     return "\n".join(lines)
 
 
-def cmd_distill(args):
-    hp = args.hp
+def distill(hp, days, src=None):
+    """Regenerate PRIORS.md from the last `days` of ledger → (ok, message). The distiller row
+    is its own meter, failed or not; a failure leaves its dump under failures/."""
     now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=args.days)
+    cutoff = now - timedelta(days=days)
     kept = []
     for e in read_ledger(hp):
         t = event_time(e)
         if t and t >= cutoff:
             kept.append(e)
+    if not kept:
+        # Same deterministic prefilter as the scribe (§3.5.3): there is nothing to distill from
+        # an empty window, so do not spend a model call proving it.
+        return True, f"no ledger events in the last {days} days — nothing to distill"
     priors = (
         (hp / "PRIORS.md").read_text(encoding="utf-8")
         if (hp / "PRIORS.md").exists()
@@ -1835,18 +1847,13 @@ def cmd_distill(args):
     # The generation time is on the sheet because the clerk may not invent numbers — without
     # it, a disciplined clerk correctly writes "Generated: unavailable" (observed 2026-08-02).
     payload = (
-        f"# computed facts (generated {now_iso()}, window: {args.days} days, "
+        f"# computed facts (generated {now_iso()}, window: {days} days, "
         f"{len(kept)} events)\n\n"
         + prior_facts(kept, now)
         + "\n\n# current PRIORS.md\n\n"
         + priors
         + "\n"
     )
-    if not kept:
-        # Same deterministic prefilter as the scribe (§3.5.3): there is nothing to distill from
-        # an empty window, so do not spend a model call proving it.
-        print(f"no ledger events in the last {args.days} days — nothing to distill")
-        return
     out, err, rc, ms, tokens = run_clerk(
         hp, CLERKS / "distiller.md", payload, DISTILL_TIMEOUT
     )
@@ -1856,13 +1863,45 @@ def cmd_distill(args):
         p = dump_failure(
             hp, "distill", f"rc={rc}\n--- stderr ---\n{err}\n--- stdout ---\n{out}"
         )
-        append_event(hp, {**meter, "ok": False})
-        die(f"distill failed ({reason}) — dump: {p}")
+        append_event(hp, {**meter, "ok": False}, src=src)
+        return False, f"distill failed ({reason}) — dump: {p}"
     tmp = hp / "PRIORS.md.tmp"
     tmp.write_text(out.strip() + "\n", encoding="utf-8")
     os.replace(tmp, hp / "PRIORS.md")
-    append_event(hp, {**meter, "ok": True})
-    print(f"PRIORS.md regenerated ({len(kept)} events / {args.days} days, {ms}ms)")
+    append_event(hp, {**meter, "ok": True}, src=src)
+    return True, f"PRIORS.md regenerated ({len(kept)} events / {days} days, {ms}ms)"
+
+
+def cmd_distill(args):
+    ok, msg = distill(args.hp, args.days)
+    if not ok:
+        die(msg)
+    print(msg)
+
+
+def distill_due(hp):
+    """§3.5.8: PRIORS is missing or older than DISTILL_STALE_DAYS, and DISTILL_MIN_NEW verdicts
+    (outcomes that are not executor claims — the ones PRIORS reads) landed after the last
+    distiller row. Counted from the ledger, never a counter file. A failed run resets the count
+    too: a dead clerk must not be re-billed at every Stop (the cursor rule of §3.5.6)."""
+    p = hp / "PRIORS.md"
+    if p.exists() and time.time() - p.stat().st_mtime < DISTILL_STALE_DAYS * 86400:
+        return False
+    new = 0
+    for e in read_ledger(hp):
+        if e.get("ev") == "clerk" and e.get("name") == "distiller":
+            new = 0
+        elif e.get("ev") == "outcome" and e.get("src") != "executor":
+            new += 1
+    return new >= DISTILL_MIN_NEW
+
+
+def auto_distill(hp):
+    """The scribe's last step, on its success and failure paths alike: it already holds the
+    lock and runs detached, so the distiller's 300s blocks nothing."""
+    if distill_due(hp):
+        _, msg = distill(hp, DISTILL_DAYS, src="scribe")
+        print(f"auto-distill: {msg}", file=sys.stderr)
 
 
 # --- scribe (DESIGN §3.5) -----------------------------------------------------
@@ -2007,14 +2046,14 @@ def _reserve_usd(model, prices):
 def fanout_verdict(hp, parent, child_model):
     """The fan-out circuit breaker (§3.6): the one check that lives inside this service —
     denominated in dollars, never in lanes. Returns (None | "warn" | "stop", msg); the caller
-    decides what a verdict becomes — single dispatch dies on stop, a batch wave must keep
+    decides what a verdict becomes — single dispatch dies on stop, a batch must keep
     collecting the children already running.
 
     Guards exactly one measured disaster shape: a lane machine-gunning expensive children
     through the sanctioned path (the 336k-token re-delegation spiral, and its §9.5 sequel).
     A thousand luna-class children clear a budget two dozen astra-class ones exhaust — count was
     the wrong axis, price × count is the real one. Lane-origin launches only: main is never
-    gated — a session-launched wave of any size is main's judgment, and gating it would be the
+    gated — a session-launched batch of any size is main's judgment, and gating it would be the
     enforcement principle 3 rejects. A lane that bypasses the wrapper still succeeds; this
     stops accidents, not adversaries, and every measured failure was an accident."""
     if not parent or hp is None:
@@ -2046,14 +2085,14 @@ def fanout_verdict(hp, parent, child_model):
     total = measured + reserved + (_reserve_usd(child_model, prices) or 0.0)
     if total > budget:
         return "stop", (
-            f"dispatch: this wave would reach ~${total:.0f} of its ${budget:.0f} budget — "
+            f"dispatch: this lane's children would reach ~${total:.0f} of its ${budget:.0f} budget — "
             f"lane {parent} has {n} children in 24h (${measured:.2f} measured + "
             f"${reserved:.0f} reserved for lanes still running). Stop and report instead: "
             "`hippo log outcome --result no-go --note '…'`; main decides — the budget is "
             ".hippo/config.yaml dispatch.max_wave_usd.")
     if total >= budget / 2:
         return "warn", (
-            f"dispatch: note — lane {parent}'s wave is at ~${total:.0f} of its "
+            f"dispatch: note — lane {parent}'s children are at ~${total:.0f} of its "
             f"${budget:.0f} budget ({n} children in 24h, ${measured:.2f} measured).")
     return None, ""
 
@@ -2215,7 +2254,7 @@ def dispatch_launch_notes(hp, kind, scope, brief, rest):
         print(f"dispatch: note — {note}", file=sys.stderr)
 
 
-# --- batch dispatch (DESIGN §3.6 — batch waves) --------------------------------
+# --- batch dispatch (DESIGN §3.6) -----------------------------------------------
 
 BATCH_USAGE = (
     "usage: hippo dispatch --batch <manifest.yaml> [--dry-run]\n"
@@ -2242,7 +2281,7 @@ CHECK_TIMEOUT = 600
 # The ids double as journal keys and <id>.out/.err filenames, so a path-shaped id must not
 # validate — the slug alphabet plus the separators an author would reasonably type — and an
 # unbounded one must not either: past the filesystem's 255-byte name cap the launch OSErrors
-# mid-wave, after the dispatch row already landed.
+# mid-batch, after the dispatch row already landed.
 ENTRY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 ENTRY_ID_MAX = 100
 
@@ -2802,7 +2841,7 @@ def cluster_excerpt(en, outdir):
 
 
 def cluster_failures(hp, failed, jrnl):
-    """Greedy one-pass clustering of a wave's failures → id → cluster name (§3.6).
+    """Greedy one-pass clustering of a batch's failures → id → cluster name (§3.6).
 
     Each failure is asked once against the representatives found so far, and the first one
     above `same_cause_at` takes it. One pass and a high threshold, because the reason to
@@ -3827,6 +3866,7 @@ def cmd_scribe(args):
         # same input to the model on every turn, forever.
         save_cursor()
         append_event(hp, {**meter, "ok": False}, src="scribe")
+        auto_distill(hp)
         die(f"scribe failed: {reason} — dump: {p}")
 
     if rc != 0:
@@ -3857,6 +3897,7 @@ def cmd_scribe(args):
         worklog_append(hp, obj["worklog"].strip())
     save_cursor()
     append_event(hp, {**meter, "ok": True}, src="scribe")
+    auto_distill(hp)
 
 
 # --- argparse -----------------------------------------------------------------
@@ -4008,7 +4049,7 @@ def build_parser():
     pr = sub.add_parser("prior", help="the distilled surface").add_subparsers(dest="sub")
     pr.add_parser("show", help="print PRIORS.md").set_defaults(fn=cmd_prior_show)
     a = pr.add_parser("distill", help="run the distiller clerk → regenerate PRIORS.md")
-    a.add_argument("--days", type=int, default=14)
+    a.add_argument("--days", type=int, default=DISTILL_DAYS)
     a.set_defaults(fn=cmd_distill, writes=True)
 
     # main() intercepts dispatch before argparse (the remaining arguments are codex's grammar

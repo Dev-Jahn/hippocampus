@@ -52,7 +52,7 @@ model, and this organ's job is to quietly make sure that judgment happens on top
 | Layer | What | Cost |
 |---|---|---|
 | deterministic script | hooks and the CLI — fast and dumb | 0 |
-| **clerk** | a hook or cron calls a cheap model (luna/sonnet class) headlessly. Work that needs judgment but not main's context | tokens only, zero main context |
+| **clerk** | a hook calls a cheap model (luna/sonnet class) headlessly. Work that needs judgment but not main's context | tokens only, zero main context |
 | **judge** | a typed-judgment call (TypeSafe Jev) made inside a CLI path over text the code already holds — classification, selection, scoring. It returns probabilities, never prose | treated as zero, and outside both subscriptions |
 | skill | work that needs main's context, or where main must act on the result | main's context |
 | main | routing, acceptance, talking to the user | — |
@@ -114,7 +114,7 @@ In a directory with no `.hippo/`, every hook and every CLI command is a **comple
 (zero contamination of other projects).
 
 `briefs/` is the one directory hippo does not read. It exists because delegation briefs had no
-home: the host hands each session a different absolute scratchpad path, so every wave retyped a
+home: the host hands each session a different absolute scratchpad path, so every batch retyped a
 40-character prefix, and a consuming project eventually invented its own fixed path anyway
 (measured). A brief belongs next to the state it describes, at a **project-relative, session-stable**
 path — `.hippo/briefs/<task>.md` — reachable from the same cwd `hippo dispatch` already requires.
@@ -171,7 +171,7 @@ optional `src` (`scribe|cli|wrapper|executor`).
   `prices.yaml` (USD per 1M, refreshed each release, `as_of` printed by PRIORS so staleness is
   visible); a model off the sheet renders as unpriced and named, never guessed. PRIORS' routing
   table carries tokens, $ and $/accepted per cell — the question it unlocks is "the cheapest
-  exec that clears the bar". A fleet's total is derivable by summing children over `parent`.
+  exec that clears the bar". A batch's total is derivable by summing children over `parent`.
 - `ev:triage` (1.14.0) is the judge's reading of a finished lane (§3.6) — written by the wrapper
   (`src=wrapper`) at lane exit, from single dispatch and batch alike, and rejected from the
   scribe by the same rule as `usage`: the wrapper observed it. `route ∈ {accept-candidate,
@@ -261,31 +261,39 @@ optional `src` (`scribe|cli|wrapper|executor`).
   re-injects the capsule after the lane's own compaction (§3.4, 1.8.1).
 - **Every subcommand has `-h/--help`, and errors attach the usage to stderr** (a direct fix for the
   largest source of friction in 0.x).
-- The surface:
+- The surface — the block `skills/hippo/SKILL.md` carries and the README repeats, plus the one
+  internal command. A test parses the skill's block against `build_parser` both ways (every
+  line parses, every command, flag and enum value is on a line), so it cannot drift again:
 
 ```
-hippo init                                  # creates .hippo/ and nothing else
-hippo status [--inject]                     # one-block summary; --inject is for the hook (silent no-op rule)
-hippo task add <id> --title T [--status pending] [--notes N] [--deps a,b]
-hippo task set <id> <field> <value>
+hippo init
+hippo status [--inject]
+hippo task add <type>/<slug> --title T [--notes N] [--deps a,b]
+    [--status pending|active|done|dropped]
+hippo task set <id> title|status|notes|deps <value>      # positional: no --flags
 hippo task done <id> [--note N]
-hippo task list [--status s1,s2] [--all] [--json]   # comma multi-filter (fixes a 0.x request)
-                                                    #   prints "waiting on: …" under any task
-                                                    #   whose deps are not all done
-hippo task show <id> [--json] | task drop <id>
-hippo log <ev> [typed flags…]               # dispatch|outcome|review|review-status
-hippo log raw '<json>'                      # validate, then append
-hippo log tail [-n N] [--ev TYPE]           # read recent records
+hippo task list [--status s1,s2] [--all] [--json]
+hippo task show <id> [--json]
+hippo task drop <id>
+hippo log dispatch --id D --kind K --exec executor/model/effort --scope S
+    [--task T] [--depth N] [--parent D]
+hippo log outcome --ref <dispatch-id>|task:<task-id> --result accepted|revised|refuted|no-go|lost
+    [--attr work|brief|harness] [--rework N] [--by executor/model] [--note N]
+hippo log outcome --from-batch <journal> [--dry-run] < verdicts.jsonl
+hippo log review --id R --base <sha> --source S --findings N
+hippo log review-status --ref R --addressed full|partial|none [--at <sha>]
+hippo log raw '<json>'
+hippo log tail [-n N] [--ev TYPE]
+hippo directive add --text T [--id kebab-id] [--audience main|executor|all]
+    [--state active|withdrawn|expired]
 hippo directive list [--active] [--json] [--hygiene]
-                                            # --hygiene: the judge reads the live set for
-                                            #   conflicts and axis mismatches (§6, fourth rule)
-hippo directive add [typed flags…]          # auto-id derived from text when --id is omitted
-hippo directive withdraw <directive-id>
+hippo directive withdraw <id>
 hippo prior show
-hippo prior distill [--days N]              # compute the scorecard, then have the distiller
-                                            #   clerk write PRIORS.md around it
-hippo dispatch --kind K --scope S [--task T] [--depth N] [--] <codex exec args…>   # §3.6
-hippo scribe --transcript P --session S     # internal surface the Stop hook calls detached
+hippo prior distill [--days N]
+hippo dispatch --kind K --scope S [--task T] [--depth N] [--fast] [--] <codex exec args…>
+hippo dispatch --batch <manifest.yaml> [--dry-run]
+# a bare noun reads: task → list, log → tail, directive → list, prior → show
+hippo scribe --transcript P --session S   # internal: the Stop hook calls it detached
 ```
 
 - **Bare-noun default**: omitting the subcommand of `task|log|directive|prior` runs `list|tail|list|show`
@@ -332,7 +340,7 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
 - **Stop**: `hooks/stop.sh` — parse `transcript_path`, `session_id` and `cwd` from the stdin JSON;
   silent exit 0 with no `.hippo/`; otherwise `setsid hippo scribe … >/dev/null 2>&1 &` and then
   **exit 0 immediately** (<100ms). Under `HIPPO_DISPATCH` it exits at once instead: the executor
-  gets no scribe (§9.7) — a per-lane Stop would multiply clerk cost by the wave width, and a
+  gets no scribe (§9.7) — a per-lane Stop would multiply clerk cost by the batch width, and a
   scribe over a lane's transcript would mint src=scribe rows (verdicts) out of a worker's
   self-narrative.
 
@@ -417,6 +425,18 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
    single event in front of it.
 7. On success → append the events (`src:scribe`), append one line to today's date section of
    worklog.md, update the cursor, and append the `ev:clerk` self-metering event.
+8. **Auto-distill** (1.14.0), after step 7 or after a failed clerk call alike: the distiller runs
+   exactly as `hippo prior distill` does when PRIORS is **due** — `PRIORS.md` is missing or older
+   than `DISTILL_STALE_DAYS = 7`, **and** at least `DISTILL_MIN_NEW = 5` verdicts (outcomes that
+   are not executor claims — the set PRIORS reads) landed after the last `ev:clerk
+   name:distiller` row, or ever when there is none. Both halves are read from the ledger, never
+   a counter file, and the distiller row is the self-metering. The count restarts after a
+   *failed* distiller row too, for the reason the cursor advances in step 6: a dead clerk must
+   not be re-billed at every Stop. The scribe already holds the lock and runs detached, so the
+   distiller's 300s blocks nothing. Measured across 28 projects (2026-09-23): `prior distill`
+   had run 18 times ever, in 10 projects, 5 of them typed by hand, and PRIORS — the routing
+   evidence the dispatch skill tells main to read — was stale in every one. A schedule was ruled
+   out (§4); the Stop that already drives the scribe is the clock.
 
 ### 3.6 The dispatch wrapper (`hippo dispatch`)
 
@@ -445,17 +465,17 @@ forwarder for those shims.
 
 **The fan-out circuit breaker** (1.11.0) is the one check that lives inside this service
 (principle 3 allows exactly that), and it is denominated in **dollars, never in lanes** — a
-thousand luna-class children are a legitimate wave, the fiftieth sol-class one is the measured
+thousand luna-class children are a legitimate batch, the fiftieth sol-class one is the measured
 disaster shape (the 336k-token re-delegation spiral, and its §9.5 sequel: an expensive model
 launching hundreds of expensive children). Lane-origin launches only (`parent` present): the
-wave's cost is summed per parent per 24h — **measured usage where a child has finished, a
+children's cost is summed per parent per 24h — **measured usage where a child has finished, a
 nominal reservation where it has not** (1 Mtok in + 0.2 Mtok out at the child's model's sheet
 price; a burst launches everything before anything finishes, so a measured-only breaker would
 see $0 exactly when it matters). Past half the budget the wrapper warns on stderr with the
 arithmetic; past the budget ($500 by default — `config.yaml` `dispatch.max_wave_usd`) it
 refuses the launch and tells the lane to report no-go instead. An unknown model reserves at
 the sheet's top tier — a typo must not dodge the breaker. The nominal figures are the guard's
-arithmetic, not data: nothing of them reaches the ledger. **Main is never gated** — a wave of
+arithmetic, not data: nothing of them reaches the ledger. **Main is never gated** — a batch of
 any size launched from the session is main's judgment, and gating it would be the enforcement
 this design rejects. A lane that bypasses the wrapper still succeeds: this stops accidents,
 not adversaries, and every measured failure was an accident.
@@ -484,15 +504,15 @@ blocked .03 · ask .62 · creep .05 · verify yes)`. The same function triages a
 the route lands as `ev:triage` (§3.2). stdout is untouched throughout. Without the key none of
 this exists — no capture flag in codex's argv, no request, no row, no note.
 
-**Batch** (1.12.0). One launch per call was the right shape until the waves were not: a
-measured 222-lane fleet cost $2 to run, while the orchestrator model driving its launch/harvest
-loop cost ~$13 in turn-loop context re-feeds — the ceremony around the wave cost six times the
-wave. `hippo dispatch --batch <manifest.yaml>` moves exactly that ceremony into the wrapper —
+**Batch** (1.12.0). One launch per call was the right shape until the batches were not: a
+measured 222-lane "fleet" cost $2 to run, while the orchestrator model driving its launch/harvest
+loop cost ~$13 in turn-loop context re-feeds — the ceremony around the lanes cost six times the
+lanes. `hippo dispatch --batch <manifest.yaml>` moves exactly that ceremony into the wrapper —
 fan-out, concurrency, id capture, parent stamping, usage collection, breaker checks, journaling,
 resume — and leaves the model what needs a model: selection (writing the manifest) and judgment
-(verdicts). The manifest is **per-wave data, authored fresh like a brief, never standing
+(verdicts). The manifest is **per-batch data, authored fresh like a brief, never standing
 config** — the routing.yaml retired to §4 would have frozen a judgment; a manifest records one
-wave's already-made routing and expires with the wave. Each entry launches through one of two
+batch's already-made routing and expires with the batch. Each entry launches through one of two
 adapters, `codex exec` or `claude -p --output-format json`, both stamped with
 `HIPPO_DISPATCH`/`HIPPO_DEPTH` and recorded as `ev:dispatch` + `ev:usage` exactly like a single
 dispatch — the §3.2 schema is unchanged. Codex usage rides the same stderr banner and footer this
@@ -528,13 +548,13 @@ gated.
 The verdicts return through one call once judged: `hippo log outcome --from-batch <journal>`
 reads verdict rows as JSON-lines on stdin and resolves each `(entry, attempt)` through the
 journal's latest exited attempt to its dispatch id — **serialization after verification, never
-verification** (a wave's 222 verdicts cost 222 scalar calls before this). A row lands only on a
+verification** (a 222-lane batch's verdicts cost 222 scalar calls before this). A row lands only on a
 dispatch whose executor claim still awaits a verdict, carries its own `note`, and the whole
 input validates before the first append; everything exceptional — an earlier attempt, a
 deliberate re-verdict, a lane that never claimed — keeps the scalar command, where the
 exception stays visible.
 
-Measured against its predecessor on the same 200-algorithm fleet: the orchestrator's cost fell
+Measured against its predecessor on the same 200-algorithm "fleet": the orchestrator's cost fell
 $13.07 → $9.23 (turn-loop input nearly halved, 19.6M → 10.9M tokens) and wall time 42 → 28
 minutes. The run also measured the shape's one hazard: with judgment moved out of the launch
 loop, 130 *identical* check failures (one missing `pytest.ini` — a defect the loop-driving
@@ -641,6 +661,9 @@ main had in front of it — against that verdict, route × result, with one line
 `accept-candidate` precision (accepted or revised, of the accept-candidates that got a verdict).
 A ledger with no triage row gets no section.
 
+The page no longer waits for a manual run: the scribe regenerates it when it is due (§3.5.8), and
+`hippo prior distill` stays for the run nobody wants to wait a week for.
+
 Cells under n=4 get no rate but are still named with their n: a percentage over n=1 reads as
 evidence and is not one, while dropping it silently leaves the reader unable to tell a suppressed
 cell from an absent one. The raw ledger is deliberately not sent — everything the page needs is on
@@ -652,24 +675,31 @@ the sheet, and shipping 300 JSONL lines only offers something to recompute from,
 > and `/hippo:dispatch`; the CLI command (`hippo`), `.hippo/` and the `HIPPO_*` environment
 > variables use the same name.
 
-- **`hippo:hippo`** — the main nudge skill. Its description is the fixed line
+- **`hippo:hippo`** (~3KB) — the main nudge skill. Its description is the fixed line
   "This is your hippocampus. Always use it." — that single line sits in every session's skill list
   and is the only thing that invites use (principle 2: a short description rather than a resident
-  injection). The body holds nothing but a brief CLI guide (the grammar in one line, when to reach
-  for what, and that nothing is enforced); anything larger than that is a regression.
-- **`hippo:checkup`** — a `/doctor`-style project diagnosis. It reads the ledger, PRIORS, failures,
-  cursor gaps, recent transcripts and CLAUDE.md/memory, then reports waste patterns (retry loops,
-  limit stalls, orphan dispatches), directive hygiene (stale or contradictory directives versus the
-  documents) and clerk health (gaps, failures, overhead). Proposals are recommend-first, at most two
-  AskUserQuestion rounds, with reversibility stated. Nothing is applied automatically.
-- **`hippo:dispatch`** — the revised fleet-dispatch. The key revisions (all grounded in the audit and
-  the guide): a verifier **reports everything and main filters** (with a literal-minded model, a
-  severity ceiling genuinely hides findings); the verification budget is **proportional to the
-  refutation rate in PRIORS** rather than a fixed ritual; no re-verifying one's own work (boundary
-  verification only); safety statements about GPUs and memory use neutral vocabulary (10 measured
-  content-filter false positives); long runs go to background plus Monitor (no foreground sleep
-  polling); grep the shared and individual brief clauses for contradictions before composing them;
-  and the gate check and the push must always be separate calls.
+  injection). The body is the document models actually read — measured 2026-09-23, Codex lanes
+  read it 856 times while `--help` was called 405 times in 19 projects — so it carries the whole
+  grammar in one block (every command, flag and enum value, held to `build_parser` by a test),
+  when to reach for each, and what runs by itself. One screen; anything larger is a regression.
+- **`hippo:checkup`** (~5KB) — a `/doctor`-style project diagnosis. It reads the ledger, PRIORS,
+  failures, cursor gaps, recent transcripts and CLAUDE.md/memory, then reports waste patterns
+  (retry loops, limit stalls, orphan dispatches), directive hygiene (stale or contradictory
+  directives versus the documents, with `directive list --hygiene`) and clerk health (gaps,
+  failures, overhead, and why PRIORS is stale when auto-distill has not fired). Proposals are
+  recommend-first, at most two AskUserQuestion rounds, with reversibility stated. Nothing is
+  applied automatically.
+- **`hippo:dispatch`** (~9KB, from 16KB — a third of it described batch flags retired in 1.14.0)
+  — the revised "fleet-dispatch", now "delegation lanes": the measured lessons only, the flags
+  left to `hippo:hippo`. The key revisions (all grounded in the audit and the guide): a verifier
+  **reports everything and main filters** (with a literal-minded model, a severity ceiling
+  genuinely hides findings); the verification budget is **proportional to the refutation rate
+  in PRIORS** rather than a fixed ritual; no re-verifying one's own work (boundary verification
+  only); safety statements about GPUs and memory use neutral vocabulary (10 measured
+  content-filter false positives); grep the shared and individual brief clauses for
+  contradictions before composing them; symbol coupling is checked across lanes; and the gate
+  check and the push must always be separate calls. Measured use: 7 invocations plus 37 file
+  reads across 28 projects, against 2 for checkup.
 
 ### 3.8 Hosts (Claude Code · Codex CLI)
 
@@ -767,7 +797,7 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 | OPERATING CONTRACT-style resident injection | 8–14KB re-injected, measured. The only resident thing is the one block in §6 |
 | a hand-written PROGRESS.md | It goes stale. Replaced by worklog (generated) + ledger (facts) + PRIORS (distilled) |
 | typed refusal gates, frozen sidecars, remote verify | Record, never enforce (principle 3) |
-| installing a cron job automatically | A user who wants one sets it up. The plugin does not own a schedule |
+| installing a cron job automatically | A user who wants one sets it up. The plugin does not own a schedule — auto-distill rides the Stop-driven scribe instead: due-when rule, no schedule (§3.5.8) |
 | routing.yaml / depth-tier model config | Retired 1.11.0 before being built: prices are `prices.yaml` facts, tier-worth is PRIORS `$/accepted`, the decision between them is main's — frozen config is the stale-instruction shape (§1 principle 9). The runaway worry it addressed is handled by the fan-out circuit breaker (§3.6) instead. The shape it was retired in favour of is the batch plan (§3.6, `--batch --dry-run`, and ahead of every judged launch): the same question answered per batch, computed fresh from the price sheet and the ledger, printed as a suggestion — never a file that outlives the batch |
 | batch mode flags (`--harvest`, `--plan`, `--resume`, `--fresh`, `--concurrency`, `--causes`) | Retired 1.14.0. Measured across 28 projects (2026-09-23): zero calls to `--harvest`, `--resume`, `--fresh`, `--concurrency` and `--causes`, six to `--plan` in one project, against 11 `--batch` calls in two — while the flag-free single form carried 1,470 of 1,945 dispatch rows. A feature that needs a flag is a feature main does not use: the journal now decides launch / resume / harvest, the harvest ends every run, `--dry-run` is the plan, and concurrency is the manifest key (§3.6) |
 | directive lifetimes (`turn\|phase\|durable`) | Retired 1.14.0 (§3.2). Measured across 28 projects: 63 of 75 live `phase` directives were past 14 days and the aging nudge produced no withdrawals, 34 of 72 withdrawn went within 3 days, and 54 of 55 `turn` directives expired by the clock. One lifetime — until withdrawn — plus an age shown on every line (§6) |
@@ -880,7 +910,7 @@ malformed JSON isolated into failures), and digest_lite basics. Around twenty of
 - The audit's digest logic (digest.py, proven on 479MB) → `scripts/digest_lite.py`
 - The task registry concept (1,081 voluntary uses even after the plugin was switched off = revealed
   preference) → a thin rewrite
-- The body of the fleet-dispatch skill → the revised `skills/dispatch`
+- The body of the "fleet-dispatch" skill → the revised `skills/dispatch`
 - Everything else from 0.x → retired to the `legacy` branch. Audit report:
   `~/workspace/b200-2-research-cc-audit/`
 
@@ -994,7 +1024,7 @@ survives of the worry is not routing but blast radius, and that is the fan-out c
 
 PRIORS aggregates quality — refutation and acceptance rates — over `kind × exec`. That was the
 right question while every dispatch cost roughly the same. It stops being the right question in two
-ways at once: a depth-1 dispatch is a *fleet*, not a lane, and filing it beside a single cheap
+ways at once: a depth-1 dispatch is a *batch*, not a lane, and filing it beside a single cheap
 dispatch under the same `kind` makes the prior lie; and once a cheap tier is genuinely cheap, the
 question changes from
 
@@ -1006,12 +1036,12 @@ the wiring this section needed, built with `ev:usage` in 1.10.0.) `codex exec` r
 usage, so recording it at lane exit is collection at the point that
 already knows (principle 6). Cost per *accepted* outcome is then derivable, and §9.5's routing stops
 being a guess. It also composes with §9.2 for free: children writing to the same ledger under a
-parent's dispatch id means a fleet's cost sums itself.
+parent's dispatch id means a batch's cost sums itself.
 
 ### 9.7 Consequences to settle before building
 
 - **The executor gets no scribe** (enforced by the Stop hook's `HIPPO_DISPATCH` gate since
-  1.8.1). Running the Stop hook per lane multiplies clerk cost by the wave width, and the hook
+  1.8.1). Running the Stop hook per lane multiplies clerk cost by the batch width, and the hook
   cap is two (§3.4). It *does* get the capsule — SessionStart's side of the same gate — because
   a lane that compacts loses its brief's constraints exactly the way main used to (§3.4). If a
   depth-1 orchestrator's reasoning is worth keeping, the
@@ -1030,6 +1060,6 @@ parent's dispatch id means a fleet's cost sums itself.
 ### 9.8 Order
 
 §9.2–9.4 are the data plane and stand alone; §9.5–9.6 are the control plane on top of it and are
-half-blind without it (an orchestrated fleet with no shared memory starves its own children). Build
+half-blind without it (an orchestrated batch with no shared memory starves its own children). Build
 the data plane first. Its minimum is two things — the `executor` src value and the audience axis —
 which is small enough that it may not need a major version at all.

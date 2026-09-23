@@ -42,7 +42,7 @@ settle change the answer:
   construction. One `fork/...` dispatch 63s after its codex sibling was the second half of a
   design duo — its twin's own outcome said "duo 착지: codex(…)". Dropping it would have erased a
   real delegation.
-- **Parallel waves put several launches inside the window.** With a burst, more than one launcher
+- **Parallel lanes put several launches inside the window.** With a burst, more than one launcher
   record is within Δt of the same scribe record and only one is the twin. The report prints both
   scopes side by side so this takes a glance to settle: on a real ledger, 4 of 5 surviving
   candidates turned out to be unrelated launches that merely started at the same moment.

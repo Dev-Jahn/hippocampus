@@ -5,56 +5,61 @@ description: This is your hippocampus. Always use it.
 
 # hippo — the project's hippocampus
 
-hippo does not control you. It just holds the memory for you: what you delegated, what was
-accepted or refuted, and which of the user's instructions are still alive. The judgment is
-always yours.
+hippo does not control you; it holds the memory — what you delegated, what was accepted or
+refuted, which of the user's instructions are still alive. The judgment is always yours.
 
-## How to call it
+## Grammar
 
-In Claude Code, `hippo` is on PATH. **In Codex it is not** — resolve `../../bin/hippo` relative
+```
+hippo init
+hippo status [--inject]
+hippo task add <type>/<slug> --title T [--notes N] [--deps a,b]
+    [--status pending|active|done|dropped]
+hippo task set <id> title|status|notes|deps <value>      # positional: no --flags
+hippo task done <id> [--note N]
+hippo task list [--status s1,s2] [--all] [--json]
+hippo task show <id> [--json]
+hippo task drop <id>
+hippo log dispatch --id D --kind K --exec executor/model/effort --scope S
+    [--task T] [--depth N] [--parent D]
+hippo log outcome --ref <dispatch-id>|task:<task-id> --result accepted|revised|refuted|no-go|lost
+    [--attr work|brief|harness] [--rework N] [--by executor/model] [--note N]
+hippo log outcome --from-batch <journal> [--dry-run] < verdicts.jsonl
+hippo log review --id R --base <sha> --source S --findings N
+hippo log review-status --ref R --addressed full|partial|none [--at <sha>]
+hippo log raw '<json>'
+hippo log tail [-n N] [--ev TYPE]
+hippo directive add --text T [--id kebab-id] [--audience main|executor|all]
+    [--state active|withdrawn|expired]
+hippo directive list [--active] [--json] [--hygiene]
+hippo directive withdraw <id>
+hippo prior show
+hippo prior distill [--days N]
+hippo dispatch --kind K --scope S [--task T] [--depth N] [--fast] [--] <codex exec args…>
+hippo dispatch --batch <manifest.yaml> [--dry-run]
+# a bare noun reads: task → list, log → tail, directive → list, prior → show
+```
+
+## When
+
+- Work will outlive this turn → `task add`; `task done` when it ships.
+- A delegation gets a verdict → `log outcome` (`--ref task:<id>` finds its open dispatch).
+- The user rules → `directive add`; re-add the same `--id` to change it, `withdraw` when done,
+  `--audience main` when a lane never needs it. A rule for the next answer only is not one.
+- An external review arrives → `log review`; its findings dealt with → `log review-status`.
+- Before routing a delegation → `prior`.
+- Codex lanes → `dispatch`; many at once → `--batch` (`/hippo:dispatch` has the contract).
+- Lost your place → `status`.
+
+## What runs by itself
+
+- The scribe, at every Stop: turns the transcript into ledger events and a worklog line, and
+  regenerates PRIORS when it is a week old and five new verdicts have landed.
+- The capsule, at session start and after every compaction: tasks, live directives, in flight.
+- The judge, only when `TYPESAFE_API_KEY` is set: gate hints for the scribe, notes on directives,
+  routing and triage on dispatch. Without the key nothing changes.
+- The dispatch wrapper records the launch, the lane's usage and its triage.
+- Recording through the CLI only raises certainty; nothing breaks if you skip a record.
+
+In Claude Code `hippo` is on PATH. **In Codex it is not** — resolve `../../bin/hippo` relative
 to this SKILL.md into an absolute path and call that.
-
-## The grammar, in one line
-
-Facts go in through one door, `hippo log <event>`; the nouns are windows that read them back.
-Call a noun on its own and you get its default view (`hippo task` = the list, `hippo log` = recent
-records, `hippo directive` = the live instructions, `hippo prior` = the routing priors).
-
-## When to reach for what
-
-- When work lands that will outlive this turn: `hippo task add <type>/<slug> --title "…"`
-  (`--deps a,b` when order matters), `hippo task done <id>` when it ships. Bare `hippo task`
-  answers *what can I start now* — a task whose deps are unfinished shows a `waiting on:` line.
-- While delegating: `hippo log dispatch --id <new id> --kind <tag> --exec <executor/model/effort> --scope "<one line>"`
-  (a codex exec launched as `hippo dispatch --kind … --scope … -- <codex args>` records itself)
-- When a delegation gets a verdict: `hippo log outcome --ref <id> --result accepted|revised|refuted|no-go|lost --attr work|brief|harness`
-  (`--ref task:<task-id>` resolves to that task's dispatch still awaiting an outcome, so you do not
-  have to go find the hash; the ledger still stores the dispatch id)
-- When the user gives a standing instruction: `hippo directive add --text "…"`
-  (add `--audience main|executor|all` when it binds only one side — a dispatched lane's capsule
-  carries the `executor|all` ones, this session's carries `main|all`). It stays live until
-  `hippo directive withdraw <id>`; an instruction for the next answer only is not a directive.
-  To *change* an existing one, re-add it with the same `--id` —
-  a new id forks the instruction instead of updating it. Ids are lowercase kebab ascii
-  (`gpu-pinning`), whatever language the text is in; the derived id is refused when the text has
-  no ascii letters to build one from.
-- When an external review reply arrives: `hippo log review --id <new id> --base <sha> --source <where> --findings <n>`
-  — and when its findings are dealt with, close the loop:
-  `hippo log review-status --ref <review-id> --addressed full|partial|none [--at <sha>]`
-  (a review with no review-status stays "not fully addressed" in every distill)
-- Before deciding delegation routing: `hippo prior` — which model and effort measured better
-- To see where things stand: `hippo status`
-
-Delegation briefs live in `.hippo/briefs/` — a project-relative path that survives sessions,
-so nothing has to retype an absolute scratchpad prefix. `/hippo:dispatch` has the full contract.
-
-## What you don't have to do
-
-Every turn, a background clerk reads the transcript and infers most of the events above on its
-own. Recording through the CLI only raises the certainty. Nothing breaks if you skip a record —
-this organ does not enforce.
-
-The clerk's backend resolves automatically (codex if installed, else headless claude). When a
-project needs a different one, set `clerk: {backend: codex|claude}` in `.hippo/config.yaml`, or
-export `$HIPPO_CLERK_BACKEND` / `$HIPPO_CLERK_MODEL` (pin the backend when you pin the model —
-a model id for one backend is invalid on the other).

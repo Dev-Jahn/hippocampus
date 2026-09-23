@@ -9,7 +9,7 @@ set -u
 [ -n "${HIPPO_CLERK:-}" ] && exit 0
 
 # A dispatched lane gets no scribe (§9.7): a per-lane Stop would multiply clerk cost by the
-# wave width, and a scribe reading a lane's transcript would write src=scribe rows — verdicts —
+# batch width, and a scribe reading a lane's transcript would write src=scribe rows — verdicts —
 # out of a worker's self-narrative. HIPPO_DISPATCH, planted by the wrapper, is the gate.
 [ -n "${HIPPO_DISPATCH:-}" ] && exit 0
 

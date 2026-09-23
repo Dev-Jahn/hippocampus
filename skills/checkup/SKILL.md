@@ -65,8 +65,9 @@ Code) or `~/.codex/sessions/` in dated subdirectories (Codex) — take the newes
 - From a sample of recent transcripts (the latest 2-3, compressed with digest_lite): the same
   error three or more times, foreground sleep polling, a run of "File has not been read yet" —
   report counts and one representative case each.
-- If PRIORS.md is more than 7 days old, propose running `hippo prior distill` (include it in the
-  cleanup bundle).
+- PRIORS.md regenerates itself at Stop once it is a week old and five new verdicts have landed.
+  If it is older than that anyway, say which half is missing — too few verdicts recorded since
+  the last `ev:clerk name:distiller` row, or that row failing — rather than proposing a manual run.
 
 ## Check 4 — data hygiene
 
