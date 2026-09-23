@@ -820,14 +820,13 @@ def directive_content_notes(hp, new):
 
 
 def directive_hygiene_notes(hp):
-    """`directive list --hygiene`: the same reading over the whole live set — every pair of it,
-    and each directive's own audience.
-
-    This is the one mode that is mostly the judge, so with the judge off it says so in one line
-    rather than printing nothing: the listing and the volume notes above it are still exactly
-    what they were (§3.9)."""
+    """`directive list`: the same reading over the whole live set — every pair of it, and each
+    directive's own audience — whenever there is a judge. Automatic, never a flag: the flagged
+    form was called 8 times in one project across 28 measured, and a note nobody asks for is a
+    note nobody sees. With the judge off there is nothing — the listing and the volume notes are
+    exactly what they were (§3.9)."""
     if jev_backend(hp) == "off":
-        return ["hygiene: judge off — no TYPESAFE_API_KEY; showing the deterministic part only"]
+        return []
     live = [d for d in directives(hp).values() if d.get("state") == "active"]
     policy = jev_policy("directive")
     max_live = int(policy.get("max_live") or 0)
@@ -1547,12 +1546,10 @@ def cmd_directive_list(args):
                 f"{d.get('text', '')}"
             )
     # Reviewing the set is the other moment the author can act on what it costs. On stderr, so
-    # the listing itself stays a clean, pipeable record of the directives. --hygiene asks the
-    # judge the same question about the content; it was asked for explicitly, so it answers
-    # beside a --json listing too, where the volume notes stay out of the way as they always did.
-    notes = directive_hygiene_notes(args.hp) if args.hygiene else []
-    if not args.json:
-        notes += directive_volume_notes(args.hp)
+    # the listing itself stays a clean, pipeable record of the directives. The judge reads the
+    # content beside the volume notes, by itself, for the human-facing listing; a --json read is
+    # a machine's, and stays free of the second's latency and of any note, as it always was.
+    notes = [] if args.json else directive_hygiene_notes(args.hp) + directive_volume_notes(args.hp)
     for note in notes:
         print(note, file=sys.stderr)
 
@@ -4051,13 +4048,6 @@ def build_parser():
     a = d.add_parser("list", help="list (derived from the ledger)")
     a.add_argument("--active", action="store_true")
     a.add_argument("--json", action="store_true")
-    a.add_argument(
-        "--hygiene",
-        action="store_true",
-        help="also have the judge read the live set: probable conflicts between two "
-             "directives, and an audience that reads differently from the "
-             "stored one (needs TYPESAFE_API_KEY; notes only, nothing is changed)",
-    )
     a.set_defaults(fn=cmd_directive_list)
     a = d.add_parser("withdraw", help="withdraw a directive the user is done with")
     a.add_argument("id")

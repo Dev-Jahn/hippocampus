@@ -1,5 +1,5 @@
 # directive: read over the live directive set at `hippo directive add` and at
-# `hippo directive list --hygiene` (DESIGN §6, fourth rule — content is judged, never enforced).
+# every human-facing `hippo directive list` (DESIGN §6, fourth rule — content is judged, never enforced).
 # Every answer becomes at most one note on stderr; nothing here changes what is stored.
 #
 # The conflict question comes in three shapes because the state it reads does: the directive just
@@ -16,7 +16,7 @@ questions:
     criteria: &conflict
       "true": Following one of them necessarily violates the other
       "false": They speak to different subjects, or both of them can be followed at once
-  # stage 1 of `directive list --hygiene`: one pair inside the live set.
+  # stage 1 of `directive list`: one pair inside the live set.
   conflict_{i}_{j}:
     type: noul
     instructions: >-

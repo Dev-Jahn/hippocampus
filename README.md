@@ -88,7 +88,7 @@ a model id for one backend is invalid on the other).
 With `TYPESAFE_API_KEY` in the environment, hippo asks TypeSafe's Jev — a judgment-only model
 that returns probabilities, never prose — a few typed questions at moments where it already
 holds the text: the scribe's digest (advisory hints for the clerk), the live directive set
-(`directive add`, `directive list --hygiene`), every dispatch's brief before it launches and
+(`directive add`, `directive list`), every dispatch's brief before it launches and
 its report at exit (single and `--batch` alike). Answers are evidence a code policy thresholds;
 the judge never writes a verdict. There is no setting and no prompt: without the
 key, every command behaves exactly as it always has. Question specs are text in
@@ -119,7 +119,7 @@ hippo log raw '<json>'
 hippo log tail [-n N] [--ev TYPE]
 hippo directive add --text T [--id kebab-id] [--audience main|executor|all]
     [--state active|withdrawn|expired]
-hippo directive list [--active] [--json] [--hygiene]
+hippo directive list [--active] [--json]
 hippo directive withdraw <id>
 hippo prior show
 hippo prior distill [--days N]

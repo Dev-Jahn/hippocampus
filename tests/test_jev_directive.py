@@ -1,5 +1,5 @@
 """The judge's read of directive *content* — the notes after `directive add` and
-`directive list --hygiene` (DESIGN §6 fourth rule, §3.9).
+`directive list` (DESIGN §6 fourth rule, §3.9) — automatic whenever there is a judge.
 
 Nothing here reaches the network: every run pins `HIPPO_JEV_BACKEND` to `mock`, or takes `off`
 from conftest. What most of these pin down is the two-stage rule — stage 1 reads the whole set
@@ -243,7 +243,7 @@ def test_the_state_carries_the_whole_live_set_and_never_the_re_added_id(
 
 
 # --------------------------------------------------------------------------
-# `directive list --hygiene`
+# `directive list` — the judge reads the set by itself
 # --------------------------------------------------------------------------
 
 def _seed_three(run_hippo, project, env):
@@ -260,7 +260,7 @@ def test_hygiene_prints_pair_notes_and_per_directive_notes(tmp_project, run_hipp
         "audience_1": _choice("executor", 0.9),  # gpu-01, stored as all
     }, name="hygiene.json")
     capture = tmp_path / "capture.json"
-    out = run_hippo(["directive", "list", "--hygiene"], cwd=tmp_project, env=_env(jev, capture))
+    out = run_hippo(["directive", "list"], cwd=tmp_project, env=_env(jev, capture))
     assert out.returncode == 0, out.stderr
     assert len(out.stdout.splitlines()) == 3, out.stdout
     assert "note: english-only may conflict with korean-comments (0.83)" in out.stderr
@@ -281,7 +281,7 @@ def test_hygiene_stage_one_asks_every_pair_and_every_audience_in_one_request(
     jev = _quiet(tmp_path)
     _seed_three(run_hippo, tmp_project, _env(jev))
     capture = tmp_path / "capture.json"
-    out = run_hippo(["directive", "list", "--hygiene"], cwd=tmp_project, env=_env(jev, capture))
+    out = run_hippo(["directive", "list"], cwd=tmp_project, env=_env(jev, capture))
     assert out.returncode == 0, out.stderr
     sent = json.loads(capture.read_text(encoding="utf-8"))
     assert set(sent["questions"]) == {
@@ -293,24 +293,19 @@ def test_hygiene_stage_one_asks_every_pair_and_every_audience_in_one_request(
     assert out.stderr.strip() == "", "a set the judge reads as clean says nothing"
 
 
-def test_hygiene_with_the_judge_off_prints_the_listing_and_says_the_judge_is_off(
-    tmp_project, run_hippo
-):
+def test_with_the_judge_off_the_listing_is_byte_identical_to_before(tmp_project, run_hippo):
+    """No key, no judge, no note: the read command is what it always was (§3.9)."""
     _add(run_hippo, tmp_project, "long-01", "x" * 250)
-    plain = run_hippo(["directive", "list"], cwd=tmp_project)
-    hygiene = run_hippo(["directive", "list", "--hygiene"], cwd=tmp_project)
-    assert hygiene.returncode == 0, hygiene.stderr
-    assert hygiene.stdout == plain.stdout
-    assert hygiene.stderr.splitlines() == [
-        "hygiene: judge off — no TYPESAFE_API_KEY; showing the deterministic part only",
-        *plain.stderr.splitlines(),
-    ]
+    out = run_hippo(["directive", "list"], cwd=tmp_project)
+    assert out.returncode == 0, out.stderr
+    assert not [ln for ln in out.stderr.splitlines() if not ln.startswith("note: ")], out.stderr
+    assert "may conflict" not in out.stderr and "hygiene" not in out.stderr
     assert _meter_rows(tmp_project) == []
 
 
 def test_hygiene_on_an_empty_set_asks_nothing(tmp_project, run_hippo, tmp_path):
     capture = tmp_path / "capture.json"
-    out = run_hippo(["directive", "list", "--hygiene"], cwd=tmp_project,
+    out = run_hippo(["directive", "list"], cwd=tmp_project,
                     env=_env(_quiet(tmp_path), capture))
     assert out.returncode == 0, out.stderr
     assert (out.stdout, out.stderr) == ("", "")
@@ -320,19 +315,19 @@ def test_hygiene_on_an_empty_set_asks_nothing(tmp_project, run_hippo, tmp_path):
 def test_a_hygiene_run_the_judge_could_not_answer_says_why(tmp_project, run_hippo, tmp_path):
     """The one mode that is mostly the judge: silence here would read as a clean set."""
     _add(run_hippo, tmp_project, "gpu-01", "use GPUs 0 and 1 only")
-    out = run_hippo(["directive", "list", "--hygiene"], cwd=tmp_project,
+    out = run_hippo(["directive", "list"], cwd=tmp_project,
                     env=_env(tmp_path / "absent.json"))
     assert out.returncode == 0, out.stderr
     assert "hygiene: the judge did not answer (mock: " in out.stderr
     assert [r["ok"] for r in _meter_rows(tmp_project)] == [False]
 
 
-def test_the_plain_listing_is_untouched_by_the_flag_existing(tmp_project, run_hippo, tmp_path):
-    """No --hygiene, no request, whatever the backend is — the read command is what it was."""
+def test_a_json_listing_never_asks_the_judge(tmp_project, run_hippo, tmp_path):
+    """A --json read is a machine's: no request, no note, whatever the backend is."""
     jev = _quiet(tmp_path)
     _add(run_hippo, tmp_project, "gpu-01", "use GPUs 0 and 1 only", env=_env(jev))
     before = len(_meter_rows(tmp_project))
-    out = run_hippo(["directive", "list"], cwd=tmp_project, env=_env(jev))
+    out = run_hippo(["directive", "list", "--json"], cwd=tmp_project, env=_env(jev))
     assert out.returncode == 0, out.stderr
     assert out.stderr.strip() == ""
     assert len(_meter_rows(tmp_project)) == before

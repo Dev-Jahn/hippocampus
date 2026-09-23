@@ -286,7 +286,7 @@ hippo log raw '<json>'
 hippo log tail [-n N] [--ev TYPE]
 hippo directive add --text T [--id kebab-id] [--audience main|executor|all]
     [--state active|withdrawn|expired]
-hippo directive list [--active] [--json] [--hygiene]
+hippo directive list [--active] [--json]
 hippo directive withdraw <id>
 hippo prior show
 hippo prior distill [--days N]
@@ -685,7 +685,7 @@ the sheet, and shipping 300 JSONL lines only offers something to recompute from,
 - **`hippo:checkup`** (~5KB) — a `/doctor`-style project diagnosis. It reads the ledger, PRIORS,
   failures, cursor gaps, recent transcripts and CLAUDE.md/memory, then reports waste patterns
   (retry loops, limit stalls, orphan dispatches), directive hygiene (stale or contradictory
-  directives versus the documents, with `directive list --hygiene`) and clerk health (gaps,
+  directives versus the documents, from the notes `directive list` prints) and clerk health (gaps,
   failures, overhead, and why PRIORS is stale when auto-distill has not fired). Proposals are
   recommend-first, at most two AskUserQuestion rounds, with reversibility stated. Nothing is
   applied automatically.
@@ -889,8 +889,9 @@ Four rules govern the directive block:
 - **Content is judged, never enforced.** The three rules above count characters and days; what
   the directives *say* went unread, and an obedient model is most dangerous where two live
   clauses contradict each other (measured: a fail-closed NO-GO out of two GPU clauses). At
-  `directive add` and at `directive list --hygiene` the judge (§3.9) reads the whole live set and
-  notes probable conflicts and audience mismatches. A note is the whole of it: the
+  `directive add` and at every human-facing `directive list` the judge (§3.9) reads the whole
+  live set and notes probable conflicts and audience mismatches — by itself, never behind a
+  flag (the flagged form measured 8 calls in one project of 28). A note is the whole of it: the
   stored value never changes, nothing is refused, and with no key there is no judge and no note.
   The threshold is deliberately conservative and the reading is two-stage — a probe over this
   repo's live set (8 directives + 3 planted, 77 questions, 0.9s) ranked the two planted conflicts

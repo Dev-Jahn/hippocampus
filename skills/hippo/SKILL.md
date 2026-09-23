@@ -31,7 +31,7 @@ hippo log raw '<json>'
 hippo log tail [-n N] [--ev TYPE]
 hippo directive add --text T [--id kebab-id] [--audience main|executor|all]
     [--state active|withdrawn|expired]
-hippo directive list [--active] [--json] [--hygiene]
+hippo directive list [--active] [--json]
 hippo directive withdraw <id>
 hippo prior show
 hippo prior distill [--days N]
