@@ -20,6 +20,14 @@ from pathlib import Path
 
 import pytest
 
+# Every subprocess a test starts inherits this environment, through run_hippo or not: the judge
+# stays off unless a test pins a backend (a developer machine carries a live TYPESAFE_API_KEY,
+# and `hippo dispatch` now asks the judge), and a suite run from inside a dispatched lane must
+# not run as that lane.
+os.environ.setdefault("HIPPO_JEV_BACKEND", "off")
+for _lane_var in ("HIPPO_DISPATCH", "HIPPO_DEPTH"):
+    os.environ.pop(_lane_var, None)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HIPPO_BIN = REPO_ROOT / "bin" / "hippo"
 HOOKS_DIR = REPO_ROOT / "hooks"

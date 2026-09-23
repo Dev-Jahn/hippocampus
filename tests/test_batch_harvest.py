@@ -1,11 +1,12 @@
-"""Harvest triage over a batch wave (DESIGN §3.6) — the judge reads every lane report so main
+"""Harvest triage over a batch (DESIGN §3.6) — the judge reads every lane report so main
 reads one table instead of N reports.
 
-Contract under test: the triage record at lane exit and what it carries, the route policy
-computed in code, the state the judge actually receives (whole report, whole brief, the lane's
-git changes) and the trim order when it does not fit, `--harvest` with its table/clusters/
-verdicts file, `--resume --causes`, and — the rule that outranks all of it — that with the
-judge off every one of these paths behaves exactly as it did before the judge existed.
+Contract under test: the triage record at lane exit and the ev:triage row beside it, the route
+policy computed in code, the state the judge actually receives (whole report, whole brief, the
+lane's git changes) and the trim order when it does not fit, the harvest every run ends with —
+its table, clusters and verdicts file — what a rerun over an existing journal relaunches and
+what it skips by cause, and — the rule that outranks all of it — that with the judge off every
+one of these paths keeps its deterministic half and nothing judged appears.
 
 Nothing here may reach the network: conftest pins HIPPO_JEV_BACKEND=off and the tests that
 want a judge pin `mock`, whose answers come from $HIPPO_JEV_MOCK_OUTPUT.
@@ -16,7 +17,7 @@ import subprocess
 import pytest
 
 from conftest import read_ledger
-from test_batch import _batch, _journal, _manifest, _outdir, _stub, _summary
+from test_batch import _batch, _journal, _manifest, _outdir, _stub
 
 # codex 0.144.6 (measured): the banner rides stderr. `FAIL` in the prompt makes this stub the
 # failing half of a two-lane wave — one executable on PATH serves every entry.
@@ -34,8 +35,8 @@ printf 'agent output\\n'
 exit 0
 """
 
-# Records the prompt of every lane it is launched for, so a --causes resume can be checked by
-# what actually ran rather than by what the journal says ran.
+# Records the prompt of every lane it is launched for, so a rerun can be checked by what
+# actually ran rather than by what the journal says ran.
 RECORD_STUB = """\
 #!/bin/sh
 for a in "$@"; do last="$a"; done
@@ -105,6 +106,10 @@ def _table(proc):
     return lines[:-1]
 
 
+def _summary(proc):
+    return json.loads(proc.stdout.splitlines()[-1])
+
+
 def _row(proc, entry_id):
     for i, line in enumerate(_table(proc)):
         if line.split()[0] == entry_id:
@@ -151,9 +156,24 @@ def test_triage_lands_at_lane_exit_with_its_route(tmp_project, tmp_path, run_hip
     assert sent["state"]["claim"] is None
     assert "model: gpt-5.6-luna" not in sent["state"]["stderr_tail"], "banner noise is filtered"
 
-    # Self-metering: one row per triage call, named after its spec (§2).
+    # Self-metering: one row per call, named after its spec (§2) — the plan pass reads the
+    # brief before launch, the triage reads the lane after it, and the harvest reuses that.
     clerk = [e for e in read_ledger(tmp_project) if e.get("ev") == "clerk"]
-    assert [(e["name"], e["ok"], e["src"]) for e in clerk] == [("jev-harvest", True, "wrapper")]
+    assert [(e["name"], e["ok"], e["src"]) for e in clerk] == [("jev-plan", True, "wrapper"),
+                                                               ("jev-harvest", True, "wrapper")]
+
+    # The same reading lands in the ledger, joined to the dispatch it read (§3.2).
+    (row,) = [e for e in read_ledger(tmp_project) if e.get("ev") == "triage"]
+    (d,) = [e for e in read_ledger(tmp_project) if e.get("ev") == "dispatch"]
+    assert row["ref"] == d["id"] == rec["dispatch"] and row["src"] == "wrapper"
+    assert row["route"] == "accept-candidate" and row["verify"] is False
+    assert row["p"] == {"done": 0.95, "blocked": 0.02, "ask": 0.03, "creep": 0.04,
+                        "evidence": 0.91, "risk": 1.0}
+    assert "cause" not in row, "a cause of none is no cause"
+
+    # The run ends with the table, the summary line last.
+    _, ok = _row(proc, "ok-lane")
+    assert ok[4] == "accept-candidate"
 
 
 # --------------------------------------------------------------------------
@@ -173,17 +193,19 @@ def test_a_dead_judge_leaves_a_gap_and_the_wave_still_passes(tmp_project, tmp_pa
     assert rec["jev"]["ok"] is False and rec["jev"]["reason"]
     assert "triage=-" in proc.stderr
     assert _summary(proc)["routes"] == {"-": 1}, "the gap is counted, not hidden"
+    assert len(_records(manifest, "triage")) == 1, "a failed read is not retried in the same run"
 
     clerk = [e for e in read_ledger(tmp_project) if e.get("ev") == "clerk"]
-    assert [(e["name"], e["ok"]) for e in clerk] == [("jev-harvest", False)]
+    assert [(e["name"], e["ok"]) for e in clerk] == [("jev-plan", False), ("jev-harvest", False)]
+    assert [e for e in read_ledger(tmp_project) if e.get("ev") == "triage"] == [], \
+        "a judge failure writes no triage row — the clerk row is the gap"
 
 
 # --------------------------------------------------------------------------
 # (c) with no key there is no judge — and no difference
 # --------------------------------------------------------------------------
 
-def test_with_the_judge_off_the_wave_is_byte_for_byte_what_it_was(tmp_project, tmp_path,
-                                                                  run_hippo):
+def test_with_the_judge_off_nothing_judged_appears(tmp_project, tmp_path, run_hippo):
     manifest = _one_lane(tmp_project)
     # conftest pins HIPPO_JEV_BACKEND=off, which is what a machine with no key resolves to.
     proc = _batch(run_hippo, tmp_project, manifest,
@@ -192,7 +214,9 @@ def test_with_the_judge_off_the_wave_is_byte_for_byte_what_it_was(tmp_project, t
     assert _records(manifest, "triage") == [], "no judge, no record"
     assert "routes" not in _summary(proc)
     assert "triage=" not in proc.stderr, "no judge, no column"
-    assert [e for e in read_ledger(tmp_project) if e.get("ev") == "clerk"] == []
+    assert "ladder" not in proc.stderr, "no judge, no plan pass before the launch"
+    assert [e for e in read_ledger(tmp_project) if e.get("ev") in ("clerk", "triage")] == []
+    assert not (tmp_project / "wave.plan.jsonl").exists()
 
 
 def test_with_the_judge_off_harvest_prints_the_deterministic_table(tmp_project, tmp_path,
@@ -201,7 +225,8 @@ def test_with_the_judge_off_harvest_prints_the_deterministic_table(tmp_project, 
     env = {"PATH": _stub(tmp_path, "codex", HALF_STUB)}
     assert _batch(run_hippo, tmp_project, manifest, env=env).returncode == 0
 
-    proc = _batch(run_hippo, tmp_project, manifest, "--harvest", env=env)
+    # Everything is done, so the rerun launches nothing and only harvests.
+    proc = _batch(run_hippo, tmp_project, manifest, env=env)
     assert proc.returncode == 0, proc.stderr
     assert "judge off — no TYPESAFE_API_KEY" in proc.stderr
     assert _table(proc)[0].split()[:6] == ["id", "rc", "check", "claim", "route", "verify"]
@@ -211,27 +236,25 @@ def test_with_the_judge_off_harvest_prints_the_deterministic_table(tmp_project, 
     assert row[-1] == "wave.out/ok-lane.out"
     assert _records(manifest, "triage") == []
     assert not (tmp_project / "wave.verdicts.jsonl").exists(), "nothing judged, nothing to pipe"
-    summary = json.loads(proc.stdout.splitlines()[-1])
+    summary = _summary(proc)
     assert summary["harvested"] == 1 and summary["verdicts"] is None
+    assert summary["launched"] == 0
     assert "routes" not in summary
 
 
 # --------------------------------------------------------------------------
-# (d) --harvest: the table, the cluster and the verdicts file
+# (d) the harvest: the table, the cluster and the verdicts file
 # --------------------------------------------------------------------------
 
 def test_harvest_tables_two_lanes_and_writes_only_the_accept_row(tmp_project, tmp_path,
                                                                  run_hippo):
     manifest = _two_lanes(tmp_project)
     path = _stub(tmp_path, "codex", HALF_STUB)
-    assert _batch(run_hippo, tmp_project, manifest, env={"PATH": path}).returncode == 1
-
     mock = _mock(tmp_path, {
         "answers": {**ACCEPT, "cause": {"choice": "environment", "confidence": 0.81}},
         "default": DEFAULT})
-    proc = _batch(run_hippo, tmp_project, manifest, "--harvest",
-                  env={"PATH": path, **_jev(mock)})
-    assert proc.returncode == 0, proc.stderr
+    proc = _batch(run_hippo, tmp_project, manifest, env={"PATH": path, **_jev(mock)})
+    assert proc.returncode == 1, "the rc is still the launches'"
     assert "judge off" not in proc.stderr
 
     assert len(_records(manifest, "triage")) == 2
@@ -250,7 +273,8 @@ def test_harvest_tables_two_lanes_and_writes_only_the_accept_row(tmp_project, tm
 
     footer = proc.stdout
     assert "c1 · environment · 1 lane · " in footer
-    assert "--resume --causes environment" in footer
+    assert "hippo dispatch --batch wave.yaml  # a rerun relaunches the environment failures" \
+        in footer
     assert "hippo log outcome --from-batch" in footer
 
     verdicts = (tmp_project / "wave.verdicts.jsonl").read_text(encoding="utf-8")
@@ -261,20 +285,41 @@ def test_harvest_tables_two_lanes_and_writes_only_the_accept_row(tmp_project, tm
     assert rows[0]["note"] == ("triage accept-candidate: done 0.95, check -; "
                                "confirmed by main")
 
-    summary = json.loads(proc.stdout.splitlines()[-1])
+    summary = _summary(proc)
     assert summary["routes"] == {"failed": 1, "accept-candidate": 1}
     assert summary["clusters"] == 1
+    assert (summary["launched"], summary["ok"], summary["failed"]) == (2, 1, 1)
 
 
-def test_harvest_refuses_to_launch_anything(tmp_project, tmp_path, run_hippo):
+def test_a_finished_batch_reharvests_without_reading_a_lane_twice(tmp_project, tmp_path,
+                                                                  run_hippo):
     manifest = _one_lane(tmp_project)
-    for flag in ("--resume", "--fresh", "--dry-run"):
-        proc = _batch(run_hippo, tmp_project, manifest, "--harvest", flag,
-                      env={"PATH": _stub(tmp_path, "codex", HALF_STUB)})
-        assert proc.returncode == 2 and "launches nothing" in proc.stderr
-    proc = _batch(run_hippo, tmp_project, manifest, "--harvest",
-                  env={"PATH": _stub(tmp_path, "codex", HALF_STUB)})
-    assert proc.returncode == 2 and "no journal yet" in proc.stderr
+    env = {"PATH": _stub(tmp_path, "codex", HALF_STUB),
+           **_jev(_mock(tmp_path, {"answers": ACCEPT, "default": DEFAULT}))}
+    assert _batch(run_hippo, tmp_project, manifest, env=env).returncode == 0
+    proc = _batch(run_hippo, tmp_project, manifest, env=env)
+    assert proc.returncode == 0, proc.stderr
+
+    assert _summary(proc)["launched"] == 0
+    assert _row(proc, "ok-lane")[1][4] == "accept-candidate", "the lane-exit triage is reused"
+    assert len(_records(manifest, "triage")) == 1
+    rows = read_ledger(tmp_project)
+    assert len([e for e in rows if e.get("ev") == "triage"]) == 1, "one lane, one reading"
+    assert [e["name"] for e in rows if e.get("ev") == "clerk"] == ["jev-plan", "jev-harvest"]
+
+
+def test_a_lane_triaged_with_the_judge_off_is_read_when_it_is_on(tmp_project, tmp_path,
+                                                                  run_hippo):
+    manifest = _one_lane(tmp_project)
+    path = _stub(tmp_path, "codex", HALF_STUB)
+    assert _batch(run_hippo, tmp_project, manifest, env={"PATH": path}).returncode == 0
+    proc = _batch(run_hippo, tmp_project, manifest,
+                  env={"PATH": path,
+                       **_jev(_mock(tmp_path, {"answers": ACCEPT, "default": DEFAULT}))})
+    assert proc.returncode == 0, proc.stderr
+    assert _summary(proc)["launched"] == 0
+    assert [r["route"] for r in _records(manifest, "triage")] == ["accept-candidate"]
+    assert (tmp_project / "wave.verdicts.jsonl").exists()
 
 
 @pytest.mark.parametrize("same, expected", [(0.9, ["c1"]), (0.1, ["c1", "c2"])])
@@ -293,16 +338,13 @@ def test_clustering_merges_failures_one_fix_would_clear(tmp_project, tmp_path, r
             prompt: "FAIL two"
         """)
     path = _stub(tmp_path, "codex", HALF_STUB)
-    assert _batch(run_hippo, tmp_project, manifest, env={"PATH": path}).returncode == 1
-
     capture = tmp_path / "sent.json"
     mock = _mock(tmp_path, {
         "answers": {**ACCEPT, "cause": {"choice": "environment", "confidence": 0.8},
                     "same_0": {"noul": same}},
         "default": DEFAULT})
-    proc = _batch(run_hippo, tmp_project, manifest, "--harvest",
-                  env={"PATH": path, **_jev(mock, capture)})
-    assert proc.returncode == 0, proc.stderr
+    proc = _batch(run_hippo, tmp_project, manifest, env={"PATH": path, **_jev(mock, capture)})
+    assert proc.returncode == 1, proc.stderr
 
     clusters = _records(manifest, "cluster")
     assert [c["cluster"] for c in clusters] == expected
@@ -323,7 +365,7 @@ def test_clustering_merges_failures_one_fix_would_clear(tmp_project, tmp_path, r
 
 
 # --------------------------------------------------------------------------
-# (e) --resume --causes
+# (e) a rerun relaunches what a relaunch could clear, and says what it skipped
 # --------------------------------------------------------------------------
 
 def _seed_triage(manifest, entry_id, cause):
@@ -336,8 +378,7 @@ def _seed_triage(manifest, entry_id, cause):
                             "trimmed": [], "jev": {"ok": True}}) + "\n")
 
 
-def test_resume_causes_relaunches_only_what_a_relaunch_could_clear(tmp_project, tmp_path,
-                                                                   run_hippo):
+def test_a_rerun_relaunches_only_what_a_relaunch_could_clear(tmp_project, tmp_path, run_hippo):
     manifest = _manifest(tmp_project, "wave.yaml", """\
         defaults:
           kind: impl
@@ -349,6 +390,9 @@ def test_resume_causes_relaunches_only_what_a_relaunch_could_clear(tmp_project, 
           - id: lane-cap
             scope: "got it wrong"
             prompt: "FAIL at the work"
+          - id: lane-spec
+            scope: "asked the wrong thing"
+            prompt: "FAIL on the brief"
           - id: lane-new
             scope: "never triaged"
             prompt: "FAIL unjudged"
@@ -356,31 +400,29 @@ def test_resume_causes_relaunches_only_what_a_relaunch_could_clear(tmp_project, 
     launched = tmp_path / "launched.txt"
     env = {"PATH": _stub(tmp_path, "codex", RECORD_STUB), "LAUNCHED": str(launched)}
     assert _batch(run_hippo, tmp_project, manifest, env=env).returncode == 1
-    assert len(launched.read_text(encoding="utf-8").splitlines()) == 3
+    assert len(launched.read_text(encoding="utf-8").splitlines()) == 4
     launched.unlink()
 
     _seed_triage(manifest, "lane-tr", "transient")
     _seed_triage(manifest, "lane-cap", "capability")
-    proc = _batch(run_hippo, tmp_project, manifest, "--resume", "--causes", "transient",
-                  env=env)
-    assert proc.returncode == 1, "the relaunched lane fails again"
+    _seed_triage(manifest, "lane-spec", "spec")
+    proc = _batch(run_hippo, tmp_project, manifest, env=env)
+    assert proc.returncode == 1, "the relaunched lanes fail again"
 
     ran = launched.read_text(encoding="utf-8")
     assert "FAIL transiently" in ran
-    assert "FAIL unjudged" in ran, "an entry with no triage is never dropped by the filter"
-    assert "FAIL at the work" not in ran
+    assert "FAIL unjudged" in ran, "an entry with no triage is never dropped by its cause"
+    assert "FAIL at the work" not in ran and "FAIL on the brief" not in ran
+    lines = proc.stderr.splitlines()
+    assert lines[0] == f"resuming {manifest}: 2 to relaunch, 2 skipped", "said first"
+    assert "skipped 1 (cause capability): lane-cap — a different brief, then a new entry" \
+        in lines
+    assert "skipped 1 (cause spec): lane-spec — a different brief, then a new entry" in lines
     skips = [r for r in _records(manifest, "skip") if r.get("why")]
-    assert [(r["id"], r["why"]) for r in skips] == [("lane-cap", "cause capability")]
-    assert _summary(proc)["skipped"] == 1
-
-
-def test_causes_needs_a_resume_and_a_known_cause(tmp_project, tmp_path, run_hippo):
-    manifest = _one_lane(tmp_project)
-    env = {"PATH": _stub(tmp_path, "codex", HALF_STUB)}
-    proc = _batch(run_hippo, tmp_project, manifest, "--causes", "transient", env=env)
-    assert proc.returncode == 2 and "needs --resume" in proc.stderr
-    proc = _batch(run_hippo, tmp_project, manifest, "--resume", "--causes", "flaky", env=env)
-    assert proc.returncode == 2 and "--causes takes a comma list" in proc.stderr
+    assert sorted((r["id"], r["why"]) for r in skips) == [("lane-cap", "cause capability"),
+                                                          ("lane-spec", "cause spec")]
+    s = _summary(proc)
+    assert (s["launched"], s["skipped"]) == (2, 2)
 
 
 # --------------------------------------------------------------------------
@@ -442,6 +484,32 @@ def test_changes_read_the_lane_worktree_and_are_null_outside_one(tmp_project, tm
     changes = json.loads(capture.read_text(encoding="utf-8"))["state"]["changes"]
     assert "kernel.py" in changes, "the -C worktree is where a codex lane worked"
     assert "M kernel.py" in changes and "1 file changed" in changes
+
+
+def test_changes_read_the_entry_cwd_a_claude_lane_works_in(tmp_project, tmp_path, run_hippo):
+    lane = tmp_path / "lane"
+    lane.mkdir()
+    subprocess.run(["git", "-C", str(lane), "init", "-q"], check=True, capture_output=True)
+    (lane / "notes.md").write_text("new\n", encoding="utf-8")
+    manifest = _manifest(tmp_project, "wave.yaml", f"""\
+        defaults:
+          kind: impl
+          executor: claude
+          model: claude-sonnet-5
+        entries:
+          - id: ok-lane
+            scope: "one lane"
+            cwd: {lane}
+            prompt: "do the thing"
+        """)
+    capture = tmp_path / "sent.json"
+    proc = _batch(run_hippo, tmp_project, manifest,
+                  env={"PATH": _stub(tmp_path, "claude", HALF_STUB),
+                       **_jev(_mock(tmp_path, {"answers": ACCEPT, "default": DEFAULT}),
+                              capture)})
+    assert proc.returncode == 0, proc.stderr
+    changes = json.loads(capture.read_text(encoding="utf-8"))["state"]["changes"]
+    assert "?? notes.md" in changes, "claude has no -C: the entry cwd is its worktree"
 
 
 def test_the_outdir_files_are_where_the_state_comes_from(tmp_project, tmp_path, run_hippo):
@@ -517,10 +585,8 @@ def _verify_lane(project, prompt="review the retry path"):
 
 
 def _harvested(run_hippo, project, tmp_path, manifest, answers, capture=None):
-    path = _stub(tmp_path, "codex", VERIFY_STUB)
-    assert _batch(run_hippo, project, manifest, env={"PATH": path}).returncode == 0
-    return _batch(run_hippo, project, manifest, "--harvest",
-                  env={"PATH": path,
+    return _batch(run_hippo, project, manifest,
+                  env={"PATH": _stub(tmp_path, "codex", VERIFY_STUB),
                        **_jev(_mock(tmp_path, {"answers": answers, "default": DEFAULT}),
                               capture)})
 
@@ -596,9 +662,8 @@ def test_only_a_verify_entry_is_ranked(tmp_project, tmp_path, run_hippo):
 def test_with_the_judge_off_a_verify_lane_harvests_as_it_always_did(tmp_project, tmp_path,
                                                                     run_hippo):
     manifest = _verify_lane(tmp_project)
-    path = _stub(tmp_path, "codex", VERIFY_STUB)
-    assert _batch(run_hippo, tmp_project, manifest, env={"PATH": path}).returncode == 0
-    proc = _batch(run_hippo, tmp_project, manifest, "--harvest", env={"PATH": path})
+    proc = _batch(run_hippo, tmp_project, manifest,
+                  env={"PATH": _stub(tmp_path, "codex", VERIFY_STUB)})
     assert proc.returncode == 0, proc.stderr
     assert "judge off — no TYPESAFE_API_KEY" in proc.stderr
     assert _records(manifest, "findings") == []

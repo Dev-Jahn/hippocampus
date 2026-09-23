@@ -52,6 +52,9 @@ REQUIRED = {
     # banner + rollout / footer it observed. tokens is the total; tin/tcached/tout carry the
     # billing breakdown when the rollout gave one.
     "usage": ("ref", "tokens"),
+    # triage: the judge's reading of a finished lane (§3.6) — written by the wrapper at lane
+    # exit, single dispatch and batch alike. Evidence of a check rc's standing, never a verdict.
+    "triage": ("ref", "route"),
 }
 # Per-ev key whitelist — anything else is rejected. A field that is not in the schema
 # (§3.2) would silently poison the derived aggregates (the distiller).
@@ -66,6 +69,9 @@ ALLOWED = {
     "directive": ("id", "text", "lifetime", "state", "audience"),
     "clerk": ("name", "ok", "ms", "tokens"),
     "usage": ("ref", "tokens", "model", "tin", "tcached", "tout"),
+    # p: the compact probabilities the route was computed from — done, blocked, ask, creep,
+    # evidence, and risk (a 0-3 score). A question the reply did not answer is absent.
+    "triage": ("ref", "route", "verify", "cause", "p"),
 }
 # Fields only the writer stamps. Rejected if a caller (clerk output, log raw, environment)
 # supplies them: the scribe reads an untrusted transcript, so it must not be able to forge
@@ -102,7 +108,10 @@ ENUMS = {
     # addressed is the one field reviews are folded on ("not fully addressed" in the fact
     # sheet), so it is closed like result: a free-form "fully" would read as open forever.
     ("review-status", "addressed"): {"full", "partial", "none"},
+    ("triage", "route"): {"accept-candidate", "escalate", "no-go-candidate", "failed"},
+    ("triage", "cause"): {"capability", "spec", "environment", "transient"},
 }
+TRIAGE_P_KEYS = ("done", "blocked", "ask", "creep", "evidence", "risk")
 # A directive id is a handle the scribe and the user both have to type from memory, so it is
 # kebab ASCII or nothing. An id derived from non-ASCII text collapses to the empty string, and
 # an id that is empty (or spelled differently every time) cannot supersede anything.
@@ -147,6 +156,14 @@ def validate_event(e):
             return f"ev={ev}: {f} must be an integer"
     if ev == "clerk" and not isinstance(e["ok"], bool):
         return "ev=clerk: ok must be true or false"
+    if ev == "triage":
+        if "verify" in e and not isinstance(e["verify"], bool):
+            return "ev=triage: verify must be true or false"
+        p = e.get("p", {})
+        if not isinstance(p, dict) or any(
+                k not in TRIAGE_P_KEYS or isinstance(v, bool) or not isinstance(v, (int, float))
+                for k, v in p.items()):
+            return f"ev=triage: p must be a flat map of numbers over {', '.join(TRIAGE_P_KEYS)}"
     if ev == "dispatch":
         ex = str(e["exec"])
         if not EXEC_RE.match(ex) or EXEC_PLACEHOLDERS & set(ex.split("/")):
@@ -856,10 +873,12 @@ def in_flight(hp):
     those as open items, which is the right place for them.
 
     A lane's self-reported outcome does not land it: the claim rides along, subject visible
-    (§9.3), and the entry leaves this line only when main's verdict arrives."""
+    (§9.3), and the entry leaves this line only when main's verdict arrives. The judge's latest
+    route rides the same way — evidence beside the claim, never a verdict (§3.6)."""
     rows = read_ledger(hp)
     judged = judged_refs(rows)
     claims = executor_claims(rows)
+    triages = {e.get("ref"): e for e in rows if e.get("ev") == "triage"}
     now = datetime.now(timezone.utc)
     out = []
     for e in rows:
@@ -872,8 +891,15 @@ def in_flight(hp):
             continue
         mins = int((now - t).total_seconds()) // 60
         age = f"{mins // 60}h{mins % 60:02d}m"
-        claim = claims.get(e.get("id"))
-        tail = f"{age} · claims {claim}" if claim else age
+        parts = [age]
+        if claims.get(e.get("id")):
+            parts.append(f"claims {claims[e.get('id')]}")
+        tri = triages.get(e.get("id"))
+        if tri:
+            parts.append(f"triage {tri.get('route')}")
+            if tri.get("verify") is True:
+                parts.append("verify")
+        tail = " · ".join(parts)
         out.append(f"{one_line(e.get('scope', ''), 44)} ({tail})")
     return out
 
@@ -1105,7 +1131,8 @@ def cmd_task_show(args):
 
 
 # ev -> the ev its `ref` must point at.
-REF_TARGET = {"outcome": "dispatch", "review-status": "review", "usage": "dispatch"}
+REF_TARGET = {"outcome": "dispatch", "review-status": "review", "usage": "dispatch",
+              "triage": "dispatch"}
 REF_HINT = {
     "outcome": " — a task id is not a dispatch id; the launcher prints the id as `dispatch:<id>`, "
                "or pass `--ref task:<task-id>` to have it resolved",
@@ -1188,6 +1215,10 @@ def validate_scribe_event(e):
         # Same line as the codex-dispatch rule: the wrapper observed the cost from the banner
         # and rollout; a scribe would be inferring it from a paraphrase.
         return "ev=usage: the wrapper records usage — it was there when the lane ran"
+    if e.get("ev") == "triage":
+        # The judge read the lane's own report at its exit; the scribe would be restating a
+        # route from a paraphrase of it.
+        return "ev=triage: the wrapper records triage — it was there when the lane exited"
     if e.get("ev") != "dispatch":
         return None
     # validate_event has already guaranteed the three-slot shape by the time this runs.
@@ -1555,7 +1586,7 @@ def prior_cells(rows, prices=None):
     """The kind × exec cells: the dispatch ⋈ first-outcome join, counted and priced.
 
     Both readers of the ledger's routing evidence come through here — PRIORS.md renders these
-    cells, and plan mode (§3.6) reads the same ones to move a suggestion. A second
+    cells, and the batch plan (§3.6) reads the same ones to move a suggestion. A second
     implementation of the join would be a second answer to the same question."""
     prices = prices or load_prices()
     first = {}
@@ -1603,6 +1634,53 @@ def prior_n(b):
     """The denominator of a first-pass rate: a no-go never started and a lost result was never
     seen, so neither is a judgment of the work."""
     return b["judged"] - b["no-go"] - b["lost"]
+
+
+AGREEMENT_ROUTES = ("accept-candidate", "escalate", "no-go-candidate", "failed")
+AGREEMENT_RESULTS = ("accepted", "revised", "refuted", "no-go", "lost")
+
+
+def triage_agreement(rows):
+    """The judge measured the way PRIORS measures an executor: each triaged dispatch's route
+    against main's first verdict on it (§3.6). The route that counts is the latest one recorded
+    before that verdict — what main had in front of it when judging. A ledger with no triage
+    row gets no section: with no key the page is exactly what it was."""
+    tri, first = {}, {}
+    for e in rows:  # chronological, so "before the verdict" is file order
+        ref = e.get("ref")
+        if e.get("ev") == "triage" and ref not in first:
+            tri[ref] = e.get("route")
+        elif e.get("ev") == "outcome" and e.get("src") != "executor":
+            first.setdefault(ref, e.get("result"))
+    if not tri:
+        return []
+    table = {r: collections.Counter() for r in AGREEMENT_ROUTES}
+    for ref, route in tri.items():
+        if ref in first and route in table:
+            table[route][first[ref]] += 1
+    lines = ["", "## triage agreement — the judge's route against main's first verdict", ""]
+    shown = [r for r in AGREEMENT_ROUTES if sum(table[r].values()) >= PRIOR_MIN_SAMPLE]
+    thin = [f"{r} (n={sum(table[r].values())})" for r in AGREEMENT_ROUTES
+            if 0 < sum(table[r].values()) < PRIOR_MIN_SAMPLE]
+    if shown:
+        lines += ["| route | n | " + " | ".join(AGREEMENT_RESULTS) + " |",
+                  "|---|---:|" + "---:|" * len(AGREEMENT_RESULTS)]
+        for r in shown:
+            lines.append(f"| {r} | {sum(table[r].values())} | "
+                         + " | ".join(str(table[r][k]) for k in AGREEMENT_RESULTS) + " |")
+    elif not thin:
+        lines.append("(no triaged dispatch has a verdict yet)")
+    if thin:
+        lines += ["", f"below the n={PRIOR_MIN_SAMPLE} threshold, no row reported "
+                      f"({len(thin)}): " + ", ".join(thin)]
+    acc = table["accept-candidate"]
+    b = sum(acc.values())
+    if b:
+        a = acc["accepted"] + acc["revised"]
+        rate = f" ({100 * a / b:.1f}%)" if b >= PRIOR_MIN_SAMPLE else f" (n={b}, no rate)"
+        lines += ["", f"accept-candidate precision {a}/{b}{rate} — accepted or revised of "
+                      "accept-candidates that got a verdict"]
+    return lines
 
 
 def prior_facts(rows, now, prices=None):
@@ -1690,6 +1768,8 @@ def prior_facts(rows, now, prices=None):
     if thin_exec:
         lines += ["", f"below the n={PRIOR_MIN_SAMPLE} threshold, no rate reported "
                       f"({len(thin_exec)}): " + ", ".join(thin_exec)]
+
+    lines += triage_agreement(rows)
 
     attr = collections.Counter(e.get("attr") for e in outs if e.get("result") != "accepted")
     unjoined = sum(1 for e in outs if e.get("ref") not in known)
@@ -1835,8 +1915,7 @@ DISPATCH_USAGE = (
     "       children, which start at depth 0 (§9.5 — the clause is indexed, never enforced)\n"
     '       --fast: launch on codex\'s fast service tier (-c service_tier="fast"); '
     "the exec axis is unchanged\n"
-    "       batch form: hippo dispatch --batch <manifest.yaml> [--concurrency N] "
-    "[--resume | --fresh] [--dry-run]"
+    "       batch form: hippo dispatch --batch <manifest.yaml> [--dry-run]"
 )
 
 
@@ -1999,6 +2078,7 @@ def run_dispatch(argv):
     parent = os.environ.get("HIPPO_DISPATCH", "")
     hp = find_hippo()
     check_fanout(hp, parent, exec_label(rest).split("/")[1])
+    bad = "no .hippo/"
     if hp is None:
         print("dispatch: no .hippo/ — skipping the dispatch record", file=sys.stderr)
     else:
@@ -2021,6 +2101,20 @@ def run_dispatch(argv):
     # re-delegation clause the lane's capsule will carry (§9.5).
     os.environ["HIPPO_DISPATCH"] = did
     os.environ["HIPPO_DEPTH"] = str(depth)
+    # The judge, when there is one (§3.6): notes about the brief before the launch, and the
+    # lane's final message — captured to a file, so stdout stays untouched — for triage after.
+    on = jev_backend(hp) != "off"
+    brief, report, own_report = None, None, False
+    if on:
+        brief = prompt_of(rest)
+        if brief is not None:
+            dispatch_launch_notes(hp, kind, scope, brief, rest)
+        report = output_last_message(rest)
+        if report is None:
+            fd, name = tempfile.mkstemp(prefix="hippo-report-", suffix=".txt")
+            os.close(fd)
+            # Prepended like --fast: an exec-level option, ahead of any subcommand codex takes.
+            report, own_report, rest = Path(name), True, ["--output-last-message", name, *rest]
     # Not execvp anymore (§9.6): the wrapper stays alive as a pass-through so it can observe
     # what the lane cost. codex prints the banner (session id, model) and the "tokens used"
     # footer on *stderr* (measured, 0.144.6) — so only stderr is piped, forwarded line by
@@ -2037,10 +2131,12 @@ def run_dispatch(argv):
     session_id = model = ""
     footer_total = None
     prev = ""
+    tail = collections.deque(maxlen=400)  # what triage reads of stderr — never more than a tail
     assert child.stderr is not None
     for line in child.stderr:
         sys.stderr.write(line)
         sys.stderr.flush()
+        tail.append(line)
         s = line.strip()
         if not session_id and s.startswith("session id:"):
             session_id = s.split(":", 1)[1].strip()
@@ -2053,32 +2149,83 @@ def run_dispatch(argv):
                 pass
         prev = s
     rc = child.wait()
-    if hp is not None and bad is None:
+    if bad is None:
         usage = collect_usage(session_id, model, footer_total)
         if usage is not None:
             append_event(hp, {"ev": "usage", "ref": did, **usage}, src="wrapper")
+    if on:
+        ex = {"rc": rc, "check_rc": None}
+        state = triage_state(scope, kind, brief, ex,
+                             executor_claims(read_ledger(hp)).get(did) if hp else None,
+                             _read_text(report) or None, strip_codex_noise("".join(tail)), None,
+                             lane_dir(rest, Path.cwd()))
+        t = triage(hp, state, ex, did if bad is None else None)
+        print(f"dispatch: {triage_line(t)}" if t["route"] else
+              f"dispatch: no triage — the judge did not answer ({t['jev']['reason']})",
+              file=sys.stderr)
+        if own_report:
+            report.unlink(missing_ok=True)
     sys.exit(rc)
+
+
+def prompt_of(rest):
+    """The prompt, read where codex's grammar puts it — last — or None when the last token is
+    not one. Short or flag-shaped, it is something else, and a judgment about the wrong text is
+    worse than none."""
+    last = rest[-1] if rest else ""
+    return last if not last.startswith("-") and len(last) > 40 else None
+
+
+def output_last_message(rest):
+    """The caller's own `--output-last-message` / `-o` file, or None when there is none."""
+    for i, a in enumerate(rest):
+        if a == "--":
+            break
+        if a in ("-o", "--output-last-message") and i + 1 < len(rest):
+            return Path(rest[i + 1])
+        if a.startswith("--output-last-message="):
+            return Path(a.split("=", 1)[1])
+    return None
+
+
+def dispatch_launch_notes(hp, kind, scope, brief, rest):
+    """The plan's two readings of one brief, as stderr notes before the launch: a routed tier
+    two steps from what the difficulty demands, and a clash with a directive the lane will
+    obey. Notes only — the launch goes ahead whatever they say."""
+    ans, _ = route_brief(hp, scope, kind, brief)
+    scores = plan_scores(ans)
+    _, model, effort = exec_label(rest).split("/")
+    if scores is not None:
+        prices = load_prices()
+        note = tier_note(scores, jev_policy("route"), model, effort,
+                         price_ladder("codex", prices), prices, verb="launched on")
+        if note:
+            print(f"dispatch: note — this brief {note}", file=sys.stderr)
+    for note in brief_conflicts(hp, brief, executor_directives(hp)):
+        print(f"dispatch: note — {note}", file=sys.stderr)
 
 
 # --- batch dispatch (DESIGN §3.6 — batch waves) --------------------------------
 
 BATCH_USAGE = (
-    "usage: hippo dispatch --batch <manifest.yaml> [--concurrency N] "
-    "[--resume [--causes a,b] | --fresh] [--dry-run | --harvest | --plan]\n"
-    "       the manifest is per-wave data, authored fresh like a brief — never standing config\n"
-    "       --resume continues an existing journal (done entries skip, the rest relaunch); "
-    "--fresh sets it aside\n"
-    "       --causes narrows a resume to the failure causes named (capability|spec|"
-    "environment|transient)\n"
-    "       --harvest launches nothing: it triages every exited entry and prints the table\n"
-    "       --plan launches nothing: it measures each brief and suggests an exec per entry"
+    "usage: hippo dispatch --batch <manifest.yaml> [--dry-run]\n"
+    "       the manifest is per-batch data, authored fresh like a brief — never standing config\n"
+    "       the journal beside it decides what a run does: none yet → launch every entry; some\n"
+    "       entries unfinished → relaunch those a relaunch could clear; all done → launch\n"
+    "       nothing. Every run ends with the harvest table. To start over, delete\n"
+    "       <manifest>.journal.jsonl\n"
+    "       --dry-run launches nothing: it prints the plan (difficulty, suggested exec, notes)"
 )
+# Retired in 1.14.0 with zero measured calls across 28 projects (DESIGN §4): named so a caller
+# typing one learns what replaced it instead of reading a bare usage line.
+RETIRED_BATCH_FLAGS = ("--harvest", "--plan", "--resume", "--fresh", "--concurrency", "--causes")
 
 # Everything a manifest entry may set, with the built-in value where one exists. kind and
 # model have no default on purpose: they are the axes PRIORS routes on, so the author chooses.
+# cwd is the child's working directory — a claude lane's worktree, since claude has no -C.
 MANIFEST_DEFAULTS = {"kind": None, "executor": "codex", "model": None, "effort": "medium",
                      "depth": 0, "task": "", "args": [], "briefs": [], "check": "",
-                     "timeout": 3600}
+                     "timeout": 3600, "cwd": ""}
 ENTRY_KEYS = ("id", "scope", "brief", "prompt", "vars")
 BATCH_EXECUTORS = ("codex", "claude")  # the adapters that exist — not the ledger vocabulary
 CHECK_TIMEOUT = 600
@@ -2097,63 +2244,34 @@ BATCH_LOCK = threading.RLock()
 
 
 def parse_batch_argv(argv):
-    manifest = concurrency = causes = None
-    flags = {"resume": False, "fresh": False, "dry_run": False, "harvest": False,
-             "plan": False}
+    """→ (manifest, dry_run). The whole surface: what a run does is read off the journal."""
+    manifest, dry_run = None, False
     i, n = 0, len(argv)
     while i < n:
         a = argv[i]
-        if a in ("--batch", "--concurrency", "--causes"):
+        if a == "--batch":
             if i + 1 >= n:
-                die(f"dispatch --batch: {a} has no value\n{BATCH_USAGE}", 2)
-            if a == "--batch":
-                manifest = argv[i + 1]
-            elif a == "--causes":
-                causes = [c.strip() for c in argv[i + 1].split(",") if c.strip()]
-                if not causes or any(c not in CAUSES for c in causes):
-                    die(f"dispatch --batch: --causes takes a comma list of "
-                        f"{'|'.join(CAUSES)}: {argv[i + 1]!r}\n{BATCH_USAGE}", 2)
-            else:
-                try:
-                    concurrency = int(argv[i + 1])
-                except ValueError:
-                    die(f"dispatch --batch: --concurrency must be an integer: "
-                        f"{argv[i + 1]!r}\n{BATCH_USAGE}", 2)
-                if concurrency < 1:
-                    die(f"dispatch --batch: --concurrency must be >= 1\n{BATCH_USAGE}", 2)
-            i += 2
-        elif a in ("--resume", "--fresh", "--dry-run", "--harvest", "--plan"):
-            flags[a[2:].replace("-", "_")] = True
-            i += 1
+                die(f"dispatch --batch: --batch has no value\n{BATCH_USAGE}", 2)
+            manifest, i = argv[i + 1], i + 2
+        elif a == "--dry-run":
+            dry_run, i = True, i + 1
+        elif a.split("=", 1)[0] in RETIRED_BATCH_FLAGS:
+            die(f"dispatch --batch: {a.split('=', 1)[0]} was retired in 1.14.0 — the journal decides what a run "
+                f"does, and concurrency is the manifest key\n{BATCH_USAGE}", 2)
         else:
             die(BATCH_USAGE, 2)
-    if flags["resume"] and flags["fresh"]:
-        die(f"dispatch --batch: --resume and --fresh are mutually exclusive\n{BATCH_USAGE}", 2)
-    # --harvest and --plan each launch nothing, so neither combines with a launching mode nor
-    # with the other: one call, one thing it did.
-    for mode in ("harvest", "plan"):
-        clash = [f"--{k.replace('_', '-')}"
-                 for k in ("resume", "fresh", "dry_run", "harvest", "plan")
-                 if k != mode and flags[mode] and flags[k]]
-        if clash:
-            die(f"dispatch --batch: --{mode} launches nothing, so it cannot be combined with "
-                f"{', '.join(clash)}\n{BATCH_USAGE}", 2)
-    if causes is not None and not flags["resume"]:
-        # A filter over what --resume relaunches. On its own it would read as a filter and do
-        # nothing, which is the one thing a flag must never do.
-        die(f"dispatch --batch: --causes narrows a resume — it needs --resume\n"
-            f"{BATCH_USAGE}", 2)
     if not manifest:
         die(BATCH_USAGE, 2)
-    return manifest, concurrency, flags, causes
+    return manifest, dry_run
 
 
 def load_manifest(mp, plan=False):
     """(concurrency, fully-resolved entries). Fail-closed and total: every problem is
-    collected, then one die — a manifest that half-validates must not launch half a wave.
+    collected, then one die — a manifest that half-validates must not launch half a batch.
 
-    In plan mode `model` and `effort` are what is being suggested, so an entry may leave them
-    unset; everything else validates exactly as it does for a launch."""
+    With `plan`, `model` and `effort` may be left unset: the plan pass is about to suggest them
+    (a dry run, or a launch with the judge on). Everything else validates exactly as it does
+    for a launch."""
     if not mp.is_file():
         die(f"dispatch --batch: no such manifest: {mp}", 2)
     try:
@@ -2240,7 +2358,7 @@ def load_manifest(mp, plan=False):
         for f in ("depth", "timeout"):
             if isinstance(cfg[f], bool) or not isinstance(cfg[f], int):
                 problems.append(f"{where}: {f} must be an integer: {cfg[f]!r}")
-        for f in ("task", "check"):
+        for f in ("task", "check", "cwd"):
             if not isinstance(cfg[f], str):
                 problems.append(f"{where}: {f} must be a string: {cfg[f]!r}")
                 cfg[f] = ""
@@ -2277,16 +2395,22 @@ def load_manifest(mp, plan=False):
         ):
             problems.append(f"{where}: vars must be a flat str -> str|int map")
             vars_ = {}
-        check = cfg["check"]
+        check, cwd = cfg["check"], cfg["cwd"]
         # Literal {k} tokens only — code braces in a prompt pass through untouched.
         for k, v in vars_.items():
             prompt = prompt.replace("{" + k + "}", str(v))
             check = check.replace("{" + k + "}", str(v))
+            cwd = cwd.replace("{" + k + "}", str(v))
+        # Resolved now, from the invocation cwd: the worktree exists before the batch call
+        # (dispatch skill §5), and a missing one would otherwise fail mid-batch as an rc 127.
+        cwd = Path(cwd).resolve() if cwd else Path.cwd()
+        if not cwd.is_dir():
+            problems.append(f"{where}: cwd is not a directory: {cfg['cwd']}")
         entries.append({"id": eid, "scope": scope, "kind": cfg["kind"],
                         "executor": cfg["executor"], "model": cfg["model"],
                         "effort": cfg["effort"], "depth": cfg["depth"], "task": cfg["task"],
                         "args": args, "check": check, "timeout": cfg["timeout"],
-                        "prompt": prompt})
+                        "prompt": prompt, "cwd": str(cwd)})
     if problems:
         die(f"dispatch --batch: {mp}: {len(problems)} problem(s)\n"
             + "\n".join(f"  - {p}" for p in problems), 2)
@@ -2422,10 +2546,13 @@ def _read_text(path):
 
 
 def stderr_excerpt(path, limit=TRIAGE_STDERR_TAIL):
-    """The tail of a lane's stderr with the codex banner and footer dropped."""
+    """The tail of a lane's stderr file with the codex banner and footer dropped."""
     text = _read_text(path)
-    if text is None:
-        return None
+    return None if text is None else strip_codex_noise(text, limit)
+
+
+def strip_codex_noise(text, limit=TRIAGE_STDERR_TAIL):
+    """The tail of stderr text with the codex banner and footer dropped."""
     keep, prev = [], ""
     for ln in text.splitlines():
         noise = CODEX_NOISE_RE.match(ln.strip()) or (
@@ -2436,14 +2563,18 @@ def stderr_excerpt(path, limit=TRIAGE_STDERR_TAIL):
     return "\n".join(keep)[-limit:]
 
 
-def lane_dir(en, cwd):
-    """Where the lane worked: a codex lane carries `-C <worktree>` in its args (dispatch skill
-    §5), a claude lane carries none and worked in the batch's own cwd."""
-    args = en.get("args") or []
-    for i, a in enumerate(args):
+def lane_dir(args, cwd):
+    """Where the lane worked: `-C <worktree>` when its codex args carry one (dispatch skill §5),
+    resolved the way codex resolves it — against the child's own cwd — else that cwd. A claude
+    lane has no `-C`; its worktree is the entry's `cwd`."""
+    for i, a in enumerate(args or []):
+        if a == "--":
+            break
         raw = None
-        if a == "-C" and i + 1 < len(args):
+        if a in ("-C", "--cd") and i + 1 < len(args):
             raw = args[i + 1]
+        elif a.startswith("--cd="):
+            raw = a[len("--cd="):]
         elif a.startswith("-C") and len(a) > 2:
             raw = a[2:]
         if raw:
@@ -2499,26 +2630,24 @@ def fit_triage_state(state):
     return trimmed
 
 
-def triage_state(en, ex, outdir, cwd, claim):
-    """One finished lane, whole, as the judge receives it → (state, trimmed).
+def triage_state(scope, kind, brief, ex, claim, report, stderr_tail, check_output, workdir):
+    """One finished lane, whole, as the judge receives it.
 
     Large context is the instrument's point (§3.9): the entire report, the entire brief and
     the entire check output go in. Code filters only what is irrelevant — codex's banner
     noise — and never shrinks what is not."""
-    eid = en["id"]
-    state = {
-        "scope": en.get("scope"),
-        "kind": en.get("kind"),
-        "brief": en.get("prompt"),
+    return {
+        "scope": scope,
+        "kind": kind,
+        "brief": brief,
         "exit": {"rc": ex.get("rc"), "check_rc": ex.get("check_rc"),
                  "timed_out": bool(ex.get("timed_out"))},
         "claim": claim,
-        "report": _read_text(outdir / f"{eid}.out"),
-        "stderr_tail": stderr_excerpt(outdir / f"{eid}.err"),
-        "check_output": _read_text(outdir / f"{eid}.check"),
-        "changes": git_changes(lane_dir(en, cwd)),
+        "report": report,
+        "stderr_tail": stderr_tail,
+        "check_output": check_output,
+        "changes": git_changes(workdir),
     }
-    return state, fit_triage_state(state)
 
 
 def triage_answers(questions, answers):
@@ -2571,25 +2700,71 @@ def triage_route(ex, ans, policy):
     return route, verify
 
 
-def triage_entry(hp, en, ex, outdir, cwd, claim, jrnl):
-    """One calibrated read of a whole finished lane → its triage journal record (§3.6).
+# The ev:triage `p` map ← the harvest questions it compacts. risk is the 0-3 score.
+TRIAGE_P = (("done", "claims_done"), ("blocked", "reports_blocked"), ("ask", "needs_decision"),
+            ("creep", "scope_creep"), ("evidence", "evidence"))
+
+
+def triage(hp, state, ex, ref):
+    """One calibrated read of a whole finished lane — the one triage both single dispatch and
+    batch run (§3.6) → {answers, route, verify, trimmed, jev}.
 
     The judge reads the report so that main does not have to; what comes back is a route —
-    evidence of the same standing as a check rc, never a verdict. A judge failure is a null
-    route and an ok:false metering row: the gap is the record, and the wave is untouched."""
-    state, trimmed = triage_state(en, ex, outdir, cwd, claim)
+    evidence of the same standing as a check rc, never a verdict. It lands as `ev:triage`
+    (src=wrapper) on the dispatch it read, so PRIORS can measure the judge against main's
+    verdicts. A judge failure is a null route and an ok:false metering row, and no triage row:
+    the gap is the record, and the lane is untouched."""
+    trimmed = fit_triage_state(state)
     questions = jev_questions("harvest")
     answers, meta = judge(hp, "harvest", state, questions)
+    out = {"answers": None, "route": None, "verify": None, "trimmed": trimmed, "jev": meta}
     if hp is not None:
         with BATCH_LOCK:
             append_event(hp, {"ev": "clerk", "name": "jev-harvest", "ok": meta["ok"],
                               "ms": meta["ms"], "tokens": meta["tokens"]}, src="wrapper")
-    rec = {"t": now_iso(), "event": "triage", "id": en["id"], "attempt": ex.get("attempt"),
-           "dispatch": ex.get("dispatch"), "route": None, "verify": None, "answers": None,
-           "trimmed": trimmed, "jev": meta}
-    if answers is not None:
-        rec["answers"] = triage_answers(questions, answers)
-        rec["route"], rec["verify"] = triage_route(ex, rec["answers"], jev_policy("harvest"))
+    if answers is None:
+        return out
+    ans = triage_answers(questions, answers)
+    route, verify = triage_route(ex, ans, jev_policy("harvest"))
+    out.update(answers=ans, route=route, verify=verify)
+    if hp is None or not ref:
+        return out
+    risk = ans.get("risk") if isinstance(ans.get("risk"), dict) else {}
+    p = {k: ans.get(q) for k, q in TRIAGE_P}
+    p["risk"] = risk.get("score")
+    e = {"ev": "triage", "ref": ref, "route": route, "verify": verify,
+         "p": {k: v for k, v in p.items() if isinstance(v, float)}}
+    if triage_cause(out) in CAUSES:
+        e["cause"] = triage_cause(out)
+    with BATCH_LOCK:
+        bad = validate_event(e) or check_ref(hp, e)
+        if bad:
+            print(f"dispatch: triage record failed ({bad})", file=sys.stderr)
+        else:
+            append_event(hp, e, src="wrapper")
+    return out
+
+
+def triage_line(t):
+    """The route and the numbers behind it, as one stderr line reads them."""
+    a = t["answers"] or {}
+    nums = " · ".join(f"{label} {_pp(a.get(q))}" for label, q in
+                      (("done", "claims_done"), ("blocked", "reports_blocked"),
+                       ("ask", "needs_decision"), ("creep", "scope_creep")))
+    return f"triage {t['route']} ({nums} · verify {'yes' if t['verify'] else 'no'})"
+
+
+def triage_entry(hp, en, ex, outdir, claim, jrnl):
+    """A batch lane's triage → its journal record. The files in the outdir are the lane."""
+    eid = en["id"]
+    state = triage_state(en.get("scope"), en.get("kind"), en.get("prompt"), ex, claim,
+                         _read_text(outdir / f"{eid}.out"),
+                         stderr_excerpt(outdir / f"{eid}.err"),
+                         _read_text(outdir / f"{eid}.check"),
+                         lane_dir(en.get("args"), en["cwd"]))
+    t = triage(hp, state, ex, ex.get("dispatch"))
+    rec = {"t": now_iso(), "event": "triage", "id": eid, "attempt": ex.get("attempt"),
+           "dispatch": ex.get("dispatch"), **t}
     jrnl(rec)
     return rec
 
@@ -2781,26 +2956,22 @@ def finding_line(f):
     return f"  ▸ {sev} real {_pp(f['real'])}  {f['head']}"
 
 
-def run_harvest(mp, entries, journal, outdir):
-    """`--batch <manifest> --harvest`: launches nothing, reads everything (DESIGN §3.6).
+def run_harvest(mp, entries, journal, outdir, hp, fresh=()):
+    """The end of every batch run (DESIGN §3.6): read everything, launch nothing → the counts
+    the run's summary line carries.
 
-    Every exited entry is triaged again — two harvests are two facts, and the latest is what
-    a reader reads — the failures are clustered, and the result is one table main can scan
-    instead of N reports main would have to open. With the judge off the deterministic half
-    still prints: the table is a reading of the journal first and a reading of the judge
-    second, and the half that needs no key must not vanish with it."""
-    if not journal.exists():
-        die(f"dispatch --batch --harvest: no journal yet: {journal}", 2)
-    hp = find_hippo()
-    if hp is None:
-        print("dispatch --batch --harvest: no .hippo/ — no claims to show, no metering rows",
-              file=sys.stderr)
+    Every exited entry is read — its latest attempt's triage when the lane exit already wrote
+    one, a fresh triage when it did not (the judge was off or failed then) — the failures are
+    clustered, and the result is one table main can scan instead of N reports main would have
+    to open. With the judge off the deterministic half still prints: the table is a reading of
+    the journal first and a reading of the judge second, and the half that needs no key must
+    not vanish with it."""
     on = jev_backend(hp) != "off"
     if not on:
-        print("--harvest: judge off — no TYPESAFE_API_KEY; showing the deterministic part "
-              "only", file=sys.stderr)
+        print("harvest: judge off — no TYPESAFE_API_KEY; showing the deterministic part only",
+              file=sys.stderr)
     cwd = Path.cwd()
-    _, _, exits, _ = journal_state(journal)
+    _, _, exits, triages = journal_state(journal)
     claims = executor_claims(read_ledger(hp)) if hp is not None else {}
 
     def jrnl(rec):
@@ -2814,8 +2985,15 @@ def run_harvest(mp, entries, journal, outdir):
             continue  # never exited: there is nothing to read yet
         r = {"en": en, "ex": ex, "claim": claims.get(ex.get("dispatch")),
              "route": None, "verify": None, "answers": {}, "findings": []}
-        if on:
-            rec = triage_entry(hp, en, ex, outdir, cwd, r["claim"], jrnl)
+        rec = triages.get(en["id"])
+        # A triage of this very attempt is reused: a second read of an unchanged lane would be
+        # a second ev:triage row for one fact. One that failed is asked again — on a later
+        # run, not seconds after the same judge just failed at this run's lane exit.
+        reuse = rec and rec.get("attempt") == ex.get("attempt") and (
+            rec.get("route") or en["id"] in fresh)
+        if not reuse:
+            rec = triage_entry(hp, en, ex, outdir, r["claim"], jrnl) if on else None
+        if rec:
             r.update(route=rec["route"], verify=rec["verify"], answers=rec["answers"] or {})
         if on and en.get("kind") == "verify":
             r["findings"] = rank_findings(hp, en, _read_text(outdir / f"{en['id']}.out"),
@@ -2871,22 +3049,18 @@ def run_harvest(mp, entries, journal, outdir):
     relaunchable = sorted({f["cause"] for f in failed
                            if f["cause"] in RELAUNCHABLE_CAUSES})
     if relaunchable:
-        print(f"hippo dispatch --batch {_rel(mp, cwd)} --resume --causes "
-              + ",".join(relaunchable))
+        print(f"hippo dispatch --batch {_rel(mp, cwd)}  # a rerun relaunches the "
+              f"{', '.join(relaunchable)} failures")
     if vrows:
         print(f"hippo log outcome --from-batch {_rel(journal, cwd)} < {_rel(verdicts, cwd)}")
-    summary = {"total": len(entries), "harvested": len(rows),
-               "clusters": len(by_cluster), "verdicts": str(verdicts) if on else None,
-               "journal": str(journal), "outdir": str(outdir)}
+    out = {"harvested": len(rows), "clusters": len(by_cluster),
+           "verdicts": str(verdicts) if on else None}
     if on and rows:
-        summary["routes"] = dict(counts)
-    print(json.dumps(summary, ensure_ascii=False))
-    # Launching nothing, it has nothing to fail at: what the lanes did is in the table, and
-    # an rc that mixed the two would make "did the harvest run" unanswerable.
-    sys.exit(0)
+        out["routes"] = dict(counts)
+    return out
 
 
-# --- plan mode (DESIGN §3.6 — the judge measures the brief, code prices it) ---
+# --- the plan (DESIGN §3.6 — the judge measures the brief, code prices it) ------
 
 PLAN_TIERS = ("cheap", "mid", "top")
 
@@ -2913,7 +3087,7 @@ def price_ladder(executor, prices):
 
 
 def entry_exec(en):
-    """The exec an entry already names, or None when plan mode is being asked to fill it in."""
+    """The exec an entry already names, or None when the plan is being asked to fill it in."""
     return f"{en['executor']}/{en['model']}/{en['effort'] or '-'}" if en["model"] else None
 
 
@@ -2986,18 +3160,85 @@ def plan_adjust(en, effort, tier, ladder, cells, policy):
     return tier, text, None
 
 
-def plan_entry(hp, en, cells, ladder, policy):
-    """One entry: one request about its brief, then everything code derives from the answers
-    (§3.6) → the table row, the notes it earned and the `.plan.jsonl` record."""
+def model_tier(model, ladder, prices):
+    """The tier a model sits on, read by its price level against the ladder's ends — a model
+    between them (terra between luna and sol) is `mid`. None off the sheet: no guess."""
+    m = prices["models"].get(model) if ladder else None
+    if m is None:
+        return None
+    price = float(m.get("input", 0.0))
+    if price <= float(prices["models"][ladder["cheap"]].get("input", 0.0)):
+        return "cheap"
+    if price >= float(prices["models"][ladder["top"]].get("input", 0.0)):
+        return "top"
+    return "mid"
+
+
+def tier_note(scores, policy, model, effort, ladder, prices, verb="routed to"):
+    """A routed model two tiers away from what the brief's difficulty demands → one note, or
+    None. Never a gate: main routed it, and main may know what the brief does not say."""
+    demand, have = plan_tier(scores, policy), model_tier(model, ladder, prices)
+    if have is None or abs(PLAN_TIERS.index(demand) - PLAN_TIERS.index(have)) < 2:
+        return None
+    scope, novelty, spec = scores
+    return (f"reads {demand}-tier (scope {scope:.1f}, novelty {novelty:.1f}, spec {spec:.1f}) "
+            f"— {verb} {model}/{effort}")
+
+
+def route_brief(hp, scope, kind, brief):
+    """The route spec asked over one brief → (compact answers, meta), metered as jev-plan."""
     questions = jev_questions("route")
-    state = {"scope": en.get("scope"), "kind": en.get("kind"), "brief": en.get("prompt")}
-    answers, meta = judge(hp, "route", state, questions)
+    answers, meta = judge(hp, "route", {"scope": scope, "kind": kind, "brief": brief},
+                          questions)
     if hp is not None:
         append_event(hp, {"ev": "clerk", "name": "jev-plan", "ok": meta["ok"],
                           "ms": meta["ms"], "tokens": meta["tokens"]}, src="wrapper")
-    ans = triage_answers(questions, answers) if answers is not None else {}
+    return (triage_answers(questions, answers) if answers is not None else {}), meta
+
+
+def executor_directives(hp):
+    """The live directives a lane's capsule will carry: audience executor or all (§9.4)."""
+    if hp is None:
+        return []
+    return [d for d in directives(hp).values() if d.get("state") == "active"
+            and (d.get("audience") or "all") in ("executor", "all")]
+
+
+def brief_conflicts(hp, brief, live):
+    """The brief beside the directives its lane will obey, one question per directive → the
+    notes for those at or over `report_at`, worst first. A brief and a standing rule that
+    contradict each other are a NO-GO the lane cannot avoid (measured) — cheaper said before
+    the launch than read in the report after it."""
+    if not brief or not live:
+        return []
+    questions = {}
+    for i in range(len(live)):
+        questions.update(jev_questions("brief-check", i=i))
+    answers, meta = judge(hp, "brief-check",
+                          {"brief": brief, "directives": [directive_as_state(d) for d in live]},
+                          questions)
+    if hp is not None:
+        append_event(hp, {"ev": "clerk", "name": "jev-brief", "ok": meta["ok"],
+                          "ms": meta["ms"], "tokens": meta["tokens"]}, src="wrapper")
+    at = _thr(jev_policy("brief-check"), "report_at", 0.7)
+    hits = [(jev_noul(answers, f"conflict_{i}"), d) for i, d in enumerate(live)]
+    return [f"brief may conflict with directive {d['id']} ({p:.2f}): "
+            f"{one_line(d.get('text', ''), 80)}"
+            for p, d in sorted((h for h in hits if h[0] is not None and h[0] >= at),
+                               key=lambda h: -h[0])]
+
+
+def plan_entry(hp, en, cells, ladder, policy, prices, live):
+    """One entry: one request about its brief and one about the directives its lane will
+    obey, then everything code derives from the answers (§3.6) → the table row, the notes it
+    earned and the `.plan.jsonl` record."""
+    ans, meta = route_brief(hp, en.get("scope"), en.get("kind"), en.get("prompt"))
     scores = plan_scores(ans)
     notes, tier, model, effort = [], None, None, None
+    if scores is not None and en["model"]:
+        note = tier_note(scores, policy, en["model"], en["effort"], ladder, prices)
+        if note:
+            notes.append(note)
     if scores is not None and ladder:
         effort = "high" if scores[1] >= _thr(policy, "high_effort_novelty", 2.0) else "medium"
         tier, evidence, note = plan_adjust(en, effort, plan_tier(scores, policy), ladder,
@@ -3021,6 +3262,7 @@ def plan_entry(hp, en, cells, ladder, policy):
     if (en["kind"] not in plan_kinds() and isinstance(conf, float)
             and conf >= _thr(policy, "kind_at", 0.7)):
         notes.append(f'kind "{en["kind"]}" reads as {fit["choice"]} ({conf:.2f})')
+    notes += brief_conflicts(hp, en["prompt"], live)
 
     def cell(qid):
         a = ans.get(qid)
@@ -3037,38 +3279,33 @@ def plan_entry(hp, en, cells, ladder, policy):
     return {"id": en["id"], "row": row, "notes": notes, "rec": rec, "tier": tier}
 
 
-def run_plan(mp, entries):
-    """`--batch <manifest> --plan`: launches nothing, suggests a routing (DESIGN §3.6).
+def plan_pass(mp, entries, hp, out):
+    """The plan (DESIGN §3.6): the judge measures each brief, code prices it → the rows, printed
+    to `out` — stdout for a dry run, stderr ahead of a launch.
 
     §9.6 turned routing into "the cheapest exec that clears the bar", and PRIORS answers half
     of it — what a kind × exec has cost and returned. The half it cannot know before a launch
-    is how hard *this* brief is, which main has been guessing. The judge measures the brief,
-    code maps that onto the price sheet and the ledger's cells, and main edits the manifest:
-    the suggestion is computed fresh per wave and expires with it, which is the shape
-    routing.yaml was retired in favour of (§4)."""
-    hp = find_hippo()
-    if hp is None:
-        print("dispatch --batch --plan: no .hippo/ — no priors to read, no metering rows",
-              file=sys.stderr)
+    is how hard *this* brief is. The judge measures the brief, code maps that onto the price
+    sheet and the ledger's cells: the suggestion is computed fresh per batch and expires with
+    it, which is the shape routing.yaml was retired in favour of (§4)."""
     on = jev_backend(hp) != "off"
-    if not on:
-        print("--plan: judge off — no TYPESAFE_API_KEY; showing the deterministic part only",
-              file=sys.stderr)
     prices = load_prices()
     cells = prior_cells(read_ledger(hp), prices) if hp is not None else {}
     policy = jev_policy("route")
+    live = executor_directives(hp) if on else []
 
     ladders = {}
     for ex in dict.fromkeys(en["executor"] for en in entries):
         ladders[ex] = price_ladder(ex, prices)
         print(f"ladder {ex}: "
               + (" · ".join(f"{t} {ladders[ex][t]}" for t in PLAN_TIERS) if ladders[ex]
-                 else f"no {ex} model on the price sheet — no suggestion"))
+                 else f"no {ex} model on the price sheet — no suggestion"), file=out)
 
     rows = []
     for en in entries:
         if on:
-            rows.append(plan_entry(hp, en, cells, ladders[en["executor"]], policy))
+            rows.append(plan_entry(hp, en, cells, ladders[en["executor"]], policy, prices,
+                                   live))
             continue
         # The deterministic half: what the manifest already routes to, and what the ledger
         # says about it. It must not vanish with the key (§3.9).
@@ -3082,84 +3319,116 @@ def run_plan(mp, entries):
     table = [r["row"] for r in rows]
     widths = [max(len(line[i]) for line in [head] + table) for i in range(len(head))]
     for line in [head] + table:
-        print("  ".join(c.ljust(w) for c, w in zip(line, widths)).rstrip())
+        print("  ".join(c.ljust(w) for c, w in zip(line, widths)).rstrip(), file=out)
     notes = [(r["id"], n) for r in rows for n in r["notes"]]
     if notes:
-        print()
+        print(file=out)
         for eid, note in notes:
-            print(f"{eid}: {note}")
+            print(f"{eid}: {note}", file=out)
 
-    plan = mp.parent / f"{mp.stem}.plan.jsonl"
     if on:
-        # Rewritten every run, never appended to: a wave has one routing decision, and a stale
-        # record beside a fresh one would be joined as this wave's.
+        # Rewritten every run, never appended to: a batch has one routing decision, and a
+        # stale record beside a fresh one would be joined as this one's.
+        plan = mp.parent / f"{mp.stem}.plan.jsonl"
         plan.write_text("".join(json.dumps(r["rec"], ensure_ascii=False) + "\n" for r in rows),
                         encoding="utf-8")
+    return rows
+
+
+def run_dry(mp, entries, hp):
+    """`--batch <manifest> --dry-run`: launches nothing, prints the plan. The manifest is not
+    modified — main edits it, or launches it as it is and lets an unrouted entry take the
+    suggestion."""
+    on = jev_backend(hp) != "off"
+    if not on:
+        print("--dry-run: judge off — no TYPESAFE_API_KEY; showing the deterministic part only",
+              file=sys.stderr)
+    rows = plan_pass(mp, entries, hp, sys.stdout)
     tiers = collections.Counter(r["tier"] for r in rows if r["tier"])
     summary = {"total": len(entries), "suggested": sum(tiers.values()),
-               "plan": str(plan) if on else None, "manifest": str(mp)}
+               "plan": str(mp.parent / f"{mp.stem}.plan.jsonl") if on else None,
+               "manifest": str(mp)}
     if tiers:
         summary["tiers"] = dict(tiers)
     print(json.dumps(summary, ensure_ascii=False))
-    # It launched nothing and it changed nothing: the manifest is main's to edit. A nonzero rc
-    # here could only mean the judge was off, which the stderr line already says.
     sys.exit(0)
 
 
+def resume_split(entries, journal):
+    """What a run over an existing journal relaunches → (attempts, done, todo, held).
+
+    Done entries (last exit and check passed) stay done. The rest relaunch unless their latest
+    triage named a cause a relaunch cannot clear — `capability` or `spec` needs a different
+    brief, and running it unchanged buys the same failure twice. No triage, or a triage that
+    named no cause, relaunches: a filter that cannot read the cause must not be the reason a
+    lane is dropped."""
+    attempts, done, _, triages = journal_state(journal)
+    todo, held = [], []
+    for en in entries:
+        if en["id"] in done:
+            continue
+        cause = triage_cause(triages.get(en["id"]))
+        if cause in CAUSES and cause not in RELAUNCHABLE_CAUSES:
+            held.append((en, cause))
+        else:
+            todo.append(en)
+    return attempts, done, todo, held
+
+
 def run_batch(argv):
-    """DESIGN §3.6, batch waves: the deterministic half of a fleet — fan-out, concurrency,
-    id capture, parent stamping, usage collection, breaker checks, journaling, resume — in
-    one wrapper call. Selection (the manifest) and judgment (verdicts) stay with the model:
-    a check result is journal evidence and batch never writes ev:outcome."""
-    manifest, cli_conc, flags, causes = parse_batch_argv(argv)
+    """DESIGN §3.6, batch: the deterministic half of a batch of lanes — fan-out, concurrency,
+    id capture, parent stamping, usage collection, breaker checks, journaling, resume and the
+    harvest — in one wrapper call, with no mode flags: the journal beside the manifest decides
+    what a run does. Selection (the manifest) and judgment (verdicts) stay with the model: a
+    check result or a triage route is journal evidence, and batch never writes ev:outcome."""
+    manifest, dry_run = parse_batch_argv(argv)
     mp = Path(manifest)
-    concurrency, entries = load_manifest(mp, plan=flags["plan"])
-    if cli_conc is not None:
-        concurrency = cli_conc
+    hp = find_hippo()
+    on = jev_backend(hp) != "off"
+    # An unrouted entry is valid exactly when the plan pass will run over it before launch.
+    concurrency, entries = load_manifest(mp, plan=dry_run or on)
+    if hp is None:
+        print("dispatch --batch: no .hippo/ — skipping the ledger records", file=sys.stderr)
+    if dry_run:
+        run_dry(mp, entries, hp)
     journal = mp.parent / f"{mp.stem}.journal.jsonl"
     outdir = mp.parent / f"{mp.stem}.out"
     total = len(entries)
 
-    def summary(launched, ok, failed, skipped, stopped, routes=None):
-        body = {"total": total, "launched": launched, "ok": ok, "failed": failed,
-                "skipped": skipped, "stopped": stopped, "journal": str(journal),
-                "outdir": str(outdir)}
-        if routes:
-            body["routes"] = dict(routes)
-        return json.dumps(body, ensure_ascii=False)
-
-    if flags["plan"]:
-        run_plan(mp, entries)
-    if flags["harvest"]:
-        run_harvest(mp, entries, journal, outdir)
-    if flags["dry_run"]:
-        for en in entries:
-            print(f"{en['id']} exec={en['executor']}/{en['model']}/{en['effort']} "
-                  f"prompt={len(en['prompt'].encode('utf-8'))}B "
-                  f"check={'yes' if en['check'] else 'no'}", file=sys.stderr)
-        print(summary(0, 0, 0, 0, False))
-        sys.exit(0)
-
-    attempts, done_ids, triages = {}, set(), {}
+    attempts, done_ids, todo, held = {}, set(), entries, []
     if journal.exists():
-        if flags["fresh"]:
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            journal.rename(journal.with_name(f"{journal.name}.{stamp}.bak"))
-        elif flags["resume"]:
-            attempts, done_ids, _, triages = journal_state(journal)
-        else:
-            die(f"dispatch --batch: journal exists — --resume continues it, --fresh starts "
-                f"over ({journal})", 2)
+        attempts, done_ids, todo, held = resume_split(entries, journal)
+        if todo or held:
+            print(f"resuming {mp}: {len(todo)} to relaunch, {len(held)} skipped",
+                  file=sys.stderr)
+        by_cause = {}
+        for en, cause in held:
+            by_cause.setdefault(cause, []).append(en["id"])
+        for cause, ids in by_cause.items():
+            print(f"skipped {len(ids)} (cause {cause}): {', '.join(ids)} — a different brief, "
+                  "then a new entry", file=sys.stderr)
+
+    if todo and on:
+        # Auto-routing: the plan runs over what is about to launch, and an entry that left
+        # model unset takes the suggestion. The table goes to stderr — stdout is the harvest's.
+        rows = {r["id"]: r for r in plan_pass(mp, todo, hp, sys.stderr)}
+        unrouted = []
+        for en in todo:
+            if en["model"] is None:
+                suggested = rows[en["id"]]["rec"]["suggested"]
+                if suggested["model"] is None:
+                    unrouted.append(en["id"])
+                else:
+                    en["model"], en["effort"] = suggested["model"], suggested["effort"]
+        if unrouted:
+            die(f"dispatch --batch: {mp}: model is required — the judge suggested none for "
+                f"{', '.join(unrouted)}; set it in defaults or the entry", 2)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    hp = find_hippo()
-    if hp is None:
-        print("dispatch --batch: no .hippo/ — skipping the ledger records", file=sys.stderr)
     parent = os.environ.get("HIPPO_DISPATCH", "")
-    cwd = Path.cwd()
     stop = threading.Event()
     state = {"launched": 0, "ok": 0, "failed": 0, "done": 0, "warned": False,
-             "stopped": False, "triaged": 0, "routes": collections.Counter()}
+             "stopped": False}
 
     def jrnl(rec):
         with BATCH_LOCK:
@@ -3178,9 +3447,9 @@ def run_batch(argv):
         if parent:
             e["parent"] = parent
         bad = validate_event(e)
-        # Verdict and dispatch record are ONE locked region: the verdict prices the wave from
+        # Verdict and dispatch record are ONE locked region: the verdict prices the batch from
         # the ledger, so each admitted child's row must land before the next verdict reads.
-        # Priced outside the lock, every worker admits against the pre-wave total (measured:
+        # Priced outside the lock, every worker admits against the pre-batch total (measured:
         # 4 sol children through a $20 budget).
         with BATCH_LOCK:
             verdict, msg = fanout_verdict(hp, parent, en["model"])
@@ -3217,7 +3486,7 @@ def run_batch(argv):
         with out_p.open("w", encoding="utf-8") as fo, err_p.open("w", encoding="utf-8") as fe:
             try:
                 child = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=fo,
-                                         stderr=fe, env=env)
+                                         stderr=fe, env=env, cwd=en["cwd"])
             except OSError as oe:
                 fe.write(f"could not run {cmd[0]}: {oe}\n")
                 rc = 127
@@ -3241,7 +3510,7 @@ def run_batch(argv):
         check_rc = None
         if en["check"]:
             try:
-                r = subprocess.run(en["check"], shell=True, cwd=str(cwd),
+                r = subprocess.run(en["check"], shell=True, cwd=en["cwd"],
                                    capture_output=True, text=True, timeout=CHECK_TIMEOUT)
                 check_rc, check_out = r.returncode, (r.stdout or "") + (r.stderr or "")
             except subprocess.TimeoutExpired:
@@ -3258,47 +3527,41 @@ def run_batch(argv):
         # Triage at lane exit (§3.6): one calibrated read of the whole report, while the
         # files are hot and main is not in the loop. With the judge off it does not exist —
         # no record, no column, no changed line.
-        triaged, route = jev_backend(hp) != "off", None
-        if triaged:
+        route = None
+        if on:
             claim = executor_claims(read_ledger(hp)).get(did) if hp is not None else None
-            route = triage_entry(hp, en, rec, outdir, cwd, claim, jrnl)["route"]
+            route = triage_entry(hp, en, rec, outdir, claim, jrnl)["route"]
 
         ok = rc == 0 and check_rc in (None, 0)
-        mark = "-" if check_rc is None else ("pass" if check_rc == 0 else "fail")
         with BATCH_LOCK:
             state["ok" if ok else "failed"] += 1
             state["done"] += 1
-            line = f"[{state['done']}/{total}] {en['id']} rc={rc} check={mark} {did}"
-            if triaged:
-                # A triage that failed counts under "-": the gap is a fact about the wave too.
-                state["triaged"] += 1
-                state["routes"][route or "-"] += 1
+            line = (f"[{state['done']}/{len(todo)}] {en['id']} rc={rc} "
+                    f"check={check_mark(check_rc)} {did}")
+            if on:
+                # A triage that failed shows as "-": the gap is a fact about the batch too.
                 line += f" triage={route or '-'}"
             print(line, file=sys.stderr)
 
-    skipped = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futs = []
-        for en in entries:
-            if en["id"] in done_ids:
-                jrnl({"t": now_iso(), "event": "skip", "id": en["id"]})
-                skipped += 1
-                continue
-            cause = triage_cause(triages.get(en["id"]))
-            if causes is not None and cause is not None and cause not in causes:
-                # A resume narrowed to the causes a relaunch can actually clear. An entry with
-                # no triage, or one whose triage named no cause, still relaunches: a filter
-                # that cannot read the cause must not be the reason a lane is dropped.
-                jrnl({"t": now_iso(), "event": "skip", "id": en["id"],
-                      "why": f"cause {cause}"})
-                skipped += 1
-                continue
-            futs.append(pool.submit(run_entry, en, attempts.get(en["id"], 0) + 1))
-        for f in concurrent.futures.as_completed(futs):
-            f.result()  # a wrapper bug dies loudly, never as a silently thinner wave
+    for en in entries:
+        if en["id"] in done_ids:
+            jrnl({"t": now_iso(), "event": "skip", "id": en["id"]})
+    for en, cause in held:
+        jrnl({"t": now_iso(), "event": "skip", "id": en["id"], "why": f"cause {cause}"})
+    if todo:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futs = [pool.submit(run_entry, en, attempts.get(en["id"], 0) + 1) for en in todo]
+            for f in concurrent.futures.as_completed(futs):
+                f.result()  # a wrapper bug dies loudly, never as a silently thinner batch
 
-    print(summary(state["launched"], state["ok"], state["failed"], skipped,
-                  state["stopped"], state["routes"] if state["triaged"] else None))
+    harvest = run_harvest(mp, entries, journal, outdir, hp, {en["id"] for en in todo})
+    summary = {"total": total, "launched": state["launched"], "ok": state["ok"],
+               "failed": state["failed"], "skipped": total - len(todo),
+               "stopped": state["stopped"], **harvest, "journal": str(journal),
+               "outdir": str(outdir)}
+    print(json.dumps(summary, ensure_ascii=False))
+    # The rc is about this run's launches: a harvest-only run launched nothing, so nothing
+    # it did failed — what the lanes did is in the table.
     sys.exit(2 if state["stopped"] else (1 if state["failed"] else 0))
 
 

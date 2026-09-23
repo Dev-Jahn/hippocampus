@@ -140,6 +140,7 @@ optional `src` (`scribe|cli|wrapper|executor`).
 {"t":"…","ev":"directive","id":"gpu-01","state":"withdrawn"}
 {"t":"…","ev":"clerk","name":"turn-scribe","ms":8100,"ok":true,"tokens":1400}
 {"t":"…","ev":"usage","ref":"d041","tokens":1100000,"tin":1000000,"tcached":400000,"tout":100000,"model":"gpt-5.6-sol"}
+{"t":"…","ev":"triage","ref":"d041","route":"accept-candidate","verify":false,"p":{"done":0.95,"blocked":0.02,"ask":0.03,"creep":0.04,"evidence":0.91,"risk":1.0}}
 ```
 
 - `outcome.result ∈ {accepted, revised, refuted, no-go, lost}`; `attr ∈ {work, brief, harness}`
@@ -171,6 +172,17 @@ optional `src` (`scribe|cli|wrapper|executor`).
   visible); a model off the sheet renders as unpriced and named, never guessed. PRIORS' routing
   table carries tokens, $ and $/accepted per cell — the question it unlocks is "the cheapest
   exec that clears the bar". A fleet's total is derivable by summing children over `parent`.
+- `ev:triage` (1.14.0) is the judge's reading of a finished lane (§3.6) — written by the wrapper
+  (`src=wrapper`) at lane exit, from single dispatch and batch alike, and rejected from the
+  scribe by the same rule as `usage`: the wrapper observed it. `route ∈ {accept-candidate,
+  escalate, no-go-candidate, failed}`, `verify` is a bool, `cause ∈ {capability, spec,
+  environment, transient}` or absent, and `p` is a flat map of the compact probabilities the
+  route was computed from (`done`, `blocked`, `ask`, `creep`, `evidence`, and `risk` on its 0–3
+  ladder — numbers only). `ref` joins a dispatch fail-closed. A judge failure writes nothing:
+  the `ev:clerk name:jev-harvest ok:false` row is the gap. A route is evidence of a check rc's
+  standing, never a verdict — and recording it closes a loop: the in-flight line shows the latest
+  route beside the lane's claim, and PRIORS tables each triaged dispatch's route against main's
+  first verdict (§3.6b), measuring the judge the way it measures executors.
 - `dispatch.depth` (int, absent = 0) and `dispatch.parent` (§9.5, built in 1.9.0): depth is how
   far a lane may re-delegate — 0 is a leaf whose capsule says so, 1 may spawn children that
   start at 0. `parent` is stamped by the wrapper from `HIPPO_DISPATCH` when a launch happens
@@ -446,7 +458,26 @@ This surface is the one exception to the silent no-op rule: with no `.hippo/` it
 failed would make it a trap rather than a wrapper. The remaining arguments — including everything
 after `--` — are passed through without interpretation; that is codex's grammar, not this CLI's.
 
-**Batch waves** (1.12.0). One launch per call was the right shape until the waves were not: a
+**The judge on a single launch** (1.14.0). Measured across 28 projects, 1,470 of 1,945 dispatch
+rows came through the single form — and it got nothing from the judge, which only batch asked.
+With the key it now gets what a batch lane gets, with no flag. Before the launch the wrapper
+reads the prompt where codex's grammar puts it — the last argument, when that is not
+flag-shaped and is longer than 40 characters; otherwise it asks nothing at launch — and prints
+at most two kinds of stderr note: a routed model two tiers from what the brief's difficulty
+demands (`dispatch: note — this brief reads top-tier (scope 1.0, novelty 2.8, spec 2.1) —
+launched on gpt-5.6-luna/medium`), and a brief that may contradict a live directive the lane's
+capsule will carry (`dispatch: note — brief may conflict with directive <id> (0.83): …`). Notes,
+never gates: the launch goes ahead. At exit the lane is triaged over the same state a batch
+lane gets — its final message as `report`, captured through codex's `--output-last-message`
+into a temp file of the wrapper's own (prepended like `--fast`, so it lands ahead of any
+subcommand; a caller's own `-o`/`--output-last-message` is read instead and left in place),
+the stderr tail the wrapper already forwarded, `check_output: null`, and the changes in `-C
+<dir>` or the cwd — and one stderr line reports it: `dispatch: triage escalate (done .41 ·
+blocked .03 · ask .62 · creep .05 · verify yes)`. The same function triages a batch lane, and
+the route lands as `ev:triage` (§3.2). stdout is untouched throughout. Without the key none of
+this exists — no capture flag in codex's argv, no request, no row, no note.
+
+**Batch** (1.12.0). One launch per call was the right shape until the waves were not: a
 measured 222-lane fleet cost $2 to run, while the orchestrator model driving its launch/harvest
 loop cost ~$13 in turn-loop context re-feeds — the ceremony around the wave cost six times the
 wave. `hippo dispatch --batch <manifest.yaml>` moves exactly that ceremony into the wrapper —
@@ -463,9 +494,23 @@ cache read + cache creation as tin, cache read as tcached, output as tout), and 
 `total_cost_usd` is deliberately **not** recorded — $ derives from `prices.yaml`, so PRIORS
 prices every executor through one formula instead of trusting each executor's own bill.
 
-A journal beside the manifest records every launch and exit; `--resume` skips entries whose last
-exit (and check) passed and relaunches the rest — and a relaunch mints a **new** dispatch id,
-because two launches are two facts and the ledger never rewrites one. An entry's optional
+A journal beside the manifest records every launch and exit, and since 1.14.0 the journal — not
+a flag — decides what a run does. **No journal**: every entry launches. **Unfinished entries**:
+the run resumes by itself, and says so first (`resuming <manifest>: N to relaunch, M skipped`).
+Entries whose last exit (and check) passed stay done; the rest relaunch unless their latest
+triage named a cause a relaunch cannot clear — `capability` or `spec` needs a different brief,
+then a new entry — and those are skipped with a journal `skip` record and one stderr line naming
+them and their cause. No triage, or a triage that named no cause, relaunches: a filter that
+cannot read the cause must not be the reason a lane is dropped. **Every entry done**: nothing
+launches. Every run then ends with the harvest (below); to start over, delete the journal. A
+relaunch mints a **new** dispatch id, because two launches are two facts and the ledger never
+rewrites one. `concurrency` is a manifest key. An entry's `cwd` (default: the batch's own, and
+resolved and checked at validation) is the child's working directory for both adapters and for
+its check; a claude lane's worktree is `cwd: .claude/worktrees/<name>`, since claude takes no
+`-C`, while a codex lane may carry `-C` in `args` as before — triage reads whichever directory
+the lane worked in. The flags that used to choose all of this measured zero calls across 28
+projects and were retired (§4): a feature that needs a flag is a feature main does not use.
+An entry's optional
 `check` command runs after the child exits and its rc lands in the journal — **evidence, never a
 verdict**: batch writes no `ev:outcome`, because a passing check is not acceptance and the
 judgment belongs to main at any scale (principle 3 does not dilute with volume). The circuit
@@ -501,59 +546,70 @@ and asks eight literal questions about it. Code, not the model, turns the answer
 else `escalate`) and a `verify` hint, against thresholds that sit in `clerks/jev/harvest.yaml`
 next to the questions they belong to. A route is evidence of exactly the standing a check rc
 has — `accept-candidate` is not acceptance, and batch still writes no `ev:outcome`. The record
-lands in the journal as a `triage` line with every probability, and the progress line gains
-`triage=<route>`. Over budget, the state is trimmed in one fixed order (stderr, brief,
-changes, then the report from its *head*, since a lane's summary of itself is at the end) and
-the record names what was cut — no silent shortening, and no answer invented for a judge that
-failed: `route: null` and an `ev:clerk name:jev-harvest ok:false` row are the record.
+lands in the journal as a `triage` line with every probability and in the ledger as
+`ev:triage` (§3.2), and the progress line gains `triage=<route>`. Over budget, the state is
+trimmed in one fixed order (stderr, brief, changes, then the report from its *head*, since a
+lane's summary of itself is at the end) and the record names what was cut — no silent
+shortening, and no answer invented for a judge that failed: `route: null` and an `ev:clerk
+name:jev-harvest ok:false` row are the record.
 
-`--batch <manifest> --harvest` launches nothing. It re-triages every exited entry (two
-harvests are two facts; the latest is what a reader reads), clusters the failures, and prints
-one table — id, rc, check, the lane's own claim, route, verify, the numbers that produced the
-route, and the path to the file that holds the diagnosis — sorted so what needs main's eyes
+**The harvest.** Every run ends with it, on stdout above the summary line (which stays last).
+Each exited entry is read — the triage its latest attempt already carries, or a fresh one where
+it has none (the judge was off then, or failed on an earlier run; a lane is never read twice in
+one run, and never re-read once it has a route) — the failures are clustered, and one table
+prints: id, rc, check, the lane's own claim, route, verify, the numbers that produced the
+route, and the path to the file that holds the diagnosis, sorted so what needs main's eyes
 comes first. Clustering is greedy and one-pass: each failure is asked once against the
 representatives found so far — "would one fix clear both?" — and joins the first above
 `same_cause_at`, else opens its own cluster. It is a high threshold on purpose, since a wrong
 merge hides a defect behind another's diagnosis while a wrong split costs a second read. The
-footer names each cluster and then hands main the two next commands: a
-`--resume --causes transient,environment` that relaunches only the failures a relaunch could
-clear (a `capability` or `spec` failure needs a new brief, not another run), and the
-`log outcome --from-batch` line for `<manifest>.verdicts.jsonl`, which `--harvest` writes with
-one row per `accept-candidate` and none for a failure — a failure needs a diagnosis, not a
-verdict. The note on each row says main confirmed it, because main is expected to read the
-table and pipe the file only if that is true. A lane whose `kind` is `verify` is read once
-more: its report is split into findings in code (a finding is a bullet, a numbered item or a
-heading, plus the lines under it), each one is scored for severity and for whether it is a
-defect at all rather than a preference or a question, and the top five ride under that lane's
-row worst-first — the verifier is told to report everything and let the collection side filter
-(dispatch skill §4), and that filtering was a main turn per verifier. All of this exists only
-where the judge does: with no `TYPESAFE_API_KEY` there is no triage record, no ranking, no
-column and no verdicts file, and `--harvest` prints the same table with its judged columns as
-`-` and one stderr line saying so.
+footer names each cluster and then hands main the two next commands: the same `hippo dispatch
+--batch <manifest>` when some failures carry a cause a relaunch could clear (`transient`,
+`environment`) — rerunning it *is* the resume — and the `log outcome --from-batch` line for
+`<manifest>.verdicts.jsonl`, which the harvest rewrites with one row per `accept-candidate` and
+none for a failure — a failure needs a diagnosis, not a verdict. The note on each row says main
+confirmed it, because main is expected to read the table and pipe the file only if that is
+true. A lane whose `kind` is `verify` is read once more: its report is split into findings in
+code (a finding is a bullet, a numbered item or a heading, plus the lines under it), each one is
+scored for severity and for whether it is a defect at all rather than a preference or a
+question, and the top five ride under that lane's row worst-first — the verifier is told to
+report everything and let the collection side filter (dispatch skill §4), and that filtering
+was a main turn per verifier. All of the judged part exists only where the judge does: with no
+`TYPESAFE_API_KEY` there is no triage record, no ranking, no route column and no verdicts file,
+and the table prints with its judged columns as `-` and one stderr line saying so.
 
-**Plan mode.** `--batch <manifest> --plan` launches nothing either, and stands at the other end
-of the wave. §9.6 turned routing into "what is the cheapest exec that clears the bar", and
-PRIORS answers half of that — what a `kind × exec` has cost and returned. The half no ledger
-can know before a launch is how hard *this* brief is, which main has been guessing off the
-priors page. So the judge is asked five literal questions about each entry's brief — scope,
+**The plan.** `--batch <manifest> --dry-run` launches nothing and prints the plan; with the
+judge on, the same pass runs ahead of every launch over the entries about to launch, printed to
+stderr before the batch starts. §9.6 turned routing into "what is the cheapest exec that clears
+the bar", and PRIORS answers half of that — what a `kind × exec` has cost and returned. The half
+no ledger can know before a launch is how hard *this* brief is, which main has been guessing off
+the priors page. So the judge is asked five literal questions about each entry's brief — scope,
 novelty, how completely the goal is specified, whether a machine could confirm completion, and
 which kind of work it is — and code does everything after that: the tier the difficulty demands,
 the model that tier resolves to on `prices.yaml` (the lowest *price level* is `cheap`, the
 highest is `top`, the second highest is `mid` — levels, not rows, because two generations of
 one model share a price and would otherwise make `mid` a twin of `top`; within a level the
-sheet's first row wins; read at call time so a price refresh moves the ladder), the effort, and then at most one step of adjustment from the ledger's own
-cells — a tier this kind keeps failing at goes up one, and the cheapest tier whose record clears
-the bar takes the work. A probe on real briefs (three algorithm briefs from a consuming project
-against one cross-cutting design brief, 20 questions, 0.7s) separated them cleanly: scope 0.9 vs
-3.0, design judgment 0.0 vs 2.8, spec gaps 0.1–0.3 vs 2.0, a named check 0.7–0.8 vs 0.1. The
-output is a table, the notes an entry earned (no `check` where the brief names nothing runnable,
-a `kind` outside the vocabulary PRIORS aggregates on) and `<manifest>.plan.jsonl`, one record per
-entry so a wave's routing decision can be joined to its outcomes later. **The manifest is not
-modified** — main edits it. A suggestion that rewrote the file would be the frozen config of §4
-with an extra step; this one is computed fresh per wave and expires with it. `model` and `effort`
-may be left out of a manifest that is going to be planned, since they are exactly what is being
-suggested, and with no key the command still prints the ladder, what each entry already routes
-to and the priors evidence for it, with the difficulty columns as `-`.
+sheet's first row wins; read at call time so a price refresh moves the ladder), the effort, and
+then at most one step of adjustment from the ledger's own cells — a tier this kind keeps failing
+at goes up one, and the cheapest tier whose record clears the bar takes the work. A probe on real
+briefs (three algorithm briefs from a consuming project against one cross-cutting design brief,
+20 questions, 0.7s) separated them cleanly: scope 0.9 vs 3.0, design judgment 0.0 vs 2.8, spec
+gaps 0.1–0.3 vs 2.0, a named check 0.7–0.8 vs 0.1. The output is a table, the notes an entry
+earned and `<manifest>.plan.jsonl`, one record per entry so a batch's routing decision can be
+joined to its outcomes later. The notes: no `check` where the brief names nothing runnable; a
+`kind` outside the vocabulary PRIORS aggregates on; a routed model two tiers from the demand
+(`reads top-tier (…) — routed to gpt-5.6-luna/medium`); and a brief that may contradict a
+directive its lane will carry — the same pass asks `clerks/jev/brief-check.yaml`, one question
+per live directive with audience `executor|all`, and notes those at or over 0.7 (metered as
+`jev-brief`; the measured incident is a fail-closed NO-GO from contradictory clauses).
+**Auto-routing**: an entry that leaves `model` unset launches on the suggestion, model and
+effort both; one the judge could not route stops the run before anything launches, and with the
+judge off it fails validation exactly as before (`model is required`). An entry that names its
+own model is still read, and only ever gets a note. **The manifest is not modified** — a
+suggestion that rewrote the file would be the frozen config of §4 with an extra step; this one
+is computed fresh per run and expires with it. With no key `--dry-run` still prints the ladder,
+what each entry already routes to and the priors evidence for it, with the difficulty columns
+as `-`.
 
 ### 3.6b The distiller split — the clerk writes the page, the code does the sums
 
@@ -571,6 +627,12 @@ sample threshold entirely), and two verify cells read 100% while each hid a refu
 precisely the number the verification-budget advice is derived from. The join is deterministic, so
 a model was the wrong instrument (principles 4 and 6), and PRIORS is read as evidence — a page
 whose digits cannot be trusted is worse than no page.
+
+The same page measures the judge (1.14.0): a `triage agreement` section tables each triaged
+dispatch's route — the latest `ev:triage` recorded before main's first verdict, which is what
+main had in front of it — against that verdict, route × result, with one line under it for
+`accept-candidate` precision (accepted or revised, of the accept-candidates that got a verdict).
+A ledger with no triage row gets no section.
 
 Cells under n=4 get no rate but are still named with their n: a percentage over n=1 reads as
 evidence and is not one, while dropping it silently leaves the reader unable to tell a suppressed
@@ -699,7 +761,8 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 | a hand-written PROGRESS.md | It goes stale. Replaced by worklog (generated) + ledger (facts) + PRIORS (distilled) |
 | typed refusal gates, frozen sidecars, remote verify | Record, never enforce (principle 3) |
 | installing a cron job automatically | A user who wants one sets it up. The plugin does not own a schedule |
-| routing.yaml / depth-tier model config | Retired 1.11.0 before being built: prices are `prices.yaml` facts, tier-worth is PRIORS `$/accepted`, the decision between them is main's — frozen config is the stale-instruction shape (§1 principle 9). The runaway worry it addressed is handled by the fan-out circuit breaker (§3.6) instead. The shape it was retired in favour of is `--batch --plan` (§3.6): the same question answered per wave, computed fresh from the price sheet and the ledger, printed as a suggestion main edits into a manifest — never a file that outlives the wave |
+| routing.yaml / depth-tier model config | Retired 1.11.0 before being built: prices are `prices.yaml` facts, tier-worth is PRIORS `$/accepted`, the decision between them is main's — frozen config is the stale-instruction shape (§1 principle 9). The runaway worry it addressed is handled by the fan-out circuit breaker (§3.6) instead. The shape it was retired in favour of is the batch plan (§3.6, `--batch --dry-run`, and ahead of every judged launch): the same question answered per batch, computed fresh from the price sheet and the ledger, printed as a suggestion — never a file that outlives the batch |
+| batch mode flags (`--harvest`, `--plan`, `--resume`, `--fresh`, `--concurrency`, `--causes`) | Retired 1.14.0. Measured across 28 projects (2026-09-23): zero calls to `--harvest`, `--resume`, `--fresh`, `--concurrency` and `--causes`, six to `--plan` in one project, against 11 `--batch` calls in two — while the flag-free single form carried 1,470 of 1,945 dispatch rows. A feature that needs a flag is a feature main does not use: the journal now decides launch / resume / harvest, the harvest ends every run, `--dry-run` is the plan, and concurrency is the manifest key (§3.6) |
 | generic bulk ledger ingest (`log --file`, a bulk endpoint) | It would enlarge the mutation grammar toward the retired ingest family above — facts enter through one door. The accepted shape is the journal-scoped `log outcome --from-batch` (§3.6), which narrows what a row may say instead of widening it |
 
 ## 5. After the MVP (recorded only; not being built now)

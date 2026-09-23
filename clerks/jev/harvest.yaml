@@ -1,5 +1,6 @@
-# harvest: asked once over every finished lane — at lane exit, and again by
-# `hippo dispatch --batch --harvest` (DESIGN §3.6). The state is one object the code assembles:
+# harvest: asked once over every finished lane — at lane exit, by `hippo dispatch` and by each
+# `hippo dispatch --batch` lane, and by a batch harvest for an exited lane that has none yet
+# (DESIGN §3.6). The state is one object the code assembles:
 # scope, kind, brief, exit, claim, report, stderr_tail, check_output, changes. Every question is
 # one literal judgment over it; the route, the verify hint and the cause filter are computed in
 # code from the thresholds under `policy`. The judge answers, the policy decides, main judges.

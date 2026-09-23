@@ -77,9 +77,9 @@ That creates `.hippo/` and nothing else.
 With `TYPESAFE_API_KEY` in the environment, hippo asks TypeSafe's Jev — a judgment-only model
 that returns probabilities, never prose — a few typed questions at moments where it already
 holds the text: the scribe's digest (advisory hints for the clerk), the live directive set
-(`directive add`, `directive list --hygiene`), a wave's briefs (`--batch --plan`) and its lane
-reports (`--batch --harvest`, and at every lane exit). Answers are evidence a code policy
-thresholds; the judge never writes a verdict. There is no setting and no prompt: without the
+(`directive add`, `directive list --hygiene`), every dispatch's brief before it launches and
+its report at exit (single and `--batch` alike). Answers are evidence a code policy thresholds;
+the judge never writes a verdict. There is no setting and no prompt: without the
 key, every command behaves exactly as it always has. Question specs are text in
 `clerks/jev/*.yaml`; the design is `DESIGN.md` §2 (judge), §3.6, §3.9.
 
@@ -106,9 +106,11 @@ hippo prior distill [--days N]
 hippo dispatch --kind K --scope S [--task T] [--depth N] [--] <codex exec args…>
                                      # codex exec wrapper: records ev:dispatch, prints its id
                                      # --depth 1 = orchestrator lane (may spawn; children start at 0)
-hippo dispatch --batch <manifest.yaml> [--concurrency N] [--resume [--causes a,b] | --fresh]
-hippo dispatch --batch <manifest.yaml> --plan     # the judge measures each brief; suggests exec
-hippo dispatch --batch <manifest.yaml> --harvest  # the judge reads each lane; one table for main
+                                     # with the judge: brief notes before, a triage line after
+hippo dispatch --batch <manifest.yaml>            # no journal: launch all; unfinished: resume;
+                                                  #   all done: harvest only — every run ends
+                                                  #   with the harvest table
+hippo dispatch --batch <manifest.yaml> --dry-run  # the plan: difficulty, suggested exec, notes
 ```
 
 Mental model: facts go in through one door (`log <event>`); bare `hippo log`

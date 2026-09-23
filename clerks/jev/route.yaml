@@ -1,9 +1,11 @@
-# route: asked once per manifest entry by `hippo dispatch --batch <manifest> --plan`
-# (DESIGN §3.6). The state is one object the code assembles: scope, kind, brief — the entry's
-# whole prompt. Every question measures the *brief*; nothing here knows a model, a price or a
-# prior. Code maps the answers onto the executor's ladder in `prices.yaml` and onto the ledger's
-# kind × exec cells, against the thresholds under `policy`. The judge measures, the policy
-# suggests, main edits the manifest — this command never writes it.
+# route: asked once per manifest entry by the plan pass of `hippo dispatch --batch` (printed by
+# `--dry-run`, run ahead of every launch), and once per `hippo dispatch` whose prompt is
+# readable from its argv (DESIGN §3.6). The state is one object the code assembles: scope, kind,
+# brief — the whole prompt. Every question measures the *brief*; nothing here knows a model, a
+# price or a prior. Code maps the answers onto the executor's ladder in `prices.yaml` and onto
+# the ledger's kind × exec cells, against the thresholds under `policy`. The judge measures,
+# the policy suggests; the manifest is never rewritten — an entry that left `model` unset is
+# launched on the suggestion, and one that set it gets a note when it sits two tiers off.
 questions:
   scope:
     type: score

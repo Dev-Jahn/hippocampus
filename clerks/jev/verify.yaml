@@ -1,4 +1,5 @@
-# verify: asked by `hippo dispatch --batch --harvest` over a verification lane's report
+# verify: asked by the harvest every `hippo dispatch --batch` run ends with, over a
+# verification lane's report
 # (DESIGN §3.6). The state is {scope, findings} — the report split into findings in code, one
 # per bullet or heading. Code renders both questions once per finding — `severity_0`, `real_0`,
 # `severity_1`, … — and sorts the ranking by severity, then by real. It exists because the
