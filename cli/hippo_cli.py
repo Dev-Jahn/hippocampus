@@ -93,7 +93,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 # errors — mostly a launch mechanism ("background", "bash", the wrapper's own path) rather than
 # the agent that did the work, which is what the old name "vehicle" invited.
 EXEC_RE = re.compile(r"^[^/\s]+/[^/\s]+/[^/\s]+$")
-# The placeholder words themselves showed up as values ("vehicle/gpt-5.6-sol/high"): the
+# The placeholder words themselves showed up as values ("vehicle/gpt-6-sol/high"): the
 # shape was right, so only naming them catches it.
 EXEC_PLACEHOLDERS = {"executor", "vehicle", "model", "effort"}
 # The two closed slots of exec. They are checked only on the scribe's own output (§3.5.6b), never

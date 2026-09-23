@@ -33,7 +33,7 @@ to brief.
 
 ```bash
 hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
-  -m gpt-5.6-sol -c model_reasoning_effort=high \
+  -m gpt-6-sol -c model_reasoning_effort=high \
   -C .claude/worktrees/pass2 --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
   "$(cat .hippo/briefs/COMMON.md .hippo/briefs/pass2.md)"
 ```
@@ -43,7 +43,7 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   subject goes in `--scope`.
 - **Routing**: `exec = executor/model/effort`; the executor is the agent that did the work
   (`codex claude fork subagent workflow`), never how it was launched. Codex ladder, top down:
-  `gpt-6-astra` > `gpt-5.6-sol` > `gpt-5.6-terra` > `gpt-5.6-luna`; slugs come from
+  `gpt-6-astra` > `gpt-6-sol` > `gpt-6-luna`; slugs come from
   `~/.codex/models_cache.json`, never guessed. `ultra` is a multi-agent mode — an orchestrator
   lane's tier. An atomized fragment goes cheap; fragmentation exists so the tier can drop.
   `--fast` = codex's fast service tier, same exec axis.
@@ -70,7 +70,7 @@ For many lanes, hand the fan-out to the wrapper instead of looping launches thro
 
 ```yaml
 concurrency: 8
-defaults: {kind: impl, executor: codex, model: gpt-5.6-luna, effort: medium,
+defaults: {kind: impl, executor: codex, model: gpt-6-luna, effort: medium,
            briefs: [.hippo/briefs/COMMON.md],
            args: ["--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]}
 entries:
