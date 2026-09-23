@@ -75,7 +75,7 @@ questions:
 policy:
   # Route thresholds, applied in code in this order: failed (from rc, not from a probability),
   # then no-go-candidate, then accept-candidate, else escalate. They are deliberately strict on
-  # the accept side: an escalation costs main one read, a wrong accept-candidate costs a wave.
+  # the accept side: an escalation costs main one read, a wrong accept-candidate costs a batch.
   no_go_at: 0.7
   done_at: 0.7
   blocked_below: 0.2
