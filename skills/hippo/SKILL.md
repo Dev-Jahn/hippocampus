@@ -30,11 +30,11 @@ records, `hippo directive` = the live instructions, `hippo prior` = the routing 
 - When a delegation gets a verdict: `hippo log outcome --ref <id> --result accepted|revised|refuted|no-go|lost --attr work|brief|harness`
   (`--ref task:<task-id>` resolves to that task's dispatch still awaiting an outcome, so you do not
   have to go find the hash; the ledger still stores the dispatch id)
-- When the user gives a standing instruction: `hippo directive add --text "…" --lifetime turn|phase|durable`
+- When the user gives a standing instruction: `hippo directive add --text "…"`
   (add `--audience main|executor|all` when it binds only one side — a dispatched lane's capsule
-  carries the `executor|all` ones, this session's carries `main|all`)
-  (`turn` expires by itself after the next turn; `phase` and `durable` stay until
-  `hippo directive withdraw <id>`). To *change* an existing one, re-add it with the same `--id` —
+  carries the `executor|all` ones, this session's carries `main|all`). It stays live until
+  `hippo directive withdraw <id>`; an instruction for the next answer only is not a directive.
+  To *change* an existing one, re-add it with the same `--id` —
   a new id forks the instruction instead of updating it. Ids are lowercase kebab ascii
   (`gpu-pinning`), whatever language the text is in; the derived id is refused when the text has
   no ascii letters to build one from.

@@ -42,8 +42,7 @@ def test_a_lane_may_propose_a_directive_but_not_rule(tmp_project, run_hippo):
     network is the belief propagation §9.3 forbids."""
     env = {"HIPPO_DISPATCH": "dlane1"}
     _launch(run_hippo, tmp_project)
-    run_hippo(["directive", "add", "--id", "lane-note", "--text", "premise broken",
-               "--lifetime", "turn"], cwd=tmp_project, env=env)
+    run_hippo(["directive", "add", "--id", "lane-note", "--text", "premise broken"], cwd=tmp_project, env=env)
     rows = [e for e in read_ledger(tmp_project) if e.get("id") == "lane-note"]
     assert rows and rows[0]["src"] == "executor"
     listed = run_hippo(["directive", "list", "--active", "--json"], cwd=tmp_project)
@@ -52,8 +51,7 @@ def test_a_lane_may_propose_a_directive_but_not_rule(tmp_project, run_hippo):
 
 
 def test_a_lane_cannot_withdraw_mains_directive(tmp_project, run_hippo):
-    run_hippo(["directive", "add", "--id", "gpu-pinning", "--text", "GPUs 0 and 1 only",
-               "--lifetime", "phase"], cwd=tmp_project)
+    run_hippo(["directive", "add", "--id", "gpu-pinning", "--text", "GPUs 0 and 1 only"], cwd=tmp_project)
     run_hippo(["directive", "withdraw", "gpu-pinning"], cwd=tmp_project,
               env={"HIPPO_DISPATCH": "dlane1"})
     listed = run_hippo(["directive", "list", "--active", "--json"], cwd=tmp_project)
@@ -158,12 +156,9 @@ def test_scribe_may_record_the_verdict_after_a_claim(tmp_project, run_hippo, fak
 # --------------------------------------------------------------------------
 
 def test_audience_filters_the_capsule_by_reader(tmp_project, run_hippo):
-    run_hippo(["directive", "add", "--id", "korean-replies", "--text", "answer in Korean",
-               "--lifetime", "durable", "--audience", "main"], cwd=tmp_project)
-    run_hippo(["directive", "add", "--id", "english-files", "--text", "files in English",
-               "--lifetime", "durable", "--audience", "executor"], cwd=tmp_project)
-    run_hippo(["directive", "add", "--id", "gpu-pinning", "--text", "GPUs 0 and 1 only",
-               "--lifetime", "phase"], cwd=tmp_project)
+    run_hippo(["directive", "add", "--id", "korean-replies", "--text", "answer in Korean", "--audience", "main"], cwd=tmp_project)
+    run_hippo(["directive", "add", "--id", "english-files", "--text", "files in English", "--audience", "executor"], cwd=tmp_project)
+    run_hippo(["directive", "add", "--id", "gpu-pinning", "--text", "GPUs 0 and 1 only"], cwd=tmp_project)
 
     main_view = run_hippo(["status", "--inject"], cwd=tmp_project).stdout
     assert "answer in Korean" in main_view
@@ -179,17 +174,15 @@ def test_audience_filters_the_capsule_by_reader(tmp_project, run_hippo):
 
 
 def test_audience_survives_the_ledger_and_shows_in_list(tmp_project, run_hippo):
-    run_hippo(["directive", "add", "--id", "english-files", "--text", "files in English",
-               "--lifetime", "durable", "--audience", "executor"], cwd=tmp_project)
+    run_hippo(["directive", "add", "--id", "english-files", "--text", "files in English", "--audience", "executor"], cwd=tmp_project)
     listed = run_hippo(["directive", "list", "--json"], cwd=tmp_project)
     (d,) = json.loads(listed.stdout)
     assert d["audience"] == "executor"
     plain = run_hippo(["directive", "list"], cwd=tmp_project)
-    assert "[active/durable/executor]" in plain.stdout
+    assert "[active/executor]" in plain.stdout
 
     bad = run_hippo(["log", "raw", json.dumps(
-        {"ev": "directive", "id": "x-1", "text": "x", "lifetime": "phase",
-         "state": "active", "audience": "everyone"})], cwd=tmp_project)
+        {"ev": "directive", "id": "x-1", "text": "x", "state": "active", "audience": "everyone"})], cwd=tmp_project)
     assert bad.returncode != 0
     assert "audience" in bad.stderr
 
@@ -206,6 +199,21 @@ def test_a_worktree_git_file_is_walked_through(tmp_project, run_hippo):
                       "--exec", "codex/sol/high", "--scope", "from the lane"], cwd=lane)
     assert proc.returncode == 0, proc.stderr
     assert any(e.get("id") == "dwt1" for e in read_ledger(tmp_project))
+
+
+def test_hippo_dir_wins_over_the_walk_from_an_unrelated_cwd(tmp_project, run_hippo,
+                                                            uninitialized_dir):
+    """A lane in a worktree outside the repo walks up to another `.hippo/` or to none; the ledger
+    that launched it is named in its env instead."""
+    elsewhere = uninitialized_dir / "outside-lane"
+    elsewhere.mkdir()
+    (elsewhere / ".hippo").mkdir()  # a stray ledger the walk would have found first
+    proc = run_hippo(["log", "dispatch", "--id", "dfar1", "--kind", "impl",
+                      "--exec", "codex/sol/high", "--scope", "from afar"], cwd=elsewhere,
+                     env={"HIPPO_DIR": str(tmp_project / ".hippo")})
+    assert proc.returncode == 0, proc.stderr
+    assert any(e.get("id") == "dfar1" for e in read_ledger(tmp_project))
+    assert not (elsewhere / ".hippo" / "ledger.jsonl").exists()
 
 
 def test_a_git_directory_is_still_a_hard_boundary(tmp_project, run_hippo):
@@ -230,6 +238,19 @@ def test_lane_capsule_carries_the_report_line(tmp_project, run_hippo):
     assert "no --ref needed" in lane.stdout
     main_view = run_hippo(["status", "--inject"], cwd=tmp_project)
     assert "report:" not in main_view.stdout
+
+
+def test_main_capsule_ends_with_the_grammar_and_a_lane_capsule_does_not(tmp_project, run_hippo):
+    """The capsule is what re-arrives after a compaction, which is when `--help` got re-read.
+    One line, last, for main only — a lane has its report line instead."""
+    main_view = run_hippo(["status", "--inject"], cwd=tmp_project).stdout.splitlines()
+    assert main_view[-1] == (
+        "· cli: task add|set|done|list · log dispatch|outcome|review|review-status "
+        "· directive add|withdraw · prior · dispatch [--batch] — /hippo:hippo has the flags")
+    assert len(main_view[-1]) < 160
+    lane = run_hippo(["status", "--inject"], cwd=tmp_project,
+                     env={"HIPPO_DISPATCH": "dlane1"}).stdout
+    assert "· cli:" not in lane
 
 
 def test_init_seeds_the_common_bootstrap(tmp_path, run_hippo):

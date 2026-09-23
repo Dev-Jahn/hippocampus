@@ -21,7 +21,7 @@ REMOVED_SURFACES = (
     ["withdraw", "gpu-01"],
     ["ledger", "tail"],
     ["distill"],
-    ["log", "directive", "--id", "x", "--text", "t", "--lifetime", "phase"],
+    ["log", "directive", "--id", "x", "--text", "t"],
 )
 
 
@@ -46,7 +46,7 @@ def _seed_dispatch(tmp_project, run_hippo, did="d001"):
 
 def _seed_directive(tmp_project, run_hippo, did="gpu-01"):
     proc = run_hippo(
-        ["directive", "add", "--id", did, "--text", "Use GPUs 0 and 1 only", "--lifetime", "phase"],
+        ["directive", "add", "--id", did, "--text", "Use GPUs 0 and 1 only"],
         cwd=tmp_project,
     )
     assert proc.returncode == 0, proc.stderr
@@ -115,7 +115,7 @@ def test_bare_noun_with_flag_gets_default_sub(tmp_project, run_hippo):
 
 def test_directive_add_autoid_roundtrip(tmp_project, run_hippo):
     add = run_hippo(
-        ["directive", "add", "--text", "Use GPUs 0 and 1 only", "--lifetime", "phase"],
+        ["directive", "add", "--text", "Use GPUs 0 and 1 only"],
         cwd=tmp_project,
     )
     assert add.returncode == 0, add.stderr
@@ -142,17 +142,17 @@ def test_directive_add_autoid_is_deterministic_for_same_text(
 ):
     text = "keep review replies in context"
     first = run_hippo(
-        ["directive", "add", "--text", text, "--lifetime", "durable"], cwd=tmp_project
+        ["directive", "add", "--text", text], cwd=tmp_project
     )
     second = run_hippo(
-        ["directive", "add", "--text", text, "--lifetime", "durable"], cwd=tmp_project
+        ["directive", "add", "--text", text], cwd=tmp_project
     )
     assert first.returncode == 0 and second.returncode == 0
     assert json.loads(first.stdout)["id"] == json.loads(second.stdout)["id"]
 
 
 def test_directive_add_without_text_and_id_rejected(tmp_project, run_hippo):
-    proc = run_hippo(["directive", "add", "--lifetime", "phase"], cwd=tmp_project)
+    proc = run_hippo(["directive", "add"], cwd=tmp_project)
     assert proc.returncode != 0
     assert proc.stderr.strip() != ""
 
@@ -276,36 +276,26 @@ def test_prior_distill_regenerates_priors_md(tmp_project, run_hippo, tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Injected surface: durable directives are never folded away (§6)
+# Injected surface: live directives are never folded away (§6)
 # --------------------------------------------------------------------------
 
-def _add_directive(run_hippo, cwd, did, text, lifetime):
-    proc = run_hippo(
-        ["directive", "add", "--id", did, "--text", text, "--lifetime", lifetime], cwd=cwd
-    )
+def _add_directive(run_hippo, cwd, did, text):
+    proc = run_hippo(["directive", "add", "--id", did, "--text", text], cwd=cwd)
     assert proc.returncode == 0, proc.stderr
 
 
-def test_inject_shows_every_live_directive_durable_first(tmp_project, run_hippo):
+def test_inject_shows_every_live_directive_in_ledger_order(tmp_project, run_hippo):
     """A directive that is invisible at session start is the same as absent, and that is as true
-    of the twenty-sixth as of the first. Nothing is dropped for volume; durable simply reads
-    first. Volume is answered by a warning at add time, not by a cap here."""
-    for i in range(6):
-        _add_directive(run_hippo, tmp_project, f"dur-{i}", f"durable directive {i}", "durable")
-    for i in range(20):
-        _add_directive(
-            run_hippo, tmp_project, f"ph-{i}", f"phase directive {i} " + "noise " * 40, "phase"
-        )
+    of the twenty-sixth as of the first. Nothing is dropped for volume, and nothing is reordered.
+    Volume is answered by a warning at add time, not by a cap here."""
+    for i in range(26):
+        _add_directive(run_hippo, tmp_project, f"d-{i}", f"directive {i} " + "noise " * 40)
 
     out = run_hippo(["status", "--inject"], cwd=tmp_project)
     assert out.returncode == 0, out.stderr
-    live = [ln for ln in out.stdout.splitlines() if ln.startswith("· live(")]
+    live = [ln for ln in out.stdout.splitlines() if ln.startswith("· live")]
     assert len(live) == 26
-    assert all(ln.startswith("· live(durable)") for ln in live[:6])
-    for i in range(6):
-        assert f"durable directive {i}" in out.stdout
-    for i in range(20):
-        assert f"phase directive {i}" in out.stdout
+    assert [ln.split(": ", 1)[1].split(" ")[1] for ln in live] == [str(i) for i in range(26)]
     assert not [ln for ln in out.stdout.splitlines() if "more" in ln]
 
 
@@ -313,9 +303,9 @@ def test_inject_keeps_the_whole_text_of_a_long_directive(tmp_project, run_hippo)
     """Cutting the line would drop the operative clause — which is exactly the part a user puts
     at the end."""
     text = "x" * 250 + " tail clause"
-    _add_directive(run_hippo, tmp_project, "long-dur", text, "durable")
+    _add_directive(run_hippo, tmp_project, "long-01", text)
     out = run_hippo(["status", "--inject"], cwd=tmp_project)
-    body = [ln for ln in out.stdout.splitlines() if ln.startswith("· live(durable)")][0]
+    body = [ln for ln in out.stdout.splitlines() if ln.startswith("· live")][0]
     assert body.split(": ", 1)[1] == text
 
 

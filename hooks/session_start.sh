@@ -47,7 +47,12 @@ cwd="$(json_get cwd)"
 # and at $HOME (never adopt a project from above the user's home).
 dir="$cwd"
 found=""
-while :; do
+# HIPPO_DIR, planted by the dispatch wrapper, names the ledger that launched this lane wherever
+# its cwd is (§9.1) — the CLI re-derives it from env anyway; here it decides whether to run.
+if [ -n "${HIPPO_DIR:-}" ] && [ -d "$HIPPO_DIR" ]; then
+  found="$(dirname "$HIPPO_DIR")"
+fi
+while [ -z "$found" ]; do
   if [ -d "$dir/.hippo" ]; then
     found="$dir"
     break

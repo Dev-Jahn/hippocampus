@@ -60,8 +60,7 @@ def test_scribe_payload_carries_both_rosters(tmp_project, run_hippo, fake_transc
     """A prompt cannot enforce what its inputs do not contain — the whole point is that the list
     reaches the clerk, so assert on what is actually sent."""
     _dispatch(run_hippo, tmp_project, "d001", scope="tensorize pass2")
-    run_hippo(["directive", "add", "--text", "use GPUs 0 and 1 only",
-               "--lifetime", "phase", "--id", "gpu-01"], cwd=tmp_project)
+    run_hippo(["directive", "add", "--text", "use GPUs 0 and 1 only", "--id", "gpu-01"], cwd=tmp_project)
 
     captured = tmp_path / "payload.txt"
     proc = run_hippo(

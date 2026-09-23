@@ -97,9 +97,9 @@ hippo log raw '<json>'
 hippo log tail [-n N] [--ev TYPE]
 hippo directive list [--active] [--json] [--hygiene]
                                           # --hygiene: the judge reads the live set for
-                                          #   conflicts and audience/lifetime mismatches
-hippo directive add [typed flags…]        # --lifetime turn|phase|durable
-                                          # --audience main|executor|all (default all)
+                                          #   conflicts and audience mismatches
+hippo directive add [typed flags…]        # --audience main|executor|all (default all);
+                                          #   lives until withdrawn
 hippo directive withdraw <directive-id>
 hippo prior show
 hippo prior distill [--days N]

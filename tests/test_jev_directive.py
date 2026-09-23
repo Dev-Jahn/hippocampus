@@ -35,13 +35,12 @@ def _choice(option, confidence):
 
 
 def _quiet(tmp_path, n=3, extra=None, name="jev.json"):
-    """A mock that agrees with everything the tests store: `all` audience, `phase` lifetime, and
-    no conflict anywhere. A test that is about one note answers that one id and inherits silence
+    """A mock that agrees with everything the tests store: `all` audience and no conflict
+    anywhere. A test that is about one note answers that one id and inherits silence
     for the rest, instead of drowning in suggestions it did not ask about."""
-    answers = {"audience": _choice("all", 1.0), "lifetime": _choice("phase", 1.0)}
+    answers = {"audience": _choice("all", 1.0)}
     for i in range(n):
         answers[f"audience_{i}"] = _choice("all", 1.0)
-        answers[f"lifetime_{i}"] = _choice("phase", 1.0)
     answers.update(extra or {})
     return _mock(tmp_path, {"answers": answers, "default": {"noul": 0.01}}, name)
 
@@ -55,8 +54,8 @@ def _env(mock_path, capture=None, backend="mock"):
     return env
 
 
-def _add(run_hippo, cwd, did, text, lifetime="phase", env=None, audience=None):
-    argv = ["directive", "add", "--id", did, "--text", text, "--lifetime", lifetime]
+def _add(run_hippo, cwd, did, text, env=None, audience=None):
+    argv = ["directive", "add", "--id", did, "--text", text]
     if audience:
         argv += ["--audience", audience]
     return run_hippo(argv, cwd=cwd, env=env)
@@ -72,17 +71,15 @@ def _meter_rows(project):
 # --------------------------------------------------------------------------
 
 def test_the_shipped_directive_spec_carries_every_shape_both_surfaces_ask(cli):
-    """Three conflict shapes because the state comes in three shapes, and one axis pair per
-    subject. The criteria are shared by anchor: stage 1 and stage 2 must ask the same question
+    """Three conflict shapes because the state comes in three shapes, and one audience question
+    per subject. The criteria are shared by anchor: stage 1 and stage 2 must ask the same question
     or the second stage is not a re-check of the first."""
     q = cli.jev_questions("directive", i=0, j=1)
-    assert set(q) == {"conflict_0", "conflict_0_1", "conflict", "audience", "audience_0",
-                      "lifetime", "lifetime_0"}
+    assert set(q) == {"conflict_0", "conflict_0_1", "conflict", "audience", "audience_0"}
     assert {k for k, v in q.items() if v["type"] == "noul"} == {
         "conflict_0", "conflict_0_1", "conflict"}
     assert q["conflict"]["criteria"] == q["conflict_0"]["criteria"] == q["conflict_0_1"]["criteria"]
     assert set(q["audience"]["criteria"]) == {"main", "executor", "all"}
-    assert set(q["lifetime"]["criteria"]) == {"turn", "phase", "durable"}
     policy = cli.jev_policy("directive")
     assert (policy["recheck_at"], policy["report_at"]) == (0.5, 0.7)
     assert (policy["suggest_at"], policy["max_live"]) == (0.7, 40)
@@ -159,14 +156,6 @@ def test_an_unsure_reading_says_nothing(tmp_project, run_hippo, tmp_path):
     assert proc.stderr.strip() == "", proc.stderr
 
 
-def test_lifetime_note_names_the_flag_that_changes_it(tmp_project, run_hippo, tmp_path):
-    jev = _quiet(tmp_path, extra={"lifetime": _choice("phase", 0.91)})
-    proc = _add(run_hippo, tmp_project, "hold-claims", "hold the speed claims until the rerun",
-                lifetime="durable", env=_env(jev))
-    assert ("note: lifetime reads as phase (0.91) — stored as durable; re-add with "
-            "--lifetime phase if that is what was meant") in proc.stderr
-
-
 # --------------------------------------------------------------------------
 # with the judge off, the command is what it always was
 # --------------------------------------------------------------------------
@@ -239,18 +228,18 @@ def test_the_state_carries_the_whole_live_set_and_never_the_re_added_id(
     jev = _quiet(tmp_path)
     capture = tmp_path / "capture.json"
     _add(run_hippo, tmp_project, "gpu-01", "use GPUs 0 and 1 only", env=_env(jev))
-    _add(run_hippo, tmp_project, "dur-01", "never save review replies", lifetime="durable",
+    _add(run_hippo, tmp_project, "dur-01", "never save review replies",
          env=_env(jev), audience="main")
     _add(run_hippo, tmp_project, "gpu-01", "use GPU 0 only", env=_env(jev, capture))
 
     sent = json.loads(capture.read_text(encoding="utf-8"))
-    assert sent["state"]["new"] == {"id": "gpu-01", "lifetime": "phase", "audience": "all",
+    assert sent["state"]["new"] == {"id": "gpu-01", "audience": "all",
                                     "text": "use GPU 0 only"}
     assert sent["state"]["directives"] == [
-        {"id": "dur-01", "lifetime": "durable", "audience": "main",
+        {"id": "dur-01", "audience": "main",
          "text": "never save review replies"}
     ], "the id being re-added is not compared with its own old text"
-    assert set(sent["questions"]) == {"conflict_0", "audience", "lifetime"}
+    assert set(sent["questions"]) == {"conflict_0", "audience"}
 
 
 # --------------------------------------------------------------------------
@@ -286,7 +275,7 @@ def test_hygiene_prints_pair_notes_and_per_directive_notes(tmp_project, run_hipp
     assert set(sent["questions"]) == {"conflict"}
 
 
-def test_hygiene_stage_one_asks_every_pair_and_both_axes_in_one_request(
+def test_hygiene_stage_one_asks_every_pair_and_every_audience_in_one_request(
     tmp_project, run_hippo, tmp_path
 ):
     jev = _quiet(tmp_path)
@@ -298,7 +287,6 @@ def test_hygiene_stage_one_asks_every_pair_and_both_axes_in_one_request(
     assert set(sent["questions"]) == {
         "conflict_0_1", "conflict_0_2", "conflict_1_2",
         "audience_0", "audience_1", "audience_2",
-        "lifetime_0", "lifetime_1", "lifetime_2",
     }
     assert [d["id"] for d in sent["state"]["directives"]] == [
         "english-only", "gpu-01", "korean-comments"]

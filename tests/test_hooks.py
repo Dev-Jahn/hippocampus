@@ -164,6 +164,36 @@ def test_session_start_stays_conservative_without_the_gate(tmp_project, repo_roo
     assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
 
 
+def test_session_start_follows_hippo_dir_from_an_unrelated_cwd(
+    tmp_project, repo_root, uninitialized_dir
+):
+    payload = {"cwd": str(uninitialized_dir), "hook_event_name": "SessionStart",
+               "source": "compact"}
+    proc = _run_hook(repo_root / "hooks" / "session_start.sh", payload, cwd=uninitialized_dir,
+                     env={"HIPPO_DISPATCH": "dlane1", "HIPPO_DIR": str(tmp_project / ".hippo")})
+    assert proc.returncode == 0, proc.stderr
+    assert "· report: hippo log outcome" in _capsule(proc)
+
+
+def test_stop_follows_hippo_dir_from_an_unrelated_cwd(
+    tmp_project, repo_root, uninitialized_dir, fake_transcript, valid_mock_output
+):
+    """No lane reaches this (HIPPO_DISPATCH exits first), but the hook decides whether to run
+    from the same place the CLI resolves the ledger from."""
+    payload = {"session_id": "sess-far", "transcript_path": str(fake_transcript),
+               "cwd": str(uninitialized_dir), "hook_event_name": "Stop"}
+    proc = _run_hook(repo_root / "hooks" / "stop.sh", payload, cwd=uninitialized_dir,
+                     env={"HIPPO_DIR": str(tmp_project / ".hippo"),
+                          "HIPPO_CLERK_BACKEND": "mock",
+                          "HIPPO_MOCK_OUTPUT": str(valid_mock_output)})
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
+    cursors = tmp_project / ".hippo" / "cursors.json"
+    deadline = time.monotonic() + 10
+    while not cursors.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert "sess-far" in cursors.read_text(encoding="utf-8")
+
+
 def test_stop_exits_at_once_for_a_lane_and_spawns_no_scribe(
     tmp_project, repo_root, fake_transcript, valid_mock_output
 ):

@@ -44,8 +44,8 @@ model, and this organ's job is to quietly make sure that judgment happens on top
    existence proof.)
 9. **The more obedient the model, the more dangerous a stale instruction is** — a current model does
    not ignore a stale directive, it executes it faithfully (demonstrated by the fail-closed incident
-   from contradictory GPU clauses). So a directive carries a lifetime (scope) as a first-class
-   concept, and directive hygiene comes before verification machinery.
+   from contradictory GPU clauses). So a directive carries an age, shown never resolved, and
+   directive hygiene comes before verification machinery.
 
 ## 2. The five execution layers
 
@@ -136,7 +136,7 @@ optional `src` (`scribe|cli|wrapper|executor`).
 {"t":"…","ev":"outcome","ref":"d041","result":"refuted","attr":"work","rework":2,"by":"verify/opus","note":"circular oracle reference"}
 {"t":"…","ev":"review","id":"r007","base":"abc123f","source":"chatgpt-web","findings":4}
 {"t":"…","ev":"review-status","ref":"r007","addressed":"partial","at":"def4567"}
-{"t":"…","ev":"directive","id":"gpu-01","text":"use GPUs 0 and 1 only","lifetime":"phase","state":"active"}
+{"t":"…","ev":"directive","id":"gpu-01","text":"use GPUs 0 and 1 only","state":"active"}
 {"t":"…","ev":"directive","id":"gpu-01","state":"withdrawn"}
 {"t":"…","ev":"clerk","name":"turn-scribe","ms":8100,"ok":true,"tokens":1400}
 {"t":"…","ev":"usage","ref":"d041","tokens":1100000,"tin":1000000,"tcached":400000,"tout":100000,"model":"gpt-5.6-sol"}
@@ -176,19 +176,26 @@ optional `src` (`scribe|cli|wrapper|executor`).
   start at 0. `parent` is stamped by the wrapper from `HIPPO_DISPATCH` when a launch happens
   inside a lane, which turns an unintended depth-2 into a ledger event instead of a prohibition
   nobody can check. Neither field is enforced anywhere.
-- `directive.audience ∈ {main, executor, all}` (absent = all — §9.4, built in 1.8.0): `lifetime`
-  is *when* a directive holds, audience is *who* it binds. `status --inject` filters by reader —
+- `directive.audience ∈ {main, executor, all}` (absent = all — §9.4, built in 1.8.0): *who* a
+  directive binds. `status --inject` filters by reader —
   inside a lane (HIPPO_DISPATCH set) the capsule carries `executor|all`, everywhere else
   `main|all`. A re-add that omits the flag keeps the stored value, like every directive field
   (update semantics).
-- `directive.lifetime ∈ {turn, phase, durable}`, `state ∈ {active, withdrawn, expired}`. The last
-  event for an `id` is its current state (a derived view is never stored — principles 4 and 5).
-  It is `lifetime` rather than `scope` because `dispatch.scope` already means *what a delegation
-  covers* — one key with two unrelated meanings is how a schema teaches the wrong thing.
-  `withdrawn` is the user changing their mind; `expired` is the clock running out, which today
-  only `turn` does. A `turn` directive is live until the **first Stop that begins after it was
-  recorded**, and the scribe expires it there before writing the current turn's events — so the
-  ones it is about to record get their turn, and main's mid-turn ones get the rest of theirs.
+- `directive.state ∈ {active, withdrawn, expired}`; an active directive requires `text` only. The
+  last event for an `id` is its current state (a derived view is never stored — principles 4 and
+  5). A directive lives until `hippo directive withdraw` — `withdrawn` is the user changing their
+  mind; `expired` survives only on old rows.
+- `directive.lifetime` is **retired** (1.14.0): still an allowed key, because old rows carry it,
+  and written by nothing — `directive add --lifetime` is accepted and ignored with a stderr note,
+  and a scribe event that still carries one has it dropped. Measured across 28 projects on 7
+  machines: of 147 `phase` directives, 63 of the 75 still live were older than 14 days (the
+  phase-only aging nudge produced no withdrawals) and 34 of the 72 withdrawn went within 3 days —
+  `phase` was used to mean "temporary" and then never closed; `turn` was used 55 times and 54 of
+  those expired by the clock, a rule for the next answer that was already in the context. The
+  concept cost a flag on every add, a table in the scribe prompt, expiry code in the scribe and a
+  §6 ordering rule, and bought nothing a plain age display does not. The view keeps one old rule:
+  a row whose latest active write said `turn` is **never live** — it expired at the next Stop
+  under the old rule, and the view says so instead of a migration rewriting the ledger.
 - `directive.id` is lowercase kebab ascii (`[a-z0-9]` joined by `-`) — fail-closed. It is the only
   handle for *superseding* a directive, so it has to be typeable from memory in a project whose
   prose is in any language. For the same reason the scribe is handed the live ids alongside the
@@ -230,7 +237,10 @@ optional `src` (`scribe|cli|wrapper|executor`).
 
 - Implementation: a single Python file (PEP 723 inline metadata, deps: PyYAML); `bin/hippo` is a
   `uv run --script` shim (falling back to python3 when uv is absent, with a clear error on failure).
-- `.hippo/` is found by walking up from cwd. A `.git` *directory* is the ceiling (never adopt a
+- `.hippo/` is `$HIPPO_DIR` when that names a directory — the dispatch wrapper plants it in every
+  lane's environment, so a lane reports to the ledger that launched it wherever its cwd is
+  (measured: 141 of 1,167 lane outcomes, 12%, were refused for a ref the lane's own walk had
+  never seen). Otherwise it is found by walking up from cwd. A `.git` *directory* is the ceiling (never adopt a
   project from beyond a real repo root); a `.git` *file* — a linked worktree — is walked through,
   so a lane calling hippo from its worktree resolves the project's real `.hippo/` (§9.1, wired
   in 1.8.0). The hooks walk conservatively for ordinary sessions (a session opened *inside* a
@@ -318,9 +328,6 @@ hippo scribe --transcript P --session S     # internal surface the Stop hook cal
 
 1. Non-blocking flock on `.hippo/scribe.lock` — if it is held, just exit (the cursor covers the gap
    on the next run automatically).
-1b. Expire every live `turn` directive — before the prefilter, because a turn ended whether or not
-   this window was worth a model call, and before the clerk writes, because that is what gives the
-   turn directives it is about to record their one turn.
 2. Load this session's cursor from `cursors.json` → compress only the lines after it with
    `digest_lite.py` (a light port of the digest logic proven on the 479MB audit).
 3. **Deterministic prefilter**: if the digest has no TOOL or USER line, update the cursor and exit
@@ -407,8 +414,8 @@ exactly the point to collect them automatically (principle 6). It takes the `--k
 `codex exec … < /dev/null`, forwarding every line unmodified. A `--fast` flag prepends
 `-c service_tier="fast"` to the codex arguments — a per-launch latency choice carried in argv like
 the rest of codex's grammar, invisible to the exec axis. It also plants
-`HIPPO_DISPATCH=<id>` and `HIPPO_DEPTH`
-in the child's environment — the whole of the executor data plane's wiring (§9.2, §9.5). A
+`HIPPO_DISPATCH=<id>`, `HIPPO_DEPTH` and `HIPPO_DIR`
+in the child's environment — the whole of the executor data plane's wiring (§9.1, §9.2, §9.5). A
 launch made from inside a lane records that lane as `parent`. Since 1.10.0 the wrapper is a
 pass-through rather than an exec: it stays alive to *read* (never rewrite) the stream — the
 banner's session id and model, the "tokens used" footer — and at lane exit records `ev:usage`
@@ -700,6 +707,7 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 | typed refusal gates, frozen sidecars, remote verify | Record, never enforce (principle 3) |
 | installing a cron job automatically | A user who wants one sets it up. The plugin does not own a schedule |
 | routing.yaml / depth-tier model config | Retired 1.11.0 before being built: prices are `prices.yaml` facts, tier-worth is PRIORS `$/accepted`, the decision between them is main's — frozen config is the stale-instruction shape (§1 principle 9). The runaway worry it addressed is handled by the fan-out circuit breaker (§3.6) instead. The shape it was retired in favour of is `--batch --plan` (§3.6): the same question answered per wave, computed fresh from the price sheet and the ledger, printed as a suggestion main edits into a manifest — never a file that outlives the wave |
+| directive lifetimes (`turn\|phase\|durable`) | Retired 1.14.0 (§3.2). Measured across 28 projects: 63 of 75 live `phase` directives were past 14 days and the aging nudge produced no withdrawals, 34 of 72 withdrawn went within 3 days, and 54 of 55 `turn` directives expired by the clock. One lifetime — until withdrawn — plus an age shown on every line (§6) |
 | generic bulk ledger ingest (`log --file`, a bulk endpoint) | It would enlarge the mutation grammar toward the retired ingest family above — facts enter through one door. The accepted shape is the journal-scoped `log outcome --from-batch` (§3.6), which narrows what a row may say instead of widening it |
 
 ## 5. After the MVP (recorded only; not being built now)
@@ -717,11 +725,17 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 
 ```
 [hippo] tasks 3 open · directives 2 live · priors 07-31 · worklog 07-31
-· live(durable): keep review replies in context, never save them to a file
-· live(phase): use GPUs 0 and 1 only
+· live(23d): keep review replies in context, never save them to a file
+· live: use GPUs 0 and 1 only
 · in flight: NVFP4 factor-rebasing 6-part (0h42m), r2 UNCERTAIN 4건 (0h12m)
 · last: merged the v2 Pareto duo, full gate green (1421)
+· cli: task add|set|done|list · log dispatch|outcome|review|review-status · directive add|withdraw · prior · dispatch [--batch] — /hippo:hippo has the flags
 ```
+
+The `cli:` line is main's only (a lane has its `report:` line instead): the command grammar,
+because the capsule is what re-arrives after a compaction and that is exactly when the grammar
+was being re-read — measured, 405 `--help` calls across 19 projects, and 59 of Codex's 96 (61%)
+came within 30 tool calls of a compaction.
 
 `in flight` is delegations launched and not yet judged, within 24h, **counting only what a
 launcher wrote** (`src` `wrapper`/`cli`). A lane's self-report does not land an entry — it rides
@@ -733,7 +747,7 @@ while the same query over every writer returned 16 — scribe-inferred rows swam
 flying the line is absent; a dispatch older than a day is not in flight but forgotten, and
 `prior distill` already reports those as open items.
 
-Everything else such a file carries has a home already: the current phase is a `phase` directive,
+Everything else such a file carries has a home already: the current phase is a directive,
 what shipped is the worklog, ordering is `task deps`, and a merge hazard belongs in the brief for
 the lane that will cause it (dispatch skill §5). A re-entry document is what appears when those
 surfaces go unused — not a gap in this design.
@@ -754,7 +768,7 @@ grants dispatching children instead, and notes they start at depth 0.
 Four rules govern the directive block:
 
 - **Nothing is folded away.** Every active directive addressed to the reader is injected, in
-  full, durable first (audience §9.4: a lane's capsule carries `executor|all`, main's carries
+  full, in ledger order (audience §9.4: a lane's capsule carries `executor|all`, main's carries
   `main|all`). A user
   ruling that is invisible at session start is effectively not there, and a cap does not fix that
   problem — it makes it quiet. Newlines are collapsed (a multi-line value would break the
@@ -767,10 +781,14 @@ Four rules govern the directive block:
   and `directive list` emit them. Warning only at write time is the failure this fixes: the
   expensive directives are usually the ones already resident, so the one moment they were
   mentionable had already passed and every session went on paying in silence.
-- **Staleness is shown, never resolved.** A `phase` directive's capsule line carries its age from
-  7 days (`live(phase·11d): …`), and the volume notes name any phase directive 14 days or older
-  with the one question that matters — is the phase over? Only `phase` ages: durable is
-  indefinite by definition and turn expires by itself. Nothing is withdrawn automatically, and
+- **Staleness is shown, never resolved.** A directive lives until it is withdrawn, so its age is
+  the one thing about it that changes: every live line carries its age from 14 days
+  (`live(23d): …`), and the volume notes name every directive 30 days or older with the one
+  question that matters — still true? The lifetimes this replaced (§4) sorted directives by how
+  long they *should* hold, and the measurement says nobody closed them: 63 of 75 live `phase`
+  directives were past 14 days, and the phase-only nudge produced no withdrawals. Age applies to
+  every line because a `durable` ruling goes stale too — it just takes longer to notice. Nothing
+  is withdrawn automatically, and
   the scribe may not infer a withdrawal from anything but the user saying so — measured
   (2026-08-02), a clerk once withdrew a live hold because an assistant report mentioned its
   keyword. Automation that decides is the failure mode; visibility is the fix, and the verdict
@@ -779,7 +797,7 @@ Four rules govern the directive block:
   the directives *say* went unread, and an obedient model is most dangerous where two live
   clauses contradict each other (measured: a fail-closed NO-GO out of two GPU clauses). At
   `directive add` and at `directive list --hygiene` the judge (§3.9) reads the whole live set and
-  notes probable conflicts and audience/lifetime mismatches. A note is the whole of it: the
+  notes probable conflicts and audience mismatches. A note is the whole of it: the
   stored value never changes, nothing is refused, and with no key there is no judge and no note.
   The threshold is deliberately conservative and the reading is two-stage — a probe over this
   repo's live set (8 directives + 3 planted, 77 questions, 0.9s) ranked the two planted conflicts
@@ -819,8 +837,10 @@ main still decides — but the memory is one memory.
 `{repo}/.claude/worktrees/<name>` — inside the repo. One thing did need wiring (found while
 building 1.8.0): the walk used to stop at the worktree's own `.git` *file*, exactly the boundary
 this section assumed it crossed. It now walks through a `.git` file and stops only at a `.git`
-directory — a real repo root. Everything else was policy, which is why it was worth writing
-down before building.
+directory — a real repo root. A lane whose worktree sits *outside* the repo never reaches it, so
+the wrapper also plants `HIPPO_DIR` and every resolution — the CLI's and both hooks' — takes it
+before walking (1.14.0; 12% of lane outcomes had been refused for it). Everything else was
+policy, which is why it was worth writing down before building.
 
 ### 9.2 Observation and verdict, not read and write
 
@@ -867,7 +887,8 @@ believes.
 
 ### 9.4 Directives need an audience axis
 
-`lifetime` is a **time** axis. The missing one is **audience**, and it is invisible until directives
+Time was the only directive axis (a `lifetime`, retired in 1.14.0 for an age — §3.2). The missing
+one is **audience**, and it is invisible until directives
 start reaching executors. Of this repo's own live set: "answer in Korean" governs how main speaks
 to the user and is noise or worse to an executor; "every file in the repo is written in English"
 is something an executor must know and is today hand-copied into COMMON.md; "bump patch only"

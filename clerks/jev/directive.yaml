@@ -32,8 +32,8 @@ questions:
       Would an agent that must obey both `a` and `b` be unable to satisfy both at once, because
       they demand incompatible things about the same subject?
     criteria: *conflict
-  # audience and lifetime are read off one directive's own text: what is stored is a claim the
-  # author made in passing, and `all` is what an omitted --audience leaves behind (§9.4).
+  # audience is read off one directive's own text: what is stored is a claim the author made in
+  # passing, and `all` is what an omitted --audience leaves behind (§9.4).
   audience:
     type: choice
     instructions: Reading the text of `new`, who has to know this rule?
@@ -49,19 +49,6 @@ questions:
     type: choice
     instructions: Reading the text of `directives[{i}]`, who has to know this rule?
     criteria: *audience
-  lifetime:
-    type: choice
-    instructions: Reading the text of `new`, how long does this rule hold?
-    criteria: &lifetime
-      turn: It covers the next answer or the next action, and nothing past it
-      phase: >-
-        It holds until the current piece of work is finished — it names a specific ongoing task,
-        version, hold, or date
-      durable: It holds for the whole project, indefinitely
-  lifetime_{i}:
-    type: choice
-    instructions: Reading the text of `directives[{i}]`, how long does this rule hold?
-    criteria: *lifetime
 policy:
   # Stage 1 is wide and cheap; stage 2 is what a note is allowed to rest on. Measured on this
   # repo's live set (8 directives + 3 planted, 77 questions, 0.9s): the two planted conflicts
@@ -69,8 +56,8 @@ policy:
   # pairs scored 0.66-0.74 — hence the second stage and a report threshold above them.
   recheck_at: 0.5
   report_at: 0.7
-  # An audience or lifetime reading is worth a line only when it disagrees with the stored value
-  # and the model is sure; an unsure choice is a coin toss between three options.
+  # An audience reading is worth a line only when it disagrees with the stored value and the
+  # model is sure; an unsure choice is a coin toss between three options.
   suggest_at: 0.7
   # Pairs grow as n²: 40 live directives is 780 of them. Past that, say so rather than send a
   # request the model cannot hold.

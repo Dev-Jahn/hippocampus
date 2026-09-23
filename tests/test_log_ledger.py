@@ -201,8 +201,6 @@ def test_directive_add_valid_appends(tmp_project, run_hippo):
             "gpu-01",
             "--text",
             "Use GPUs 0 and 1 only",
-            "--lifetime",
-            "phase",
             "--state",
             "active",
         ],
@@ -215,7 +213,7 @@ def test_directive_add_valid_appends(tmp_project, run_hippo):
     entry = after[-1]
     assert entry["ev"] == "directive"
     assert entry["id"] == "gpu-01"
-    assert entry["lifetime"] == "phase"
+    assert "lifetime" not in entry  # retired (§3.2): nothing new carries it
     assert entry["state"] == "active"
 
 
@@ -314,31 +312,6 @@ def test_log_outcome_invalid_result_enum_fails_closed(tmp_project, run_hippo):
     assert lp.read_bytes() == before_bytes
 
 
-def test_directive_add_invalid_scope_enum_fails_closed(tmp_project, run_hippo):
-    _seed_one_valid_line(tmp_project, run_hippo)
-    lp = ledger_path(tmp_project)
-    before_bytes = lp.read_bytes()
-
-    proc = run_hippo(
-        [
-            "directive",
-            "add",
-            "--id",
-            "bad-scope",
-            "--text",
-            "x",
-            "--lifetime",
-            "eternal",
-            "--state",
-            "active",
-        ],
-        cwd=tmp_project,
-    )
-    assert proc.returncode != 0
-    assert proc.stderr.strip() != ""
-    assert lp.read_bytes() == before_bytes
-
-
 def test_directive_add_invalid_state_enum_fails_closed(tmp_project, run_hippo):
     _seed_one_valid_line(tmp_project, run_hippo)
     lp = ledger_path(tmp_project)
@@ -352,8 +325,6 @@ def test_directive_add_invalid_state_enum_fails_closed(tmp_project, run_hippo):
             "bad-state",
             "--text",
             "x",
-            "--lifetime",
-            "phase",
             "--state",
             "sleeping",
         ],

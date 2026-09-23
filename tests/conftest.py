@@ -35,6 +35,15 @@ def repo_root() -> Path:
     return REPO_ROOT
 
 
+@pytest.fixture(autouse=True)
+def _no_lane_env(monkeypatch):
+    """A suite run from inside a dispatched lane inherits the lane's env: HIPPO_DISPATCH turns
+    every write into a claim and HIPPO_DIR would aim every `hippo` call at the real ledger. A
+    test that wants either sets it itself."""
+    for k in ("HIPPO_DISPATCH", "HIPPO_DEPTH", "HIPPO_DIR"):
+        monkeypatch.delenv(k, raising=False)
+
+
 # --------------------------------------------------------------------------
 # Process runner
 # --------------------------------------------------------------------------

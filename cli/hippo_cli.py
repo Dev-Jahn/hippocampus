@@ -93,11 +93,10 @@ EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra", "inherit"}
 ENUMS = {
     ("outcome", "result"): {"accepted", "revised", "refuted", "no-go", "lost"},
     ("outcome", "attr"): {"work", "brief", "harness"},
-    ("directive", "lifetime"): {"turn", "phase", "durable"},
     ("directive", "state"): {"active", "withdrawn", "expired"},
-    # audience is the second directive axis (§9.4): lifetime is *when* it holds, audience is
-    # *who* it binds. Absent = all — a narrow default would silently hide a constraint from
-    # the worker that needed it.
+    # audience is *who* a directive binds (§9.4). Absent = all — a narrow default would silently
+    # hide a constraint from the worker that needed it. `lifetime` is still an allowed key (old
+    # rows carry it) but no longer a value anything writes, so it is not enumerated (§3.2).
     ("directive", "audience"): {"main", "executor", "all"},
     # addressed is the one field reviews are folded on ("not fully addressed" in the fact
     # sheet), so it is closed like result: a free-form "fully" would read as open forever.
@@ -135,10 +134,8 @@ def validate_event(e):
                 f"ev=directive: id must be lowercase kebab ascii ([a-z0-9] joined by '-'): "
                 f"{e['id']!r}"
             )
-        if e["state"] == "active":
-            for f in ("text", "lifetime"):
-                if not e.get(f):
-                    return f"ev=directive state=active: required field missing: {f}"
+        if e["state"] == "active" and not e.get("text"):
+            return "ev=directive state=active: required field missing: text"
     for (evn, field), allowed in ENUMS.items():
         if ev == evn and field in e and e[field] not in allowed:
             return f"ev={ev}: {field}={e[field]!r} — allowed: {', '.join(sorted(allowed))}"
@@ -191,12 +188,20 @@ def die(msg, code=1):
 
 
 def find_hippo():
-    """Walk up from cwd looking for .hippo/ (the git root and $HOME are the ceiling).
+    """$HIPPO_DIR when it names a directory; otherwise walk up from cwd looking for .hippo/ (the
+    git root and $HOME are the ceiling).
+
+    HIPPO_DIR is planted by the dispatch wrapper into a lane's environment so a lane reports to
+    the ledger that launched it, wherever its cwd is — measured, 12% of lane outcomes (141 of
+    1,167) were refused for a ref the lane's own `.hippo/` had never seen.
 
     A `.git` *directory* is a real repository root: stop there, never adopt a project from
     beyond it. A `.git` *file* marks a linked worktree, and by convention lanes live inside
     the repo (`.claude/worktrees/<name>`) — walk through it, so an executor calling hippo
     from its worktree resolves the project's real .hippo/ (§9.1)."""
+    env = os.environ.get("HIPPO_DIR")
+    if env and Path(env).is_dir():
+        return Path(env)
     d = Path.cwd().resolve()
     try:
         home = Path.home().resolve()
@@ -279,7 +284,11 @@ def directives(hp):
     network is exactly the belief propagation §9.3 exists to prevent. The attempt stays in the
     ledger — visible to checkup and grep — it just does not become what the capsule believes.
     Same shape as outcomes: an executor may record, and the derived views decide what a
-    recording means."""
+    recording means.
+
+    `lifetime` is retired (§3.2), but old rows carry it. A row whose latest active write said
+    `turn` expired by the old rule at the next Stop, and nothing runs that sweep any more — so
+    the view says it is expired instead of a migration rewriting the ledger."""
     cur = {}
     for e in read_ledger(hp):
         if e.get("ev") != "directive" or not e.get("id"):
@@ -287,7 +296,12 @@ def directives(hp):
         if e.get("src") == "executor":
             continue
         d = cur.setdefault(e["id"], {"id": e["id"]})
+        if e.get("state") == "active":
+            d.pop("lifetime", None)  # a re-add replaces the old lifetime, it does not inherit it
         d.update({k: v for k, v in e.items() if k not in ("ev", "src")})
+    for d in cur.values():
+        if d.get("state") == "active" and d.get("lifetime") == "turn":
+            d["state"] = "expired"
     return cur
 
 
@@ -599,7 +613,7 @@ def cmd_init(_args):
     tasks_save(hp, {"tasks": []})
     print(f"created: {hp}")
     print(
-        "next: `hippo directive add --text \"…\" --lifetime durable` for a standing instruction, "
+        "next: `hippo directive add --text \"…\"` for a standing instruction, "
         "`hippo task add <type>/<slug> --title …` for work, `hippo status` to see both.",
     )
     print(
@@ -616,10 +630,11 @@ DIRECTIVE_TEXT_NUDGE = 200  # one directive this long is asking to be compressed
 DIRECTIVE_COUNT_NUDGE = 8  # this many live at once is asking for a hygiene pass
 DIRECTIVE_TOTAL_NUDGE = 1600  # total characters resident in every session from here on
 # Staleness is shown, never resolved (a scribe once withdrew a live hold because a report
-# mentioned its keyword — automation that decides is the failure, visibility is the fix).
-# Only `phase` ages: durable is indefinite by definition and turn expires by itself.
-PHASE_AGE_SHOW_D = 7  # a phase directive this old carries its age in the capsule line
-PHASE_STALE_NUDGE_D = 14  # this old, the volume notes ask whether the phase is over
+# mentioned its keyword — automation that decides is the failure, visibility is the fix). Every
+# live directive ages the same way: measured, of 75 live `phase` directives 63 were past 14 days
+# and the phase-only nudge produced no withdrawals — the lifetime label was not what got read.
+DIRECTIVE_AGE_SHOW_D = 14  # a directive this old carries its age in the capsule line
+DIRECTIVE_STALE_NUDGE_D = 30  # this old, the volume notes ask whether it still holds
 
 
 def directive_volume_notes(hp):
@@ -648,16 +663,14 @@ def directive_volume_notes(hp):
     now = datetime.now(timezone.utc)
     stale = sorted(
         ((d["id"], (now - t).days) for d in live
-         if d.get("lifetime") == "phase" and (t := event_time(d))
-         and (now - t).days >= PHASE_STALE_NUDGE_D),
+         if (t := event_time(d)) and (now - t).days >= DIRECTIVE_STALE_NUDGE_D),
         key=lambda x: -x[1],
     )
     if stale:
         listed = ", ".join(f"{i} ({n}d)" for i, n in stale)
         notes.append(
-            f"note: phase directive(s) {PHASE_STALE_NUDGE_D}d or older — {listed}. If that "
-            "phase is over, withdraw them (`hippo directive withdraw <id>`); if it is not, "
-            "they are still doing their job."
+            f"note: directives {DIRECTIVE_STALE_NUDGE_D}d or older — {listed}. Still true? "
+            "Withdraw the ones that are not (`hippo directive withdraw <id>`)."
         )
     return notes
 
@@ -668,16 +681,12 @@ def directive_volume_notes(hp):
 # or after a listing, never a refusal and never a stored change. The thresholds sit in
 # clerks/jev/directive.yaml, next to the questions they belong to.
 
-# The flag that acts on each suggestion — the note is only worth printing if it says what to type.
-AXIS_FLAGS = {"audience": "--audience", "lifetime": "--lifetime"}
-
 
 def directive_as_state(d):
     """What the judge is told about one directive. `audience` is normalized because an absent
     one *is* `all` (§9.4): the question is whether the text agrees with the effective value."""
     return {
         "id": d.get("id", ""),
-        "lifetime": d.get("lifetime") or "",
         "audience": d.get("audience") or "all",
         "text": one_line(d.get("text", "")),
     }
@@ -732,27 +741,22 @@ def directive_recheck(hp, a, b):
     return jev_noul(answers, "conflict")
 
 
-def directive_axis_notes(answers, d, policy, suffix="", prefix=""):
-    """The audience and lifetime lines for one directive — or none, when the judge reads them
-    the way they are already stored. A suggestion that agrees with the stored value is not news,
-    and one the model is unsure of is a coin toss between three options."""
-    suggest_at = float(policy.get("suggest_at", 1.0))
-    notes = []
-    for axis, stored in (("audience", d.get("audience") or "all"),
-                         ("lifetime", d.get("lifetime") or "")):
-        pick, conf = jev_choice(answers, f"{axis}{suffix}")
-        if pick is None or pick == stored or conf < suggest_at:
-            continue
-        notes.append(
-            f"note: {prefix}{axis} reads as {pick} ({conf:.2f}) — stored as {stored or '?'}; "
-            f"re-add with {AXIS_FLAGS[axis]} {pick} if that is what was meant"
-        )
-    return notes
+def directive_audience_notes(answers, d, policy, suffix="", prefix=""):
+    """The audience line for one directive — or none, when the judge reads it the way it is
+    already stored. A suggestion that agrees with the stored value is not news, and one the
+    model is unsure of is a coin toss between three options. The note names the flag that acts
+    on it: it is only worth printing if it says what to type."""
+    stored = d.get("audience") or "all"
+    pick, conf = jev_choice(answers, f"audience{suffix}")
+    if pick is None or pick == stored or conf < float(policy.get("suggest_at", 1.0)):
+        return []
+    return [f"note: {prefix}audience reads as {pick} ({conf:.2f}) — stored as {stored}; "
+            f"re-add with --audience {pick} if that is what was meant"]
 
 
 def directive_content_notes(hp, new):
     """What the judge reads in the directive just written: a probable conflict with something
-    already live, and an audience or lifetime that reads differently from the stored value.
+    already live, and an audience that reads differently from the stored value.
 
     The write has already landed and nothing here changes it — a note is the whole of it. With
     the judge off there is no request, no row and no note: the command is what it always was."""
@@ -768,7 +772,7 @@ def directive_content_notes(hp, new):
         return [f"note: {len(live)} live directives — more than the {max_live} the judge is "
                 "asked about in one request, so the content notes are skipped. Withdraw the "
                 "stale ones (`hippo directive withdraw <id>`)."]
-    questions = directive_questions(["audience", "lifetime"])
+    questions = directive_questions(["audience"])
     for i in range(len(live)):
         questions.update(directive_questions([f"conflict_{i}"], i=i))
     state = {"new": directive_as_state(new),
@@ -789,12 +793,12 @@ def directive_content_notes(hp, new):
             flagged.append((p2, d))
     notes = [f"note: may conflict with {d['id']} ({p:.2f}): {one_line(d.get('text', ''), 80)}"
              for p, d in sorted(flagged, key=lambda x: -x[0])]
-    return notes + directive_axis_notes(answers, new, policy)
+    return notes + directive_audience_notes(answers, new, policy)
 
 
 def directive_hygiene_notes(hp):
     """`directive list --hygiene`: the same reading over the whole live set — every pair of it,
-    and each directive's own audience and lifetime.
+    and each directive's own audience.
 
     This is the one mode that is mostly the judge, so with the judge off it says so in one line
     rather than printing nothing: the listing and the volume notes above it are still exactly
@@ -813,7 +817,7 @@ def directive_hygiene_notes(hp):
         return []
     questions = {}
     for i in range(len(live)):
-        questions.update(directive_questions([f"audience_{i}", f"lifetime_{i}"], i=i))
+        questions.update(directive_questions([f"audience_{i}"], i=i))
         for j in range(i + 1, len(live)):
             questions.update(directive_questions([f"conflict_{i}_{j}"], i=i, j=j))
     answers, meta = judge(
@@ -836,7 +840,7 @@ def directive_hygiene_notes(hp):
     notes = [f"note: {a['id']} may conflict with {b['id']} ({p:.2f})"
              for p, a, b in sorted(flagged, key=lambda x: -x[0])]
     for i, d in enumerate(live):
-        notes += directive_axis_notes(answers, d, policy, f"_{i}", f"{d['id']}: ")
+        notes += directive_audience_notes(answers, d, policy, f"_{i}", f"{d['id']}: ")
     return notes
 
 
@@ -904,23 +908,18 @@ def status_lines(hp):
             f"· priors {stamp('PRIORS.md')} · worklog {stamp('worklog.md')}"
         )
     ]
-    # durable first — a standing ruling should be read before the situational ones. Every active
-    # directive appears in full: a directive that is invisible at session start is effectively not
-    # there (principle 9, read backwards), and that is as true of the ninth one as of the first.
-    # Volume is handled by warning the author at `directive add` time, not by dropping text here.
-    ordered = [d for d in live if d.get("lifetime") == "durable"] + [
-        d for d in live if d.get("lifetime") != "durable"
-    ]
+    # Ledger order. Every active directive appears in full: a directive that is invisible at
+    # session start is effectively not there (principle 9, read backwards), and that is as true
+    # of the ninth one as of the first. Volume is handled by warning the author at `directive
+    # add` time, not by dropping text here.
     now = datetime.now(timezone.utc)
-    for d in ordered:
-        label = d.get("lifetime") or "?"
-        # A phase has an end, so its age is information; showing it is the whole staleness
-        # mechanism (nothing expires by itself — the verdict stays with main and the user).
-        if label == "phase":
-            t = event_time(d)
-            if t and (now - t).days >= PHASE_AGE_SHOW_D:
-                label = f"phase·{(now - t).days}d"
-        lines.append(f"· live({label}): {one_line(d.get('text', ''))}")
+    for d in live:
+        # Age is the whole staleness mechanism (nothing expires by itself — the verdict stays
+        # with main and the user), so it is shown only once it is worth a glance.
+        t = event_time(d)
+        age = (now - t).days if t else 0
+        label = f"live({age}d)" if age >= DIRECTIVE_AGE_SHOW_D else "live"
+        lines.append(f"· {label}: {one_line(d.get('text', ''))}")
     # Nothing flying → no line. The capsule only spends a line on a question that has an answer.
     flying = in_flight(hp)
     if flying:
@@ -961,6 +960,14 @@ def status_lines(hp):
         lines.append(
             "· discipline: report no-go early when the premise does not hold; "
             "long runs go to background — never poll with a foreground sleep"
+        )
+    else:
+        # The grammar, where main re-reads after a compaction. Measured: 405 `--help` calls in
+        # 19 projects, 59 of Codex's 96 within 30 tool calls of a compaction — the moment this
+        # capsule re-arrives. A lane has its `report:` line instead.
+        lines.append(
+            "· cli: task add|set|done|list · log dispatch|outcome|review|review-status "
+            "· directive add|withdraw · prior · dispatch [--batch] — /hippo:hippo has the flags"
         )
     return lines
 
@@ -1434,7 +1441,8 @@ def cmd_log(args):
         if args.text:
             e["text"] = args.text
         if args.lifetime:
-            e["lifetime"] = args.lifetime
+            print("note: lifetime is no longer recorded — a directive lives until "
+                  "'hippo directive withdraw <id>'", file=sys.stderr)
         if getattr(args, "audience", None):
             e["audience"] = args.audience
         # Length is not warned about here: the set-wide notes emitted after the write name every
@@ -1498,7 +1506,7 @@ def cmd_directive_list(args):
             aud = d.get("audience")
             tag = f"/{aud}" if aud and aud != "all" else ""
             print(
-                f"{d['id']}  [{d.get('state', '?')}/{d.get('lifetime', '?')}{tag}]  "
+                f"{d['id']}  [{d.get('state', '?')}{tag}]  "
                 f"{d.get('text', '')}"
             )
     # Reviewing the set is the other moment the author can act on what it costs. On stderr, so
@@ -2021,6 +2029,8 @@ def run_dispatch(argv):
     # re-delegation clause the lane's capsule will carry (§9.5).
     os.environ["HIPPO_DISPATCH"] = did
     os.environ["HIPPO_DEPTH"] = str(depth)
+    if hp is not None:
+        os.environ["HIPPO_DIR"] = str(hp)
     # Not execvp anymore (§9.6): the wrapper stays alive as a pass-through so it can observe
     # what the lane cost. codex prints the banner (session id, model) and the "tokens used"
     # footer on *stderr* (measured, 0.144.6) — so only stderr is piped, forwarded line by
@@ -3211,7 +3221,8 @@ def run_batch(argv):
         with BATCH_LOCK:
             state["launched"] += 1
         out_p, err_p = outdir / f"{en['id']}.out", outdir / f"{en['id']}.err"
-        env = {**os.environ, "HIPPO_DISPATCH": did, "HIPPO_DEPTH": str(en["depth"])}
+        env = {**os.environ, "HIPPO_DISPATCH": did, "HIPPO_DEPTH": str(en["depth"]),
+               **({"HIPPO_DIR": str(hp)} if hp is not None else {})}
         cmd = adapter_argv(en)
         timed_out = False
         with out_p.open("w", encoding="utf-8") as fo, err_p.open("w", encoding="utf-8") as fe:
@@ -3391,24 +3402,6 @@ def price_usd(u, prices):
             + u["tout"] * m["output"]) / 1e6
 
 
-def expire_turn_directives(hp):
-    """A turn directive is live until the first Stop that *begins* after it was recorded.
-
-    Running this before the scribe writes is the whole mechanism: the turn directives it is
-    about to record are not in this sweep, so they survive to be injected into the next turn
-    and are expired by the next Stop. One turn of life, for both writers — the scribe records
-    at Stop (live through the following turn), main records mid-turn (live for the rest of it).
-    `expired` rather than `withdrawn`: nobody changed their mind, the clock simply ran out."""
-    n = 0
-    for d in directives(hp).values():
-        if d.get("state") == "active" and d.get("lifetime") == "turn":
-            append_event(
-                hp, {"ev": "directive", "id": d["id"], "state": "expired"}, src="scribe"
-            )
-            n += 1
-    return n
-
-
 def directive_roster(hp):
     """The live directive ids handed to the scribe with the digest.
 
@@ -3419,7 +3412,7 @@ def directive_roster(hp):
     if not live:
         return "(none yet)"
     return "\n".join(
-        f"- {d['id']} ({d.get('lifetime', '?')}): {one_line(d.get('text', ''), 100)}"
+        f"- {d['id']}: {one_line(d.get('text', ''), 100)}"
         for d in live
     )
 
@@ -3476,10 +3469,6 @@ def cmd_scribe(args):
             if time.monotonic() >= deadline:
                 return
             time.sleep(0.1)
-
-    # Before anything else, and before the prefilter can return: a turn ended whether or not
-    # this window had enough in it to be worth a model call.
-    expire_turn_directives(hp)
 
     transcript = Path(args.transcript)
     if not transcript.exists():
@@ -3591,6 +3580,10 @@ def cmd_scribe(args):
     # is preserved in failures/ — which is what "the dump is the record" means.
     events = obj.get("events", [])
     for e in events:
+        # lifetime is retired (§3.2) and the prompt no longer asks for it; a clerk that still
+        # says `turn` must not make its directive invisible to the view.
+        if isinstance(e, dict) and e.get("ev") == "directive":
+            e.pop("lifetime", None)
         verr = (validate_event(e) or validate_scribe_event(e) or check_ref(hp, e)
                 or check_scribe_outcome(hp, e))
         if verr:
@@ -3722,11 +3715,8 @@ def build_parser():
     a = d.add_parser("add", help="record a directive (ev=directive)")
     a.add_argument("--id", help="derived from --text when omitted (DESIGN §3.3 auto id)")
     a.add_argument("--text")
-    a.add_argument(
-        "--lifetime",
-        choices=sorted(ENUMS[("directive", "lifetime")]),
-        help="how long the directive lives",
-    )
+    # Retired (§3.2): accepted so old callers keep working, never stored.
+    a.add_argument("--lifetime", help=argparse.SUPPRESS)
     a.add_argument(
         "--audience",
         choices=sorted(ENUMS[("directive", "audience")]),
@@ -3744,7 +3734,7 @@ def build_parser():
         "--hygiene",
         action="store_true",
         help="also have the judge read the live set: probable conflicts between two "
-             "directives, and an audience or lifetime that reads differently from the "
+             "directives, and an audience that reads differently from the "
              "stored one (needs TYPESAFE_API_KEY; notes only, nothing is changed)",
     )
     a.set_defaults(fn=cmd_directive_list)

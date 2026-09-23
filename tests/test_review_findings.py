@@ -123,7 +123,6 @@ def test_b1_caller_supplied_t_is_rejected(tmp_project, run_hippo):
             "ev": "directive",
             "id": "forged-t",
             "text": "x",
-            "lifetime": "phase",
             "state": "active",
             "t": "1999-01-01T00:00:00Z",
         },
@@ -321,7 +320,6 @@ def test_m1_scribe_may_still_emit_directives(
                         "ev": "directive",
                         "id": "gpu-01",
                         "text": "Use GPUs 0 and 1 only",
-                        "lifetime": "phase",
                         "state": "active",
                     }
                 ],
@@ -355,7 +353,6 @@ def test_m1_inject_flattens_directive_text_but_never_truncates_it(tmp_project, r
                     "ev": "directive",
                     "id": "long-01",
                     "text": long_text,
-                    "lifetime": "phase",
                     "state": "active",
                 },
                 ensure_ascii=False,
@@ -368,7 +365,7 @@ def test_m1_inject_flattens_directive_text_but_never_truncates_it(tmp_project, r
     inject = run_hippo(["status", "--inject"], cwd=tmp_project)
     assert inject.returncode == 0, inject.stderr
     lines = inject.stdout.splitlines()
-    live = [ln for ln in lines if ln.startswith("· live(")]
+    live = [ln for ln in lines if ln.startswith("· live")]
     assert len(live) == 1
     body = live[0].split(": ", 1)[1]
     assert body == "A" * 300 + " second line third line", body

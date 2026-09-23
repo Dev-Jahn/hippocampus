@@ -241,7 +241,7 @@ def test_children_carry_the_launching_lanes_parent(tmp_project, tmp_path, run_hi
             prompt: go
         """)
     rec = tmp_path / "dispatch_ids_seen.txt"
-    body = '#!/bin/sh\nprintf \'%s\\n\' "$HIPPO_DISPATCH" >> "$REC_FILE"\n'
+    body = '#!/bin/sh\nprintf \'%s %s\\n\' "$HIPPO_DISPATCH" "$HIPPO_DIR" >> "$REC_FILE"\n'
     proc = _batch(run_hippo, tmp_project, manifest,
                   env={"PATH": _stub(tmp_path, "codex", body),
                        "HIPPO_DISPATCH": "dparent", "REC_FILE": str(rec)})
@@ -250,8 +250,10 @@ def test_children_carry_the_launching_lanes_parent(tmp_project, tmp_path, run_hi
     assert len(dispatches) == 2
     assert all(e["parent"] == "dparent" for e in dispatches)
     # Each child runs under its own fresh dispatch id, not the parent's.
-    seen = set(rec.read_text(encoding="utf-8").split())
-    assert seen == {e["id"] for e in dispatches}
+    seen = [ln.split(" ") for ln in rec.read_text(encoding="utf-8").splitlines()]
+    assert {did for did, _ in seen} == {e["id"] for e in dispatches}
+    # ...and reports to the ledger that launched it, wherever its cwd is (§9.1).
+    assert {d for _, d in seen} == {str(tmp_project.resolve() / ".hippo")}
 
 
 # --------------------------------------------------------------------------

@@ -227,6 +227,13 @@ def test_depth_flag_is_recorded_and_planted(tmp_project, tmp_path):
     assert f"DEPTH=1 DISPATCH={did}" in proc.stdout
 
 
+def test_the_wrapper_plants_the_ledger_it_recorded_into(tmp_project, tmp_path):
+    body = '#!/bin/sh\nprintf "DIR=%s" "$HIPPO_DIR"\n'
+    proc = _wrapper(tmp_project, tmp_path, ["--kind", "impl", "--scope", "lane"], body=body)
+    assert proc.returncode == 0, proc.stderr
+    assert f"DIR={tmp_project.resolve() / '.hippo'}" in proc.stdout
+
+
 def test_a_launch_inside_a_lane_records_its_parent(tmp_project, tmp_path):
     proc = _wrapper(tmp_project, tmp_path, ["--kind", "impl", "--scope", "child"],
                     env={"HIPPO_DISPATCH": "dparent1", "HIPPO_DEPTH": "1"})
