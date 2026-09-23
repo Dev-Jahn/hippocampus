@@ -1,0 +1,19 @@
+# failure-cluster: asked by the harvest every `hippo dispatch --batch` run ends with, over the
+# failed lanes of a batch
+# (DESIGN §3.6). One request per failed entry, carrying `a` (the entry) and `reps` (the cluster
+# representatives so far); code renders this question once per representative — `same_0`,
+# `same_1`, … — and assigns `a` to the first one above `same_cause_at`, else opens a new cluster.
+# The reason it exists is measured: 130 identical check failures were paid as 130 repair lanes.
+questions:
+  same_{k}:
+    type: noul
+    instructions: >-
+      Do `a` and `reps[{k}]` fail for the same underlying reason — the same missing thing, the
+      same wrong assumption, or the same error — so that one fix would clear both?
+    criteria:
+      "true": One fix would clear both failures, because the underlying reason is the same
+      "false": They fail for different reasons, and each needs its own fix
+policy:
+  # Above this, the entry joins that representative's cluster. High on purpose: a wrong merge
+  # hides a defect behind another one's diagnosis, while a wrong split only costs a second read.
+  same_cause_at: 0.7

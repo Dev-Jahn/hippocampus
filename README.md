@@ -15,12 +15,13 @@ background clerks that turn transcripts into evidence. Judgment stays with
 the model; it just makes sure that happens on top of good evidence.
 The plugin, its slash commands, and the CLI are all named `hippo`.
 
-## Execution surface (4 layers)
+## Execution surface (5 layers)
 
 | Layer | What | Cost |
 |---|---|---|
 | deterministic script | hooks · CLI — fast, dumb | 0 |
-| **clerk** | hook/cron fires a cheap model headless for judgment that doesn't need main's context | tokens only |
+| **clerk** | a hook fires a cheap model headless for judgment that doesn't need main's context | tokens only |
+| judge | a typed-judgment call inside a CLI path, only with `TYPESAFE_API_KEY` (below) | outside both subscriptions |
 | skill | needs main's context, or main must act on the result | main context |
 | main | routing, acceptance, conversation with the user | — |
 
@@ -31,9 +32,12 @@ The plugin, its slash commands, and the CLI are all named `hippo`.
   status block (survives compaction); `Stop` fires the scribe clerk detached,
   never blocking.
 - **clerks** (`clerks/*.md`) — headless prompts: `turn-scribe` digests a
-  session into worklog + ledger events, `distiller` regenerates `PRIORS.md`.
-- **skills** (`skills/*`) — `checkup` (project diagnosis, recommend-first),
-  `dispatch` (delegation with evidence-proportional verification).
+  session into worklog + ledger events, `distiller` regenerates `PRIORS.md`
+  (the scribe runs it when the page is a week old and five new verdicts have
+  landed; `hippo prior distill` runs it by hand).
+- **skills** (`skills/*`) — `hippo` (the whole CLI grammar, one screen),
+  `checkup` (project diagnosis, recommend-first), `dispatch` (delegation
+  lanes with evidence-proportional verification).
 
 Nothing here is enforced. `.hippo/`-less directories get silent no-ops
 everywhere — zero bytes on stdout/stderr, exit 0.
@@ -72,35 +76,60 @@ hippo init
 
 That creates `.hippo/` and nothing else.
 
+### The clerk backend
+
+The clerks resolve their backend automatically (codex if installed, else headless claude). When
+a project needs a different one, set `clerk: {backend: codex|claude}` in `.hippo/config.yaml`, or
+export `$HIPPO_CLERK_BACKEND` / `$HIPPO_CLERK_MODEL` (pin the backend when you pin the model —
+a model id for one backend is invalid on the other).
+
+### The judge (opt-in by key)
+
+With `TYPESAFE_API_KEY` in the environment, hippo asks TypeSafe's Jev — a judgment-only model
+that returns probabilities, never prose — a few typed questions at moments where it already
+holds the text: the scribe's digest (advisory hints for the clerk), the live directive set
+(`directive add`, `directive list`), every dispatch's brief before it launches and
+its report at exit (single and `--batch` alike). Answers are evidence a code policy thresholds;
+the judge never writes a verdict. There is no setting and no prompt: without the
+key, every command behaves exactly as it always has. Question specs are text in
+`clerks/jev/*.yaml`; the design is `DESIGN.md` §2 (judge), §3.6, §3.9.
+
 ## CLI cheat sheet
 
+The same block as `skills/hippo/SKILL.md` (a test keeps the two, and the parser, in step):
+
 ```
+hippo init
 hippo status [--inject]
-hippo task add <id> --title T [--status pending] [--deps a,b]
-hippo task set <id> <field> <value>
+hippo task add <type>/<slug> --title T [--notes N] [--deps a,b]
+    [--status pending|active|done|dropped]
+hippo task set <id> title|status|notes|deps <value>      # positional: no --flags
 hippo task done <id> [--note N]
 hippo task list [--status s1,s2] [--all] [--json]
-hippo task show <id> | task drop <id>
-hippo log <ev> [typed flags…]        # dispatch|outcome|review|review-status
+hippo task show <id> [--json]
+hippo task drop <id>
+hippo log dispatch --id D --kind K --exec executor/model/effort --scope S
+    [--task T] [--depth N] [--parent D]
+hippo log outcome --ref <dispatch-id>|task:<task-id> --result accepted|revised|refuted|no-go|lost
+    [--attr work|brief|harness] [--rework N] [--by executor/model] [--note N]
+hippo log outcome --from-batch <journal> [--dry-run] < verdicts.jsonl
+hippo log review --id R --base <sha> --source S --findings N
+hippo log review-status --ref R --addressed full|partial|none [--at <sha>]
 hippo log raw '<json>'
 hippo log tail [-n N] [--ev TYPE]
+hippo directive add --text T [--id kebab-id] [--audience main|executor|all]
+    [--state active|withdrawn|expired]
 hippo directive list [--active] [--json]
-hippo directive add [typed flags…]        # --lifetime turn|phase|durable
-                                          # --audience main|executor|all (default all)
-hippo directive withdraw <directive-id>
+hippo directive withdraw <id>
 hippo prior show
 hippo prior distill [--days N]
-hippo dispatch --kind K --scope S [--task T] [--depth N] [--] <codex exec args…>
-                                     # codex exec wrapper: records ev:dispatch, prints its id
-                                     # --depth 1 = orchestrator lane (may spawn; children start at 0)
+hippo dispatch --kind K --scope S [--task T] [--depth N] [--fast] [--] <codex exec args…>
+hippo dispatch --batch <manifest.yaml> [--dry-run]
+# a bare noun reads: task → list, log → tail, directive → list, prior → show
 ```
 
-Mental model: facts go in through one door (`log <event>`); bare `hippo log`
-shows recent entries; `directive` and `prior` are views re-derived from the
-ledger every time. Bare nouns default to a read: `task`→list, `log`→tail,
-`directive`→list, `prior`→show.
-
-Every subcommand supports `-h/--help`; errors print usage to stderr.
+Facts go in through one door (`log <event>`); `directive` and `prior` are views re-derived from
+the ledger every time. Every subcommand supports `-h/--help`; errors print usage to stderr.
 
 ## Design
 

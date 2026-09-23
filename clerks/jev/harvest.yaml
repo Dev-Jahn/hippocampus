@@ -1,0 +1,87 @@
+# harvest: asked once over every finished lane — at lane exit, by `hippo dispatch` and by each
+# `hippo dispatch --batch` lane, and by a batch harvest for an exited lane that has none yet
+# (DESIGN §3.6). The state is one object the code assembles:
+# scope, kind, brief, exit, claim, report, stderr_tail, check_output, changes. Every question is
+# one literal judgment over it; the route, the verify hint and the cause filter are computed in
+# code from the thresholds under `policy`. The judge answers, the policy decides, main judges.
+questions:
+  claims_done:
+    type: noul
+    instructions: >-
+      Does `report` state that the work `brief` asked for was completed as asked, rather than
+      done only in part, blocked, or never started?
+    criteria:
+      "true": The report says the work the brief asked for is finished
+      "false": The report says the work is partial, blocked, abandoned, or was never started
+  reports_blocked:
+    type: noul
+    instructions: >-
+      Does `report` say the lane could not proceed — a premise in `brief` did not hold, it is
+      reporting no-go, it hit a blocker, or it was asked to stop?
+    criteria:
+      "true": The report says the lane stopped because it could not proceed
+      "false": The report shows the lane proceeding, whatever it ended up producing
+  needs_decision:
+    type: noul
+    instructions: >-
+      Does `report` ask a question, or leave a choice open, that the author of `brief` must
+      answer before this result can be accepted?
+    criteria:
+      "true": The report puts a question or an unmade choice to whoever reads it
+      "false": The report makes its own calls and leaves nothing for the author to answer
+  scope_creep:
+    type: noul
+    instructions: >-
+      Do `changes` or `report` show edits outside what `brief` asked for?
+    criteria:
+      "true": Files or behaviour were changed that the brief did not ask about
+      "false": Everything changed belongs to what the brief asked for
+  evidence:
+    type: noul
+    instructions: >-
+      Do `report` or `check_output` carry concrete verification evidence — test output, a
+      command that was run, a measured result — rather than an assertion on its own?
+    criteria:
+      "true": Something that was actually run or measured is shown
+      "false": The work is only asserted to be correct, with nothing run or measured shown
+  risk:
+    type: score
+    instructions: >-
+      How much of what `changes` touches does the rest of the project depend on?
+    criteria:
+      - only new files or a self-contained module
+      - one module's internals
+      - shared interfaces, tests or configuration
+      - hooks, build, CI or repository-wide conventions
+  attr:
+    type: choice
+    instructions: >-
+      If this result is not acceptable, whose problem does `report` point to?
+    criteria:
+      work: The output itself is the problem — wrong, incomplete, or not what was asked for
+      brief: The instructions were the problem — wrong, ambiguous, or contradictory
+      harness: Infrastructure was lost — a session limit, a lost notification, a tool failure
+      none: Nothing in the report points to a problem
+  cause:
+    type: choice
+    instructions: >-
+      Why did this lane fail, according to `report`, `stderr_tail` and `check_output`?
+    criteria:
+      capability: It attempted the work and produced a wrong or incomplete result
+      spec: The brief it was given was wrong, ambiguous, or contradictory
+      environment: A tool, dependency, permission, path, or piece of data was missing
+      transient: It timed out, was rate limited, lost the network, or was killed
+      none: It did not fail
+policy:
+  # Route thresholds, applied in code in this order: failed (from rc, not from a probability),
+  # then no-go-candidate, then accept-candidate, else escalate. They are deliberately strict on
+  # the accept side: an escalation costs main one read, a wrong accept-candidate costs a batch.
+  no_go_at: 0.7
+  done_at: 0.7
+  blocked_below: 0.2
+  decision_below: 0.3
+  creep_below: 0.3
+  # The verify hint (dispatch skill §4) — a suggestion that this lane deserves a verification
+  # lane, never a gate. risk is the 0-3 ladder above, so 2.0 is "shared interfaces or wider".
+  verify_risk_at: 2.0
+  evidence_below: 0.3

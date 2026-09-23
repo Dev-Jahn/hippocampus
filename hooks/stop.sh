@@ -9,7 +9,7 @@ set -u
 [ -n "${HIPPO_CLERK:-}" ] && exit 0
 
 # A dispatched lane gets no scribe (§9.7): a per-lane Stop would multiply clerk cost by the
-# wave width, and a scribe reading a lane's transcript would write src=scribe rows — verdicts —
+# batch width, and a scribe reading a lane's transcript would write src=scribe rows — verdicts —
 # out of a worker's self-narrative. HIPPO_DISPATCH, planted by the wrapper, is the gate.
 [ -n "${HIPPO_DISPATCH:-}" ] && exit 0
 
@@ -58,7 +58,12 @@ cwd="$(json_get cwd)"
 # and at $HOME (never adopt a project from above the user's home).
 dir="$cwd"
 found=""
-while :; do
+# HIPPO_DIR, planted by the dispatch wrapper, names the ledger that launched this lane wherever
+# its cwd is (§9.1) — the CLI re-derives it from env anyway; here it decides whether to run.
+if [ -n "${HIPPO_DIR:-}" ] && [ -d "$HIPPO_DIR" ]; then
+  found="$(dirname "$HIPPO_DIR")"
+fi
+while [ -z "$found" ]; do
   if [ -d "$dir/.hippo" ]; then
     found="$dir"
     break

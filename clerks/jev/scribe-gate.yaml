@@ -1,0 +1,51 @@
+# scribe-gate: asked over the transcript digest before the turn-scribe clerk runs (DESIGN §3.5.3b).
+# Every question is one literal yes/no about `digest`; thresholds live under policy, in code's hands.
+questions:
+  user_instruction:
+    type: noul
+    instructions: >-
+      Does a USER line in `digest` state an operating rule or constraint meant to hold beyond
+      this one answer — how work must be done, what is off limits, or what to keep doing?
+    criteria:
+      "true": A user line lays down a rule, preference, hold, or standing instruction
+      "false": User lines only ask questions, request one-off actions, or make remarks
+  verdict:
+    type: noul
+    instructions: >-
+      Does `digest` contain an explicit verdict on delegated work — merged, accepted, rejected,
+      refuted, or NO-GO — spoken by the user or by the main assistant, not a worker's own
+      completion report?
+    criteria:
+      "true": Someone judges delegated work — merged it, accepted it, rejected or refuted it, or called it NO-GO
+      "false": Delegated work is only reported, described, or still running, with nobody judging it
+  external_review:
+    type: noul
+    instructions: >-
+      Are the findings of an external review of this project's work — from a reviewer, a
+      ChatGPT or Codex review, or a review file — pasted, quoted, or read in `digest`?
+    criteria:
+      "true": An external review's findings are present in this window, quoted or read from a file
+      "false": No external review appears; at most a review is mentioned or planned
+  launch:
+    type: noul
+    instructions: >-
+      Was a subagent, fork, workflow, or headless claude process launched in `digest`
+      (an Agent or Task tool call, a Workflow launch, a `claude -p` command)?
+    criteria:
+      "true": A line shows such a worker being started in this window
+      "false": No worker was started — only ordinary tool calls, or a launch merely discussed
+  substantive_work:
+    type: noul
+    instructions: >-
+      Did substantive work finish, merge, get discovered, or fail in `digest` — beyond reading
+      files, planning, or conversation?
+    criteria:
+      "true": Something was built, changed, merged, measured, found out, or went wrong
+      "false": The window is reading, searching, planning, or talking, with nothing concluded
+# No policy: the gate never decides whether the clerk runs. Measured (2026-09-23) on 90 windows of
+# a consuming project's transcripts, cut just before each scribe-written event: at a 0.2 floor the
+# matching question cleared it for 18/19 directives, 16/19 outcomes, 9/9 dispatches and 8/12
+# reviews (the old, literal review wording — hence the rewording above) — a skip rule would have
+# dropped ~14% of real events — while of 31 windows where the clerk recorded nothing, only one had
+# every question under 0.2, so the same rule would have saved ~1 clerk call in 30. The answers ride
+# into the clerk as advisory hints and are metered; that is the whole of it.

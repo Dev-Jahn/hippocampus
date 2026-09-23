@@ -9,6 +9,12 @@ Report on the digest. The two lists before it are context, and they exist for th
 id you coin for something that already has one does not update it, it silently forks it. Reuse
 from the lists; do not go looking for them in the digest.
 
+A `# gate hints` section may also appear. Those are advisory probabilities from a separate judge
+that read the same digest and nothing else — a low value means look harder before you record that
+kind of event, and a high one means look again if you found nothing. They are never evidence:
+never record an event because a hint is high, and never doubt one the digest plainly shows because
+a hint is low. When the section is missing, nothing is implied by its absence.
+
 Your output is consumed by a validator, not by a human:
 **emit exactly one JSON object, with no code fence**. Do not add a single character of other text.
 
@@ -96,20 +102,14 @@ events: only the four kinds below are allowed, with exactly these field names.
    wrong? → `work`. **If the digest does not say which, omit `attr` entirely** — an absent
    attribution is a gap, but a reflexive `work` is a lie that blames the executor for the brief's
    defect, and every routing decision built on it inherits that lie.
-3. `{"ev":"directive","id":"<short kebab id>","text":"<the gist of what was said>","lifetime":"turn|phase|durable","state":"active"}`
+3. `{"ev":"directive","id":"<short kebab id>","text":"<the gist of what was said>","state":"active"}`
    or `{"ev":"directive","id":"<existing id>","state":"withdrawn"}`
    — **only operating constraints or instructions spoken by the user (USER: lines)**. Rules or
    resolutions the model invented for itself are not directives — do not record them. A decision
    this same window already carried out (code merged, config changed, document updated) is not a
    directive either: it is finished work and belongs in the worklog, not in the standing rules.
-
-   Choosing the lifetime:
-
-   | lifetime | it holds for | example |
-   |---|---|---|
-   | `turn` | the next turn only, then it expires on its own | "for the next answer, skip the code" |
-   | `phase` | the current phase of work, until the user is done with it | "use GPUs 0 and 1 only", "hold off on speed claims for now" |
-   | `durable` | the whole project | "keep review replies in context, never save them to a file" |
+   An instruction for the next answer only ("for the next answer, skip the code") is not a
+   directive: it is already in the context it applies to.
 
    **Reuse an id.** The `# live directives` section above the digest lists every directive that is
    currently live. When this turn *changes* an instruction that is already on that list, reuse its

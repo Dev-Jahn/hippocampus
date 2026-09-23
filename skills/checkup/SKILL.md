@@ -43,8 +43,11 @@ Code) or `~/.codex/sessions/` in dated subdirectories (Codex) — take the newes
 
 ## Check 2 — directive hygiene (first priority — an obedient model executes a stale instruction)
 
-- List the active directives from `hippo directive list` oldest first: a phase directive alive for
-  more than two weeks is a candidate — "the phase may be over; keep or withdraw?".
+- List the active directives from `hippo directive list` oldest first: a directive 30 days or
+  older is a candidate — "is this still true; keep or withdraw?".
+- Read the notes `hippo directive list` prints (with `TYPESAFE_API_KEY` set) before proposing any
+  withdrawal or merge: the judge reads the live set for probable conflicts and for an audience that
+  disagrees with the stored one, and a note is evidence to weigh, never a verdict.
 - Cross-check active directives against CLAUDE.md and the memory files for **contradictions and
   duplication** (by meaning, not by string). Quote both sides of a contradiction and take a
   position on which one survives. Edit only after confirmation, local files first.
@@ -62,8 +65,9 @@ Code) or `~/.codex/sessions/` in dated subdirectories (Codex) — take the newes
 - From a sample of recent transcripts (the latest 2-3, compressed with digest_lite): the same
   error three or more times, foreground sleep polling, a run of "File has not been read yet" —
   report counts and one representative case each.
-- If PRIORS.md is more than 7 days old, propose running `hippo prior distill` (include it in the
-  cleanup bundle).
+- PRIORS.md regenerates itself at Stop once it is a week old and five new verdicts have landed.
+  If it is older than that anyway, say which half is missing — too few verdicts recorded since
+  the last `ev:clerk name:distiller` row, or that row failing — rather than proposing a manual run.
 
 ## Check 4 — data hygiene
 
