@@ -1,0 +1,19 @@
+# brief-check: asked once per launch — by `hippo dispatch` when its prompt is readable from the
+# argv, and per entry by `hippo dispatch --batch` in its plan pass (DESIGN §3.6). The state is one
+# object the code assembles: `brief`, the whole prompt, and `directives`, the live directives a
+# lane's capsule will carry (audience executor|all). Code renders the question once per directive
+# — `conflict_0`, `conflict_1`, … — and every answer at or over `report_at` becomes one stderr
+# note. It never stops a launch. The incident it exists for is measured: contradictory clauses
+# between a brief and a standing rule produced a fail-closed NO-GO.
+questions:
+  conflict_{i}:
+    type: noul
+    instructions: >-
+      Would a worker that must obey both `brief` and `directives[{i}]` be unable to satisfy both
+      at once, because they demand incompatible things about the same subject?
+    criteria:
+      "true": Following one of them necessarily violates the other
+      "false": They speak to different subjects, or both of them can be followed at once
+policy:
+  # The same bar a directive-against-directive conflict is reported at (directive.yaml).
+  report_at: 0.7

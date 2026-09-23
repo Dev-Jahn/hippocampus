@@ -12,10 +12,13 @@ measurement against the Opus 5 guide.
 
 1. `hippo prior show` — check which (model, effort) measured better for this kind. A prior is
    advice: main still decides the final routing from the difficulty and volume of the work at hand.
-2. `hippo dispatch --batch <manifest> --plan` — with a manifest already drafted, this measures
-   each brief and suggests the cheapest exec the priors support, per entry, with a note where a
-   brief names no check or carries a kind PRIORS cannot aggregate. It launches nothing and it
-   does not touch the manifest: read the table, edit the manifest, then launch.
+2. `hippo dispatch --batch <manifest> --dry-run` — with a manifest already drafted, this is the
+   plan: it measures each brief and suggests the cheapest exec the priors support, per entry,
+   with a note where a brief names no check, carries a kind PRIORS cannot aggregate, sits two
+   tiers from its routed model, or may contradict a directive its lane will carry. It launches
+   nothing and does not touch the manifest. With `TYPESAFE_API_KEY` set the same plan runs by
+   itself ahead of every launch, and an entry that leaves `model` unset launches on the
+   suggestion.
 3. `hippo task` — what can start now: a lane whose task shows a `waiting on:` line still has an
    unfinished dep and belongs in a later wave.
 4. `hippo directive list --active` — check what the lanes will see. Directives whose audience
@@ -124,14 +127,26 @@ Mechanics:
 - To steer a lane mid-flight, kill it and resume with an explicit session id (never `--last` when
   lanes run in parallel).
 
-**Batch form** (`--batch`, 1.12.0) — for a large uniform wave, hand the whole fan-out to the
-wrapper instead of looping launches through your own turns (measured: a 222-lane fleet cost $2,
+**Batch form** (`--batch`, 1.12.0) — for a large uniform batch, hand the whole fan-out to the
+wrapper instead of looping launches through your own turns (measured: a 222-lane batch cost $2,
 the launch/harvest loop driving it ~$13 in context re-feeds):
 
 ```bash
-hippo dispatch --batch wave.yaml [--concurrency N] [--resume [--causes a,b] | --fresh]
-                                 [--dry-run | --harvest | --plan]
+hippo dispatch --batch wave.yaml [--dry-run]
 ```
+
+There are no mode flags: the journal beside the manifest decides what a run does.
+
+- **No journal** → every entry launches, and the run ends with the harvest table.
+- **Some entries unfinished** → the run resumes by itself: done entries stay done, the rest
+  relaunch — except those whose triage named a cause a relaunch cannot clear (`capability`,
+  `spec`), which are skipped and named on stderr: they need a different brief, then a new entry.
+  Then the harvest table.
+- **Every entry done** → nothing launches; the harvest table only.
+- To start over, delete `wave.journal.jsonl`. `--dry-run` launches nothing and prints the plan.
+
+With `TYPESAFE_API_KEY` set, an entry with no `model` is launched on the plan's suggestion (the
+plan table goes to stderr first); without it, a missing `model` is still a validation error.
 
 ```yaml
 concurrency: 8
@@ -159,28 +174,30 @@ entries:
   its check the same way, diagnose the common cause before writing a repair manifest — the batch
   moved judgment out of the launch loop, so nothing inside it will do this for you (measured: 130
   identical import failures were one missing `pytest.ini`, paid as 130 repair lanes).
-- **Harvest the wave before you read any of it**: `hippo dispatch --batch wave.yaml --harvest`
-  launches nothing and prints one table — per lane a route, the numbers behind it, and where its
-  diagnosis is — plus a cluster line per group of failures one fix would clear. Read the
-  escalations first, then the no-gos; open a lane's report when the table tells you to, not by
-  default. **`accept-candidate` is not acceptance** — it means a judge read the report and found
-  nothing to stop on, which is evidence of the same standing as a passing check (§4 still
-  decides, and the `verify` column says which lanes are worth a verification lane). The clusters
-  are what the previous bullet asks for, already computed: repair one cluster with one brief,
-  never one lane at a time. Then `--resume --causes transient,environment` to relaunch only what
-  a relaunch could clear, and pipe `wave.verdicts.jsonl` through `log outcome --from-batch` for
-  the lanes you actually accepted — delete the rows you did not. With no `TYPESAFE_API_KEY`
-  there is no judge: the table still prints, with those columns empty.
+- **Read the harvest table before you read any lane**: every batch run ends with one table —
+  per lane a route, the numbers behind it, and where its diagnosis is — plus a cluster line per
+  group of failures one fix would clear. Read the escalations first, then the no-gos; open a
+  lane's report when the table tells you to, not by default. **`accept-candidate` is not
+  acceptance** — it means a judge read the report and found nothing to stop on, which is
+  evidence of the same standing as a passing check (§4 still decides, and the `verify` column
+  says which lanes are worth a verification lane). The clusters are what the previous bullet
+  asks for, already computed: repair one cluster with one brief, never one lane at a time. Then
+  rerun the same command to relaunch what a relaunch could clear, and pipe `wave.verdicts.jsonl`
+  through `log outcome --from-batch` for the lanes you actually accepted — delete the rows you
+  did not. With no `TYPESAFE_API_KEY` there is no judge: the table still prints, with those
+  columns empty.
 - Per-entry prompt = `defaults.briefs` contents + entry `brief` + inline `prompt`, with `{var}`
   substitution in the prompt and the check. Outputs land in `<manifest-stem>.out/` per entry;
   one summary JSON line arrives on stdout at the end.
-- Editing entries isolate via per-entry `args` carrying `-C .claude/worktrees/<id>` (worktrees
-  created by main **before** the batch call, §5); a read-only wave may drop all three arguments.
+- Editing entries isolate in their own worktree (created by main **before** the batch call,
+  §5): a codex entry via `args` carrying `-C .claude/worktrees/<id>`, a claude entry — claude has
+  no `-C` — via `cwd: .claude/worktrees/<id>`, which sets the lane's working directory and the
+  check's. A read-only batch may drop all three arguments.
 - `check` is evidence, not a verdict: its rc lands in the journal and batch never writes an
   outcome. Verdicts still follow §4, per lane.
-- `--resume` skips entries whose last exit (and check) passed and relaunches the rest. A
-  relaunch mints a **new** dispatch id — two launches are two facts; record the verdict against
-  the id that produced the accepted work.
+- A rerun skips entries whose last exit (and check) passed and relaunches the rest. A relaunch
+  mints a **new** dispatch id — two launches are two facts; record the verdict against the id
+  that produced the accepted work.
 - Once the wave is judged, serialize the verdicts in one call:
   `hippo log outcome --from-batch <journal> < verdicts.jsonl` — one JSON row per entry
   (`{"entry": …, "attempt": …, "result": …, "note": …}` + optional `attr`/`rework`/`by`),
@@ -216,8 +233,8 @@ clause is why depth 0 lanes still receive it — from the capsule, not from your
 - **Never put a severity ceiling or a "be conservative" instruction in a verifier's brief** — a
   literal-minded model obeys and genuinely reports less. Write "report every finding; filtering
   happens on the collection side".
-- That filtering is `hippo dispatch --batch <manifest> --harvest`: a `verify` lane's findings
-  come back ranked under its row, each scored for severity and for whether it is a defect at all
+- That filtering is the batch harvest table: a `verify` lane's findings come back ranked under
+  its row, each scored for severity and for whether it is a defect at all
   rather than a preference or a question. Read the top of the list, not the whole report.
 - Record the outcome from the verifier's verdict:
   `hippo log outcome --ref <id> --result refuted --attr work --note "..."` — or

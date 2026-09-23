@@ -1,4 +1,5 @@
-# failure-cluster: asked by `hippo dispatch --batch --harvest` over the failed lanes of a wave
+# failure-cluster: asked by the harvest every `hippo dispatch --batch` run ends with, over the
+# failed lanes of a batch
 # (DESIGN §3.6). One request per failed entry, carrying `a` (the entry) and `reps` (the cluster
 # representatives so far); code renders this question once per representative — `same_0`,
 # `same_1`, … — and assigns `a` to the first one above `same_cause_at`, else opens a new cluster.

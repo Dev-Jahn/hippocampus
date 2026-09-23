@@ -1,7 +1,8 @@
 """`hippo dispatch --batch` (DESIGN §3.6, 1.12.0) — manifest fan-out in the wrapper.
 
 Contract under test: fail-closed manifest validation, the journal (launch/skip/
-exit/stopped lines) and resume, the concurrency cap, per-child ledger recording
+exit/stopped lines) and what it decides — launch, resume, or harvest only — the
+manifest's concurrency cap, the entry cwd, per-child ledger recording
 (dispatch + usage — never ev:outcome), the fan-out breaker consulted before each
 launch, both adapters (codex banner/footer on stderr, claude single-JSON stdout),
 the per-child timeout, and {var} substitution. Where the spec fixes only what a
@@ -83,8 +84,8 @@ def _batch(run_hippo, project, manifest, *flags, env, timeout=30):
 
 
 def _summary(proc):
-    # The batch contract puts exactly ONE json line on stdout — anything more fails here.
-    return json.loads(proc.stdout)
+    # The summary is stdout's last line, always: the harvest table rides above it.
+    return json.loads(proc.stdout.splitlines()[-1])
 
 
 def _seed_children(tmp_project, n, model="gpt-5.6-sol", parent="dorch"):
@@ -127,10 +128,10 @@ def test_validation_collects_every_problem_before_dying(tmp_project, tmp_path, r
 
 
 # --------------------------------------------------------------------------
-# 2. dry-run — resolve everything, write nothing
+# 2. dry-run — the plan, and nothing written
 # --------------------------------------------------------------------------
 
-def test_dry_run_resolves_and_writes_nothing(tmp_project, tmp_path, run_hippo):
+def test_dry_run_prints_the_plan_and_writes_nothing(tmp_project, tmp_path, run_hippo):
     manifest = _manifest(tmp_project, "wave2.yaml", """\
         defaults:
           kind: impl
@@ -152,13 +153,15 @@ def test_dry_run_resolves_and_writes_nothing(tmp_project, tmp_path, run_hippo):
                   env={"PATH": _stub(tmp_path, "codex", f'#!/bin/sh\ntouch "{capture}"\n')})
     assert proc.returncode == 0, proc.stderr
     s = _summary(proc)
-    assert (s["total"], s["launched"]) == (2, 0)
-    assert s["stopped"] is False
-    assert re.search(r"plain exec=codex/gpt-5\.6-luna/medium prompt=\d+B check=no", proc.stderr)
-    assert re.search(r"checked exec=codex/gpt-5\.6-luna/high prompt=\d+B check=yes", proc.stderr)
+    assert (s["total"], s["suggested"]) == (2, 0), "no judge, no suggestion"
+    # With the judge off the plan is its deterministic half: what each entry routes to.
+    assert "ladder codex: cheap gpt-5.6-luna" in proc.stdout
+    assert re.search(r"^plain\s.*codex/gpt-5\.6-luna/medium", proc.stdout, re.M)
+    assert re.search(r"^checked\s.*codex/gpt-5\.6-luna/high", proc.stdout, re.M)
     assert not capture.exists()
     assert read_ledger(tmp_project) == []
     assert not _journal_path(manifest).exists()
+    assert not _outdir(manifest).exists()
 
 
 # --------------------------------------------------------------------------
@@ -257,7 +260,7 @@ def test_children_carry_the_launching_lanes_parent(tmp_project, tmp_path, run_hi
 
 
 # --------------------------------------------------------------------------
-# 5. concurrency — the CLI flag caps parallel children (and beats the manifest)
+# 5. concurrency — the manifest key caps parallel children
 # --------------------------------------------------------------------------
 
 # mkdir is the atomic test-and-set every platform has; flock is not on macOS.
@@ -277,31 +280,6 @@ printf '%s' "$(( $(cat "$CNT_DIR/cur") - 1 ))" > "$CNT_DIR/cur"
 rmdir "$CNT_DIR/lock"
 exit 0
 """
-
-
-def test_cli_concurrency_flag_caps_parallel_children(tmp_project, tmp_path, run_hippo):
-    entries = "\n".join(
-        f'  - id: e{i}\n    scope: "lane {i}"\n    prompt: go' for i in range(6))
-    manifest = _manifest(tmp_project, "wave5.yaml", (
-        "concurrency: 5\n"      # the CLI flag must win over this
-        "defaults:\n"
-        "  kind: impl\n"
-        "  executor: codex\n"
-        "  model: gpt-5.6-luna\n"
-        "  effort: low\n"
-        "entries:\n" + entries + "\n"))
-    cnt = tmp_path / "cnt"
-    cnt.mkdir()
-    proc = _batch(run_hippo, tmp_project, manifest, "--concurrency", "2",
-                  env={"PATH": _stub(tmp_path, "codex", COUNTER_STUB), "CNT_DIR": str(cnt)},
-                  timeout=60)
-    assert proc.returncode == 0, proc.stderr
-    s = _summary(proc)
-    assert (s["launched"], s["ok"]) == (6, 6)
-    assert len((cnt / "runs").read_text(encoding="utf-8").splitlines()) >= 2
-    # Three rounds of 0.4s sleeps under a 2-worker pool: exactly 2 is deterministic in
-    # practice — under 2 means the pool serialized, over 2 means the cap leaked.
-    assert int((cnt / "max").read_text(encoding="utf-8")) == 2
 
 
 def test_manifest_concurrency_caps_without_the_cli_flag(tmp_project, tmp_path, run_hippo):
@@ -326,10 +304,10 @@ def test_manifest_concurrency_caps_without_the_cli_flag(tmp_project, tmp_path, r
 
 
 # --------------------------------------------------------------------------
-# 6. journal guard — an existing journal demands an explicit --resume or --fresh
+# 6. a finished journal — the rerun harvests and launches nothing; deleting it starts over
 # --------------------------------------------------------------------------
 
-def test_existing_journal_demands_resume_or_fresh(tmp_project, tmp_path, run_hippo):
+def test_a_finished_journal_harvests_only_until_it_is_deleted(tmp_project, tmp_path, run_hippo):
     manifest = _manifest(tmp_project, "wave6.yaml", """\
         defaults:
           kind: impl
@@ -343,30 +321,48 @@ def test_existing_journal_demands_resume_or_fresh(tmp_project, tmp_path, run_hip
         """)
     env = {"PATH": _stub(tmp_path, "codex", STUB_OK)}
 
-    both = _batch(run_hippo, tmp_project, manifest, "--resume", "--fresh", env=env)
-    assert both.returncode == 2
-    assert not _journal_path(manifest).exists()
-
     first = _batch(run_hippo, tmp_project, manifest, env=env)
     assert first.returncode == 0, first.stderr
     assert _journal_path(manifest).exists()
 
-    blocked = _batch(run_hippo, tmp_project, manifest, env=env)
-    assert blocked.returncode == 2
-    assert "--resume" in blocked.stderr and "--fresh" in blocked.stderr
+    again = _batch(run_hippo, tmp_project, manifest, env=env)
+    assert again.returncode == 0, again.stderr
+    s = _summary(again)
+    assert (s["launched"], s["skipped"], s["harvested"]) == (0, 1, 1)
+    assert "resuming" not in again.stderr, "nothing is unfinished, so nothing resumes"
+    assert again.stdout.splitlines()[0].split()[:2] == ["id", "rc"], "the table still prints"
     assert len([e for e in read_ledger(tmp_project) if e.get("ev") == "dispatch"]) == 1
 
-    fresh = _batch(run_hippo, tmp_project, manifest, "--fresh", env=env)
+    _journal_path(manifest).unlink()
+    fresh = _batch(run_hippo, tmp_project, manifest, env=env)
     assert fresh.returncode == 0, fresh.stderr
-    (bak,) = tmp_project.glob("wave6.journal.jsonl.*.bak")
-    assert re.fullmatch(r"wave6\.journal\.jsonl\.\d{8}T\d{6}Z\.bak", bak.name)
-    journal = _journal(manifest)
-    assert len([l for l in journal if l["event"] == "exit"]) == 1
-    assert not [l for l in journal if l["event"] == "skip"]  # fresh means start over
+    assert _summary(fresh)["launched"] == 1
+    assert len([e for e in read_ledger(tmp_project) if e.get("ev") == "dispatch"]) == 2
+
+
+def test_retired_flags_die_with_the_usage(tmp_project, tmp_path, run_hippo):
+    manifest = _manifest(tmp_project, "wave6b.yaml", """\
+        defaults:
+          kind: impl
+          model: gpt-5.6-luna
+        entries:
+          - id: only
+            scope: "only lane"
+            prompt: go
+        """)
+    capture = tmp_path / "launched.txt"
+    env = {"PATH": _stub(tmp_path, "codex", f'#!/bin/sh\ntouch "{capture}"\n')}
+    for flags in (["--harvest"], ["--plan"], ["--resume"], ["--fresh"],
+                  ["--concurrency", "2"], ["--causes", "transient"], ["--concurrency=2"]):
+        proc = _batch(run_hippo, tmp_project, manifest, *flags, env=env)
+        assert proc.returncode == 2, flags
+        assert "retired in 1.14.0" in proc.stderr and "usage: hippo dispatch --batch" in proc.stderr
+    assert not capture.exists()
+    assert not _journal_path(manifest).exists()
 
 
 # --------------------------------------------------------------------------
-# 7. resume — DONE entries are skipped, failures relaunch under a NEW dispatch id
+# 7. resume — a rerun skips DONE entries, failures relaunch under a NEW dispatch id
 # --------------------------------------------------------------------------
 
 FAIL_MARKER_STUB = (
@@ -377,7 +373,7 @@ FAIL_MARKER_STUB = (
 )
 
 
-def test_resume_skips_done_entries_and_relaunches_failures(tmp_project, tmp_path, run_hippo):
+def test_a_rerun_skips_done_entries_and_relaunches_failures(tmp_project, tmp_path, run_hippo):
     manifest = _manifest(tmp_project, "wave7.yaml", """\
         defaults:
           kind: impl
@@ -398,8 +394,9 @@ def test_resume_skips_done_entries_and_relaunches_failures(tmp_project, tmp_path
     s1 = _summary(first)
     assert (s1["ok"], s1["failed"]) == (1, 1)
 
-    second = _batch(run_hippo, tmp_project, manifest, "--resume", env=env)
+    second = _batch(run_hippo, tmp_project, manifest, env=env)
     assert second.returncode == 1  # the stub is deterministic: bad fails again
+    assert "resuming " in second.stderr and ": 1 to relaunch, 0 skipped" in second.stderr
     s2 = _summary(second)
     assert (s2["launched"], s2["skipped"], s2["failed"]) == (1, 1, 1)
 
@@ -657,7 +654,7 @@ def test_vars_substitute_in_prompt_and_check_only(tmp_project, tmp_path, run_hip
 
 
 # --------------------------------------------------------------------------
-# 13. flag surface — batch form accepts exactly its four flags
+# 13. flag surface — batch form accepts --dry-run and nothing else
 # --------------------------------------------------------------------------
 
 def test_stray_token_dies_with_batch_usage(tmp_project, tmp_path, run_hippo):
@@ -760,3 +757,63 @@ def test_invalid_dispatch_record_journals_record_failed_but_launches(
     assert rf["id"] == "unrecorded"
     # No dispatch row, and no orphan usage row either — the ledger stays clean.
     assert read_ledger(tmp_project) == []
+
+
+# --------------------------------------------------------------------------
+# 16. cwd — the child's working directory, for both adapters and the check
+# --------------------------------------------------------------------------
+
+PWD_STUB = '#!/bin/sh\npwd -P >> "$PWD_FILE"\n'
+
+
+def test_entry_cwd_is_where_both_adapters_and_the_check_run(tmp_project, tmp_path, run_hippo):
+    lane = tmp_project / ".claude" / "worktrees" / "lane"
+    lane.mkdir(parents=True)
+    manifest = _manifest(tmp_project, "wave16.yaml", """\
+        defaults:
+          kind: impl
+          model: gpt-5.6-luna
+          check: "pwd -P > check-ran-here"
+        entries:
+          - id: codex-lane
+            scope: "codex lane"
+            cwd: .claude/worktrees/lane
+            prompt: go
+          - id: claude-lane
+            scope: "claude lane"
+            executor: claude
+            model: claude-sonnet-5
+            cwd: .claude/worktrees/{name}
+            vars: {name: lane}
+            prompt: go
+          - id: here
+            scope: "no cwd"
+            prompt: go
+        """)
+    seen = tmp_path / "pwd.txt"
+    path = _stub(tmp_path, "codex", PWD_STUB)
+    path = _stub(tmp_path, "claude", PWD_STUB)
+    proc = _batch(run_hippo, tmp_project, manifest, env={"PATH": path, "PWD_FILE": str(seen)})
+    assert proc.returncode == 0, proc.stderr
+    dirs = seen.read_text(encoding="utf-8").splitlines()
+    assert sorted(dirs) == sorted([str(lane.resolve())] * 2 + [str(tmp_project.resolve())])
+    assert (lane / "check-ran-here").read_text(encoding="utf-8").strip() == str(lane.resolve())
+    assert (tmp_project / "check-ran-here").exists(), "no cwd is the batch's own"
+
+
+def test_a_missing_cwd_fails_validation(tmp_project, tmp_path, run_hippo):
+    manifest = _manifest(tmp_project, "wave16b.yaml", """\
+        defaults:
+          kind: impl
+          model: gpt-5.6-luna
+        entries:
+          - id: lost
+            scope: "lost lane"
+            cwd: .claude/worktrees/not-created
+            prompt: go
+        """)
+    proc = _batch(run_hippo, tmp_project, manifest,
+                  env={"PATH": _stub(tmp_path, "codex", STUB_OK)})
+    assert proc.returncode == 2
+    assert "cwd is not a directory: .claude/worktrees/not-created" in proc.stderr
+    assert not _journal_path(manifest).exists()
