@@ -66,7 +66,8 @@ skipped silently — if the session-start capsule never appears, look there firs
 Trusting them also gives lanes launched by `hippo dispatch` their capsule — at start
 and again after each compaction (executor-audience directives plus the report line).
 Codex also does not put a plugin's `bin/` on `PATH`; the skills resolve `bin/hippo`
-relative to themselves, and you can add your own alias if you want to type `hippo`.
+relative to themselves, and you can add your own alias if you want to type `hippo`. Lanes
+launched by `hippo dispatch` need neither: the wrapper puts its `bin/` on their `PATH`.
 
 Either way, in a project:
 

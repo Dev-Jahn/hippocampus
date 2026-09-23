@@ -2103,6 +2103,15 @@ def check_fanout(hp, parent, child_model):
         print(msg, file=sys.stderr)
 
 
+def lane_path():
+    """$PATH for a lane: this plugin's bin/ first, so a lane's bare `hippo` is the hippo that
+    launched it on either host (Codex puts no plugin bin/ on PATH) and no brief has to pin a
+    versioned cache path — one that the next plugin update deletes."""
+    bin_dir = str(ROOT / "bin")
+    parts = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d and d != bin_dir]
+    return os.pathsep.join([bin_dir, *parts])
+
+
 def run_dispatch(argv):
     """DESIGN §3.6. A failed record never blocks the launch — this surface's real job is running
     codex and the ledger is a side effect. But a lost record always makes a sound."""
@@ -2147,6 +2156,7 @@ def run_dispatch(argv):
     os.environ["HIPPO_DEPTH"] = str(depth)
     if hp is not None:
         os.environ["HIPPO_DIR"] = str(hp)
+    os.environ["PATH"] = lane_path()
     # The judge, when there is one (§3.6): notes about the brief before the launch, and the
     # lane's final message — captured to a file, so stdout stays untouched — for triage after.
     on = jev_backend(hp) != "off"
@@ -3544,7 +3554,7 @@ def run_batch(argv):
             state["launched"] += 1
         out_p, err_p = outdir / f"{en['id']}.out", outdir / f"{en['id']}.err"
         env = {**os.environ, "HIPPO_DISPATCH": did, "HIPPO_DEPTH": str(en["depth"]),
-               **({"HIPPO_DIR": str(hp)} if hp is not None else {})}
+               "PATH": lane_path(), **({"HIPPO_DIR": str(hp)} if hp is not None else {})}
         cmd = adapter_argv(en)
         timed_out = False
         with out_p.open("w", encoding="utf-8") as fo, err_p.open("w", encoding="utf-8") as fe:
