@@ -16,7 +16,7 @@ def _inject(run_hippo, cwd):
 
 def _launch(run_hippo, cwd, did, scope="tensorize pass2"):
     proc = run_hippo(["log", "dispatch", "--id", did, "--kind", "impl",
-                      "--exec", "codex/gpt-5.6-sol/high", "--scope", scope], cwd=cwd)
+                      "--exec", "codex/gpt-6-sol/high", "--scope", scope], cwd=cwd)
     assert proc.returncode == 0, proc.stderr
 
 
@@ -60,6 +60,6 @@ def test_a_stale_dispatch_is_not_in_flight(tmp_project, run_hippo):
     hp = tmp_project / ".hippo"
     with (hp / "ledger.jsonl").open("a", encoding="utf-8") as f:
         f.write('{"t":"2020-01-01T00:00:00Z","ev":"dispatch","id":"dold","kind":"impl",'
-                '"exec":"codex/gpt-5.6-sol/high","scope":"ancient","src":"wrapper"}\n')
+                '"exec":"codex/gpt-6-sol/high","scope":"ancient","src":"wrapper"}\n')
     assert _inject(run_hippo, tmp_project) == []
     assert hippo_cli.in_flight(hp) == []

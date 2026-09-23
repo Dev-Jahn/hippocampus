@@ -174,7 +174,7 @@ def _write_transcript(directory) -> Path:
                         "id": "tu_1",
                         "name": "Bash",
                         "input": {
-                            "command": "codex exec -m gpt-5.6-sol --effort high 'kernel impl'"
+                            "command": "codex exec -m gpt-6-sol --effort high 'kernel impl'"
                         },
                     },
                 ],

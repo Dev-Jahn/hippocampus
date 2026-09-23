@@ -43,7 +43,7 @@ def test_the_scribe_may_not_record_a_codex_launch(tmp_project, run_hippo, fake_t
                                                   tmp_path):
     """The wrapper was there when it ran and wrote it from argv. A restatement is either a
     duplicate or a paraphrase of a launch that bypassed the wrapper — the gap is the record."""
-    mock = _scribe_output(tmp_path, "codex", [_dispatch("codex/gpt-5.6-sol/high")])
+    mock = _scribe_output(tmp_path, "codex", [_dispatch("codex/gpt-6-sol/high")])
     proc = run_hippo(["scribe", "--transcript", str(fake_transcript), "--session", "s1"],
                      cwd=tmp_project,
                      env={"HIPPO_CLERK_BACKEND": "mock", "HIPPO_MOCK_OUTPUT": str(mock)})
@@ -106,7 +106,7 @@ def test_one_rejected_event_does_not_erase_the_turn(tmp_project, run_hippo, fake
                                                     tmp_path):
     """Per-event isolation (§3.5.6) has to keep holding for the new rule too."""
     mock = _scribe_output(tmp_path, "mixed", [
-        _dispatch("codex/gpt-5.6-sol/high", "dbad"),
+        _dispatch("codex/gpt-6-sol/high", "dbad"),
         _dispatch("fork/fable/inherit", "dgood"),
     ])
     proc = run_hippo(["scribe", "--transcript", str(fake_transcript), "--session", "s1"],
@@ -159,7 +159,7 @@ def test_one_verdict_per_dispatch_holds_within_a_batch(tmp_project, run_hippo, f
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("ex", [
-    "codex/gpt-5.6-sol/high",       # the exact thing the scribe may not write
+    "codex/gpt-6-sol/high",       # the exact thing the scribe may not write
     "background/CPU/sol-high",      # main is trusted with its own spellings
     "fork/fable/unknown",
 ])
@@ -175,5 +175,5 @@ def test_main_writes_are_untouched(tmp_project, run_hippo, ex):
 
 def test_the_rule_is_not_wired_into_the_shared_validator():
     """If it leaked into validate_event it would silently start applying to main."""
-    assert hippo_cli.validate_event(_dispatch("codex/gpt-5.6-sol/high")) is None
-    assert hippo_cli.validate_scribe_event(_dispatch("codex/gpt-5.6-sol/high")) is not None
+    assert hippo_cli.validate_event(_dispatch("codex/gpt-6-sol/high")) is None
+    assert hippo_cli.validate_scribe_event(_dispatch("codex/gpt-6-sol/high")) is not None

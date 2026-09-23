@@ -6,7 +6,7 @@
 # stdout. Backend resolution: $HIPPO_CLERK_BACKEND (auto|codex|claude|mock,
 # default auto). auto picks codex if the codex CLI is installed, else claude,
 # else exits 3. $HIPPO_CLERK_MODEL overrides the model on either backend; unset,
-# each backend falls back to its own default (codex: gpt-5.6-luna, claude: sonnet).
+# each backend falls back to its own default (codex: gpt-6-luna, claude: sonnet).
 # The whole call is bounded to $HIPPO_CLERK_TIMEOUT seconds
 # (default 120; exit 124 on timeout). Backend stderr is discarded.
 set -u
@@ -118,7 +118,7 @@ case "$BACKEND" in
     # --disable hooks: keep the Stop hook of the codex session this clerk starts from spawning
     # another clerk. Belt and braces with the HIPPO_CLERK guard (survives a stripped environment).
     with_timeout "$TIMEOUT" codex exec \
-      -m "${MODEL:-gpt-5.6-luna}" \
+      -m "${MODEL:-gpt-6-luna}" \
       -c model_reasoning_effort="low" \
       -c service_tier="fast" \
       -s read-only \

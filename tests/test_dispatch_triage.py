@@ -34,7 +34,7 @@ for a in "$@"; do
   case "$prev" in -o|--output-last-message) out="$a" ;; esac
   prev="$a"
 done
-printf 'model: gpt-5.6-luna\\nsession id: none\\n' >&2
+printf 'model: gpt-6-luna\\nsession id: none\\n' >&2
 printf 'ModuleNotFoundError: nothing, just noise on stderr\\n' >&2
 printf 'agent stdout\\n'
 [ -n "$out" ] && printf 'Done: the retry loop is in and tests/run.sh passes.\\n' > "$out"
@@ -49,7 +49,7 @@ def _dispatch(run_hippo, project, tmp_path, *codex_args, env=None):
     full = {"HIPPO_DISPATCH": "", "PATH": _stub_codex(tmp_path, LAST_MESSAGE_STUB),
             "ARGV_FILE": str(argv), **(env or {})}
     proc = run_hippo(["dispatch", "--kind", "impl", "--scope", "retry loop",
-                      "-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=medium",
+                      "-m", "gpt-6-luna", "-c", "model_reasoning_effort=medium",
                       *codex_args], cwd=project, env=full)
     sent = argv.read_text(encoding="utf-8").split("\0")[:-1] if argv.exists() else []
     return proc, sent
@@ -94,7 +94,7 @@ def test_the_lane_is_triaged_at_exit_into_one_line_and_one_row(tmp_project, tmp_
     assert state["exit"] == {"rc": 0, "check_rc": None, "timed_out": False}
     assert state["check_output"] is None and state["claim"] is None
     assert "ModuleNotFoundError" in state["stderr_tail"]
-    assert "model: gpt-5.6-luna" not in state["stderr_tail"], "banner noise is filtered"
+    assert "model: gpt-6-luna" not in state["stderr_tail"], "banner noise is filtered"
     names = [e["name"] for e in _rows(tmp_project, "clerk")]
     assert names == ["jev-plan", "jev-harvest"]
 
@@ -125,7 +125,7 @@ def test_with_the_judge_off_the_dispatch_is_what_it_was(tmp_project, tmp_path, r
     proc, argv = _dispatch(run_hippo, tmp_project, tmp_path, BRIEF)
     assert proc.returncode == 0, proc.stderr
     assert "--output-last-message" not in argv, "no judge, no capture"
-    assert argv == ["exec", "-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=medium", BRIEF]
+    assert argv == ["exec", "-m", "gpt-6-luna", "-c", "model_reasoning_effort=medium", BRIEF]
     assert "triage" not in proc.stderr and "note" not in proc.stderr
     assert _rows(tmp_project, "triage") == [] and _rows(tmp_project, "clerk") == []
 
@@ -166,7 +166,7 @@ def test_a_brief_two_tiers_above_its_model_gets_a_note(tmp_project, tmp_path, ru
                         env=_jev(_mock(tmp_path, {"answers": hard, "default": DEFAULT})))
     assert proc.returncode == 0, "a note, never a gate"
     assert ("dispatch: note — this brief reads top-tier (scope 1.0, novelty 2.8, spec 2.1) — "
-            "launched on gpt-5.6-luna/medium") in proc.stderr.splitlines()
+            "launched on gpt-6-luna/medium") in proc.stderr.splitlines()
 
 
 def test_a_brief_that_contradicts_a_lane_directive_gets_a_note(tmp_project, tmp_path,
@@ -191,7 +191,7 @@ def test_a_brief_that_contradicts_a_lane_directive_gets_a_note(tmp_project, tmp_
 
 def test_the_triage_row_is_schema_checked_and_joins_fail_closed(tmp_project, run_hippo):
     assert run_hippo(["log", "dispatch", "--id", "d1", "--kind", "impl", "--exec",
-                      "codex/gpt-5.6-luna/medium", "--scope", "x"],
+                      "codex/gpt-6-luna/medium", "--scope", "x"],
                      cwd=tmp_project).returncode == 0
     ok = {"ev": "triage", "ref": "d1", "route": "escalate", "verify": True,
           "cause": "spec", "p": {"done": 0.4, "risk": 2}}
@@ -216,7 +216,7 @@ def test_the_scribe_may_not_write_a_triage():
 def test_the_in_flight_line_carries_the_latest_route(tmp_project):
     t = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     rows = [{"t": t, "ev": "dispatch", "id": "d1", "kind": "impl",
-             "exec": "codex/gpt-5.6-luna/medium", "scope": "retry loop", "src": "wrapper"},
+             "exec": "codex/gpt-6-luna/medium", "scope": "retry loop", "src": "wrapper"},
             {"t": t, "ev": "outcome", "ref": "d1", "result": "accepted", "src": "executor"},
             {"t": t, "ev": "triage", "ref": "d1", "route": "accept-candidate", "verify": False,
              "src": "wrapper"},
@@ -241,7 +241,7 @@ def _t(minutes_ago):
 
 def _judged(did, route, result, retriaged=None):
     rows = [{"t": _t(60), "ev": "dispatch", "id": did, "kind": "impl",
-             "exec": "codex/gpt-5.6-luna/medium", "scope": "x", "src": "wrapper"},
+             "exec": "codex/gpt-6-luna/medium", "scope": "x", "src": "wrapper"},
             {"t": _t(50), "ev": "triage", "ref": did, "route": route, "src": "wrapper"}]
     if result:
         rows.append({"t": _t(40), "ev": "outcome", "ref": did, "result": result})
@@ -283,6 +283,6 @@ def test_a_thin_precision_is_named_not_rated():
 
 def test_no_triage_rows_no_section():
     rows = [{"t": _t(60), "ev": "dispatch", "id": "d0", "kind": "impl",
-             "exec": "codex/gpt-5.6-luna/medium", "scope": "x"},
+             "exec": "codex/gpt-6-luna/medium", "scope": "x"},
             {"t": _t(40), "ev": "outcome", "ref": "d0", "result": "accepted"}]
     assert "triage agreement" not in hippo_cli.prior_facts(rows, NOW)

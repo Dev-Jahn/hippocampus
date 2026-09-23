@@ -33,7 +33,7 @@ def _seed_one_valid_line(tmp_project, run_hippo):
             "--kind",
             "docs",
             "--exec",
-            "codex/gpt-5.6-luna/low",
+            "codex/gpt-6-luna/low",
             "--scope",
             "seed line",
         ],
@@ -57,7 +57,7 @@ def test_log_dispatch_valid_appends(tmp_project, run_hippo):
             "--kind",
             "kernel-impl",
             "--exec",
-            "codex/gpt-5.6-sol/high",
+            "codex/gpt-6-sol/high",
             "--scope",
             "pass2 SS-UMMA tensorize",
         ],
@@ -71,7 +71,7 @@ def test_log_dispatch_valid_appends(tmp_project, run_hippo):
     assert entry["ev"] == "dispatch"
     assert entry["id"] == "d041"
     assert entry["kind"] == "kernel-impl"
-    assert entry["exec"] == "codex/gpt-5.6-sol/high"
+    assert entry["exec"] == "codex/gpt-6-sol/high"
     assert entry["scope"] == "pass2 SS-UMMA tensorize"
     assert ISO_T_PREFIX.match(entry["t"]), entry["t"]
 
@@ -86,7 +86,7 @@ def test_log_outcome_valid_appends(tmp_project, run_hippo):
             "--kind",
             "verify",
             "--exec",
-            "codex/gpt-5.6-sol/high",
+            "codex/gpt-6-sol/high",
             "--scope",
             "cross-check",
         ],
@@ -235,7 +235,7 @@ def test_log_dispatch_missing_id_fails_closed_and_ledger_unmodified(
             "--kind",
             "docs",
             "--exec",
-            "codex/gpt-5.6-luna/low",
+            "codex/gpt-6-luna/low",
             "--scope",
             "missing id field",
         ],
@@ -292,7 +292,7 @@ def test_log_outcome_invalid_result_enum_fails_closed(tmp_project, run_hippo):
             "--kind",
             "docs",
             "--exec",
-            "codex/gpt-5.6-luna/low",
+            "codex/gpt-6-luna/low",
             "--scope",
             "enum test",
         ],

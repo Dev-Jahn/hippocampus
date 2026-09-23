@@ -51,7 +51,7 @@ settle change the answer:
 
 ```python
 # fix_exec.py — one function, called once per event, in order.
-MAP = {"d041": "codex/gpt-5.6-sol/high"}
+MAP = {"d041": "codex/gpt-6-sol/high"}
 
 def transform(e):
     if e.get("ev") == "dispatch" and e["id"] in MAP:

@@ -101,8 +101,8 @@ def _seed(project, kind, ex, n, accepted):
 
 @pytest.mark.parametrize("answers, tier, model, effort", [
     (HARD, "top", "gpt-6-astra", "high"),
-    (MIDDLING, "mid", "gpt-5.6-sol", "medium"),
-    (EASY, "cheap", "gpt-5.6-luna", "medium"),
+    (MIDDLING, "mid", "gpt-6-sol", "medium"),
+    (EASY, "cheap", "gpt-6-luna", "medium"),
 ])
 def test_difficulty_picks_the_tier_and_the_effort(tmp_project, tmp_path, run_hippo,
                                                   answers, tier, model, effort):
@@ -138,8 +138,8 @@ def test_the_ladder_is_printed_once_per_executor_from_the_price_sheet(tmp_projec
                  _mock(tmp_path, {"answers": EASY, "default": DEFAULT}))
     ladders = [ln for ln in proc.stdout.splitlines() if ln.startswith("ladder ")]
     assert ladders == [
-        "ladder codex: cheap gpt-5.6-luna · mid gpt-5.6-sol · top gpt-6-astra",
-        "ladder claude: cheap claude-haiku-4-5 · mid claude-opus-5 · top claude-fable-5-1"]
+        "ladder codex: cheap gpt-6-luna · mid gpt-6-sol · top gpt-6-astra",
+        "ladder claude: cheap claude-haiku-4-5 · mid claude-opus-5-5 · top claude-fable-5-1"]
     assert _row(proc, "other")[6] == "claude/claude-haiku-4-5/medium"
 
 
@@ -168,40 +168,40 @@ def test_the_request_asks_the_route_questions_over_the_whole_brief(tmp_project, 
 
 def test_a_tier_this_kind_keeps_failing_at_is_bumped_one_step(tmp_project, tmp_path,
                                                               run_hippo):
-    _seed(tmp_project, "impl", "codex/gpt-5.6-luna/medium", 5, accepted=1)
+    _seed(tmp_project, "impl", "codex/gpt-6-luna/medium", 5, accepted=1)
     proc = _plan(run_hippo, tmp_project, _wave(tmp_project),
                  _mock(tmp_path, {"answers": EASY, "default": DEFAULT}))
     assert proc.returncode == 0, proc.stderr
 
     row = _row(proc, "solo")
-    assert row[6] == "codex/gpt-5.6-sol/medium", "cheap scored 1/5 — one tier up"
+    assert row[6] == "codex/gpt-6-sol/medium", "cheap scored 1/5 — one tier up"
     assert row[7] == "no evidence", "the evidence column follows the suggestion"
     assert _notes(proc, "solo") == [
-        "cheap → mid: priors impl×codex/gpt-5.6-luna/medium 1/5 is under 0.50 first-pass"]
+        "cheap → mid: priors impl×codex/gpt-6-luna/medium 1/5 is under 0.50 first-pass"]
 
 
 def test_a_cheaper_tier_that_clears_the_bar_takes_the_work(tmp_project, tmp_path, run_hippo):
-    _seed(tmp_project, "impl", "codex/gpt-5.6-luna/medium", 5, accepted=5)
+    _seed(tmp_project, "impl", "codex/gpt-6-luna/medium", 5, accepted=5)
     proc = _plan(run_hippo, tmp_project, _wave(tmp_project),
                  _mock(tmp_path, {"answers": MIDDLING, "default": DEFAULT}))
     assert proc.returncode == 0, proc.stderr
 
     row = _row(proc, "solo")
-    assert row[6] == "codex/gpt-5.6-luna/medium", "5/5 at the cheap tier answers §9.6"
-    assert row[7] == "priors impl×codex/gpt-5.6-luna/medium 5/5"
+    assert row[6] == "codex/gpt-6-luna/medium", "5/5 at the cheap tier answers §9.6"
+    assert row[7] == "priors impl×codex/gpt-6-luna/medium 5/5"
     assert _notes(proc, "solo") == [
-        "mid → cheap: priors impl×codex/gpt-5.6-luna/medium 5/5 is at or over 0.80 first-pass"]
+        "mid → cheap: priors impl×codex/gpt-6-luna/medium 5/5 is at or over 0.80 first-pass"]
 
 
 def test_a_cell_under_the_sample_threshold_moves_nothing_and_is_named(tmp_project, tmp_path,
                                                                       run_hippo):
     """n=3 at 1/3 is worse than the bump threshold and still not evidence (§3.6b). The reader
     is told the cell is thin rather than left unable to tell it from an absent one."""
-    _seed(tmp_project, "impl", "codex/gpt-5.6-luna/medium", 3, accepted=1)
+    _seed(tmp_project, "impl", "codex/gpt-6-luna/medium", 3, accepted=1)
     proc = _plan(run_hippo, tmp_project, _wave(tmp_project),
                  _mock(tmp_path, {"answers": EASY, "default": DEFAULT}))
     row = _row(proc, "solo")
-    assert row[6] == "codex/gpt-5.6-luna/medium"
+    assert row[6] == "codex/gpt-6-luna/medium"
     assert row[7] == "no evidence (n=3)"
     assert _notes(proc, "solo") == []
 
@@ -313,11 +313,11 @@ def test_a_failed_request_suggests_nothing(tmp_project, tmp_path, run_hippo):
 # --------------------------------------------------------------------------
 
 def test_with_the_judge_off_the_deterministic_half_still_prints(tmp_project, run_hippo):
-    _seed(tmp_project, "impl", "codex/gpt-5.6-luna/medium", 5, accepted=4)
+    _seed(tmp_project, "impl", "codex/gpt-6-luna/medium", 5, accepted=4)
     manifest = _manifest(tmp_project, "wave.yaml", """\
         defaults:
           kind: impl
-          model: gpt-5.6-luna
+          model: gpt-6-luna
         entries:
           - id: solo
             scope: "one lane"
@@ -326,13 +326,13 @@ def test_with_the_judge_off_the_deterministic_half_still_prints(tmp_project, run
     proc = _plan(run_hippo, tmp_project, manifest)
     assert proc.returncode == 0, proc.stderr
     assert "judge off — no TYPESAFE_API_KEY" in proc.stderr
-    assert "ladder codex: cheap gpt-5.6-luna" in proc.stdout
+    assert "ladder codex: cheap gpt-6-luna" in proc.stdout
 
     row = _row(proc, "solo")
     assert row[1:5] == ["-", "-", "-", "-"], "no difficulty without the judge"
-    assert row[5] == "codex/gpt-5.6-luna/medium", "what the manifest already routes to"
+    assert row[5] == "codex/gpt-6-luna/medium", "what the manifest already routes to"
     assert row[6] == "-"
-    assert row[7] == "priors impl×codex/gpt-5.6-luna/medium 4/5", "the priors need no key"
+    assert row[7] == "priors impl×codex/gpt-6-luna/medium 4/5", "the priors need no key"
 
     assert _plan_file(manifest) is None, "no answers, no plan file"
     summary = json.loads(proc.stdout.splitlines()[-1])
@@ -377,7 +377,7 @@ def test_with_the_judge_an_unrouted_entry_launches_on_the_suggestion(tmp_project
     (d,) = [e for e in read_ledger(tmp_project) if e.get("ev") == "dispatch"]
     assert d["exec"] == "codex/gpt-6-astra/high"
     # The plan goes to stderr before the batch starts: stdout is the harvest's.
-    assert "ladder codex: cheap gpt-5.6-luna" in proc.stderr
+    assert "ladder codex: cheap gpt-6-luna" in proc.stderr
     assert proc.stderr.index("ladder codex") < proc.stderr.index("[1/1] solo")
     assert "ladder" not in proc.stdout
     assert _plan_file(manifest)[0]["suggested"] == {"model": "gpt-6-astra", "effort": "high"}
@@ -399,14 +399,14 @@ def test_a_routed_entry_two_tiers_from_its_brief_gets_a_note(tmp_project, tmp_pa
     manifest = _manifest(tmp_project, "wave.yaml", """\
         defaults:
           kind: impl
-          model: gpt-5.6-luna
+          model: gpt-6-luna
         entries:
           - id: solo
             scope: "one lane"
             prompt: "redesign the capsule grammar"
         """)
     note = ("reads top-tier (scope 1.0, novelty 2.8, spec 1.0) — routed to "
-            "gpt-5.6-luna/medium")
+            "gpt-6-luna/medium")
     mock = _mock(tmp_path, {"answers": HARD, "default": DEFAULT})
     assert note in _notes(_plan(run_hippo, tmp_project, manifest, mock), "solo")
 
@@ -416,7 +416,7 @@ def test_a_routed_entry_two_tiers_from_its_brief_gets_a_note(tmp_project, tmp_pa
     assert proc.returncode == 0, proc.stderr
     assert f"solo: {note}" in proc.stderr
     (d,) = [e for e in read_ledger(tmp_project) if e.get("ev") == "dispatch"]
-    assert d["exec"] == "codex/gpt-5.6-luna/medium"
+    assert d["exec"] == "codex/gpt-6-luna/medium"
 
     # One tier apart is not worth a line.
     mid = _mock(tmp_path, {"answers": MIDDLING, "default": DEFAULT}, name="mid.json")
@@ -434,7 +434,7 @@ def test_a_brief_that_contradicts_a_lane_directive_gets_a_note(tmp_project, tmp_
     manifest = _manifest(tmp_project, "wave.yaml", """\
         defaults:
           kind: impl
-          model: gpt-5.6-luna
+          model: gpt-6-luna
         entries:
           - id: solo
             scope: "one lane"

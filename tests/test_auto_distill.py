@@ -19,7 +19,7 @@ def _seed(project, n_verdicts, src="cli", distilled_before=False):
         rows.append({"t": t, "ev": "clerk", "name": "distiller", "ok": True, "src": "cli"})
     for i in range(n_verdicts):
         rows.append({"t": t, "ev": "dispatch", "id": f"d{i}", "kind": "impl",
-                     "exec": "codex/gpt-5.6-sol/high", "scope": f"lane {i}", "src": "wrapper"})
+                     "exec": "codex/gpt-6-sol/high", "scope": f"lane {i}", "src": "wrapper"})
         rows.append({"t": t, "ev": "outcome", "ref": f"d{i}", "result": "accepted", "src": src})
     with ledger_path(project).open("a", encoding="utf-8") as f:
         f.writelines(json.dumps(r) + "\n" for r in rows)

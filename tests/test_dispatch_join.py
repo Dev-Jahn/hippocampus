@@ -12,7 +12,7 @@ import hippo_cli  # noqa: E402
 
 def _dispatch(run_hippo, cwd, did, task=None, kind="impl", scope="do the thing"):
     argv = ["log", "dispatch", "--id", did, "--kind", kind,
-            "--exec", "codex/gpt-5.6-sol/high", "--scope", scope]
+            "--exec", "codex/gpt-6-sol/high", "--scope", scope]
     if task:
         argv += ["--task", task]
     proc = run_hippo(argv, cwd=cwd)

@@ -47,7 +47,7 @@ FOOTER_STUB = """\
 #!/bin/sh
 for a in "$@"; do last="$a"; done
 n=$(printf '%s' "$last" | sed -n 's/.*tokens=\\([0-9][0-9]*\\).*/\\1/p')
-printf 'model: gpt-5.6-luna\\n' >&2
+printf 'model: gpt-6-luna\\n' >&2
 printf 'agent output\\n'
 printf 'tokens used\\n%s\\n' "$n" >&2
 """
@@ -88,7 +88,7 @@ def _summary(proc):
     return json.loads(proc.stdout.splitlines()[-1])
 
 
-def _seed_children(tmp_project, n, model="gpt-5.6-sol", parent="dorch"):
+def _seed_children(tmp_project, n, model="gpt-6-sol", parent="dorch"):
     t = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with (tmp_project / ".hippo" / "ledger.jsonl").open("a", encoding="utf-8") as f:
         for i in range(n):
@@ -136,7 +136,7 @@ def test_dry_run_prints_the_plan_and_writes_nothing(tmp_project, tmp_path, run_h
         defaults:
           kind: impl
           executor: codex
-          model: gpt-5.6-luna
+          model: gpt-6-luna
           effort: medium
         entries:
           - id: plain
@@ -155,9 +155,9 @@ def test_dry_run_prints_the_plan_and_writes_nothing(tmp_project, tmp_path, run_h
     s = _summary(proc)
     assert (s["total"], s["suggested"]) == (2, 0), "no judge, no suggestion"
     # With the judge off the plan is its deterministic half: what each entry routes to.
-    assert "ladder codex: cheap gpt-5.6-luna" in proc.stdout
-    assert re.search(r"^plain\s.*codex/gpt-5\.6-luna/medium", proc.stdout, re.M)
-    assert re.search(r"^checked\s.*codex/gpt-5\.6-luna/high", proc.stdout, re.M)
+    assert "ladder codex: cheap gpt-6-luna" in proc.stdout
+    assert re.search(r"^plain\s.*codex/gpt-6-luna/medium", proc.stdout, re.M)
+    assert re.search(r"^checked\s.*codex/gpt-6-luna/high", proc.stdout, re.M)
     assert not capture.exists()
     assert read_ledger(tmp_project) == []
     assert not _journal_path(manifest).exists()
@@ -173,7 +173,7 @@ def test_fanout_records_dispatch_usage_journal_per_entry(tmp_project, tmp_path, 
         defaults:
           kind: impl
           executor: codex
-          model: gpt-5.6-luna
+          model: gpt-6-luna
           effort: medium
         entries:
           - scope: "algo: fenwick tree"
@@ -200,7 +200,7 @@ def test_fanout_records_dispatch_usage_journal_per_entry(tmp_project, tmp_path, 
     assert len(dispatches) == 3 and len(usages) == 3
     for e in dispatches:
         assert re.fullmatch(r"d[0-9a-f]{32}", e["id"])
-        assert e["exec"] == "codex/gpt-5.6-luna/medium"
+        assert e["exec"] == "codex/gpt-6-luna/medium"
         assert e["src"] == "wrapper" and e["depth"] == 0
         assert "parent" not in e and "task" not in e
     by_scope = {e["scope"]: e for e in dispatches}
@@ -208,7 +208,7 @@ def test_fanout_records_dispatch_usage_journal_per_entry(tmp_project, tmp_path, 
     assert tokens_by_ref[by_scope["algo: fenwick tree"]["id"]] == 1111
     assert tokens_by_ref[by_scope["second lane"]["id"]] == 2222
     assert tokens_by_ref[by_scope["third lane"]["id"]] == 3333
-    assert all(u["model"] == "gpt-5.6-luna" and u["src"] == "wrapper" for u in usages)
+    assert all(u["model"] == "gpt-6-luna" and u["src"] == "wrapper" for u in usages)
 
     journal = _journal(manifest)
     assert len([l for l in journal if l["event"] == "launch"]) == 3
@@ -233,7 +233,7 @@ def test_children_carry_the_launching_lanes_parent(tmp_project, tmp_path, run_hi
         defaults:
           kind: impl
           executor: codex
-          model: gpt-5.6-luna
+          model: gpt-6-luna
           effort: low
         entries:
           - id: a
@@ -290,7 +290,7 @@ def test_manifest_concurrency_caps_without_the_cli_flag(tmp_project, tmp_path, r
         "defaults:\n"
         "  kind: impl\n"
         "  executor: codex\n"
-        "  model: gpt-5.6-luna\n"
+        "  model: gpt-6-luna\n"
         "  effort: low\n"
         "entries:\n" + entries + "\n"))
     cnt = tmp_path / "cnt"
@@ -312,7 +312,7 @@ def test_a_finished_journal_harvests_only_until_it_is_deleted(tmp_project, tmp_p
         defaults:
           kind: impl
           executor: codex
-          model: gpt-5.6-luna
+          model: gpt-6-luna
           effort: low
         entries:
           - id: only
@@ -344,7 +344,7 @@ def test_retired_flags_die_with_the_usage(tmp_project, tmp_path, run_hippo):
     manifest = _manifest(tmp_project, "wave6b.yaml", """\
         defaults:
           kind: impl
-          model: gpt-5.6-luna
+          model: gpt-6-luna
         entries:
           - id: only
             scope: "only lane"
@@ -378,7 +378,7 @@ def test_a_rerun_skips_done_entries_and_relaunches_failures(tmp_project, tmp_pat
         defaults:
           kind: impl
           executor: codex
-          model: gpt-5.6-luna
+          model: gpt-6-luna
           effort: low
         entries:
           - id: good
@@ -424,7 +424,7 @@ def test_failing_check_counts_failed_and_lands_in_the_check_file(tmp_project, tm
         defaults:
           kind: impl
           executor: codex
-          model: gpt-5.6-luna
+          model: gpt-6-luna
           effort: low
         entries:
           - id: checked
@@ -454,7 +454,7 @@ BREAKER_MANIFEST = """\
 defaults:
   kind: impl
   executor: codex
-  model: gpt-5.6-sol
+  model: gpt-6-sol
   effort: high
 entries:
   - id: w1
@@ -471,7 +471,7 @@ entries:
 
 def test_breaker_stops_a_lanes_wave_but_never_mains(tmp_project, tmp_path, run_hippo):
     # As many sol children as fit the $500 reservation; the next sol breaks it.
-    _seed_children(tmp_project, int(500 // reserve_usd("gpt-5.6-sol")))
+    _seed_children(tmp_project, int(500 // reserve_usd("gpt-6-sol")))
     capture = tmp_path / "launched.txt"
     env = {"PATH": _stub(tmp_path, "codex", f'#!/bin/sh\ntouch "{capture}"\n')}
 
@@ -498,12 +498,12 @@ def test_breaker_stops_a_lanes_wave_but_never_mains(tmp_project, tmp_path, run_h
 def test_breaker_warn_prints_once_per_run_not_per_child(tmp_project, tmp_path, run_hippo):
     # Just enough sol reserved to cross the $250 warn line; luna children stay far
     # under the $500 stop, so every verdict says "warn" and the line must dedupe.
-    _seed_children(tmp_project, math.ceil(250 / reserve_usd("gpt-5.6-sol")))
+    _seed_children(tmp_project, math.ceil(250 / reserve_usd("gpt-6-sol")))
     manifest = _manifest(tmp_project, "wave9c.yaml", """\
         defaults:
           kind: impl
           executor: codex
-          model: gpt-5.6-luna
+          model: gpt-6-luna
           effort: low
         entries:
           - id: c1
@@ -591,7 +591,7 @@ def test_child_timeout_kills_and_journals_timed_out(tmp_project, tmp_path, run_h
         defaults:
           kind: impl
           executor: codex
-          model: gpt-5.6-luna
+          model: gpt-6-luna
           effort: low
           timeout: 1
         entries:
@@ -620,7 +620,7 @@ def test_vars_substitute_in_prompt_and_check_only(tmp_project, tmp_path, run_hip
         defaults:
           kind: impl
           executor: codex
-          model: gpt-5.6-luna
+          model: gpt-6-luna
           effort: medium
           briefs: [common.md]
           args: ["--sandbox", "read-only"]
@@ -639,7 +639,7 @@ def test_vars_substitute_in_prompt_and_check_only(tmp_project, tmp_path, run_hip
     assert _summary(proc)["ok"] == 1
 
     argv = rec.read_text(encoding="utf-8").split("\0")[:-1]
-    assert argv[:5] == ["exec", "-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=medium"]
+    assert argv[:5] == ["exec", "-m", "gpt-6-luna", "-c", "model_reasoning_effort=medium"]
     # Manifest args ride between the effort flag and the prompt; `--` seals the argv so a
     # prompt opening with `-` (or `---` frontmatter) can never be read as a flag.
     assert argv[5:7] == ["--sandbox", "read-only"]
@@ -662,7 +662,7 @@ def test_stray_token_dies_with_batch_usage(tmp_project, tmp_path, run_hippo):
         defaults:
           kind: impl
           executor: codex
-          model: gpt-5.6-luna
+          model: gpt-6-luna
           effort: low
         entries:
           - id: only
@@ -687,7 +687,7 @@ def test_entry_task_reaches_the_dispatch_row(tmp_project, tmp_path, run_hippo):
         defaults:
           kind: impl
           executor: codex
-          model: gpt-5.6-luna
+          model: gpt-6-luna
           effort: low
         entries:
           - id: tasked
@@ -707,7 +707,7 @@ def test_entry_depth_reaches_the_row_and_the_child_env(tmp_project, tmp_path, ru
         defaults:
           kind: impl
           executor: codex
-          model: gpt-5.6-luna
+          model: gpt-6-luna
           effort: low
         entries:
           - id: deep
@@ -772,7 +772,7 @@ def test_entry_cwd_is_where_both_adapters_and_the_check_run(tmp_project, tmp_pat
     manifest = _manifest(tmp_project, "wave16.yaml", """\
         defaults:
           kind: impl
-          model: gpt-5.6-luna
+          model: gpt-6-luna
           check: "pwd -P > check-ran-here"
         entries:
           - id: codex-lane
@@ -805,7 +805,7 @@ def test_a_missing_cwd_fails_validation(tmp_project, tmp_path, run_hippo):
     manifest = _manifest(tmp_project, "wave16b.yaml", """\
         defaults:
           kind: impl
-          model: gpt-5.6-luna
+          model: gpt-6-luna
         entries:
           - id: lost
             scope: "lost lane"

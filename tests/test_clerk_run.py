@@ -45,7 +45,7 @@ def test_auto_prefers_codex_and_passes_the_contract_flags(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "ok"
     assert argv[0] == "exec"
-    assert argv[argv.index("-m") + 1] == "gpt-5.6-luna"
+    assert argv[argv.index("-m") + 1] == "gpt-6-luna"
     assert "--disable" in argv and argv[argv.index("--disable") + 1] == "hooks"
     assert argv[argv.index("-s") + 1] == "read-only"
     assert "--skip-git-repo-check" in argv

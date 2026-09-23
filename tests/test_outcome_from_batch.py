@@ -15,7 +15,7 @@ T = "2026-08-13T00:00:00Z"
 
 def _dispatch(did, scope="lane"):
     return {"t": T, "ev": "dispatch", "id": did, "kind": "impl",
-            "exec": "codex/gpt-5.6-luna/low", "scope": scope, "src": "wrapper"}
+            "exec": "codex/gpt-6-luna/low", "scope": scope, "src": "wrapper"}
 
 
 def _claim(did, result="accepted"):

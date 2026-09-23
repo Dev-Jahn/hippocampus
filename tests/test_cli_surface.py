@@ -35,7 +35,7 @@ def _seed_dispatch(tmp_project, run_hippo, did="d001"):
             "--kind",
             "docs",
             "--exec",
-            "codex/gpt-5.6-luna/low",
+            "codex/gpt-6-luna/low",
             "--scope",
             "surface test seed",
         ],
@@ -331,7 +331,7 @@ def test_briefs_directory_is_never_read_by_hippo(tmp_project, run_hippo):
 # The two PRIORS axes are contracts, not hints (measured on a real ledger)
 # --------------------------------------------------------------------------
 
-def _dispatch(run_hippo, cwd, did="d-real", exec_="codex/gpt-5.6-sol/high"):
+def _dispatch(run_hippo, cwd, did="d-real", exec_="codex/gpt-6-sol/high"):
     return run_hippo(
         ["log", "dispatch", "--id", did, "--kind", "impl", "--exec", exec_, "--scope", "s"],
         cwd=cwd,
@@ -372,18 +372,18 @@ def test_exec_must_be_executor_model_effort(tmp_project, run_hippo):
     """A free-form exec produced 24 spellings for 3 real executors: 8 of the 11 distinct first
     slots were category errors, mostly a launch mechanism where the agent belonged."""
     for bad in (
-        "gpt-5.6-sol/high",                    # executor missing
-        "tools/dispatch/gpt-5.6-sol/xhigh",    # the shim path taken as the executor
+        "gpt-6-sol/high",                    # executor missing
+        "tools/dispatch/gpt-6-sol/xhigh",    # the shim path taken as the executor
         "background/sol xhigh",                # whitespace
         "fork agent",                          # prose
         "executor/model/effort unknown",       # the placeholder itself
-        "executor/gpt-5.6-sol/high",           # right shape, placeholder word as the value
+        "executor/gpt-6-sol/high",           # right shape, placeholder word as the value
     ):
         proc = _dispatch(run_hippo, tmp_project, did=f"d-{abs(hash(bad))%9999}", exec_=bad)
         assert proc.returncode != 0, bad
         assert "executor/model/effort" in proc.stderr
 
-    for good in ("codex/gpt-5.6-sol/high", "codex/gpt-6-astra/max", "fork/fable/inherit",
+    for good in ("codex/gpt-6-sol/high", "codex/gpt-6-astra/max", "fork/fable/inherit",
                  "workflow/fable/xhigh"):
         proc = _dispatch(run_hippo, tmp_project, did=f"ok-{abs(hash(good))%9999}", exec_=good)
         assert proc.returncode == 0, (good, proc.stderr)

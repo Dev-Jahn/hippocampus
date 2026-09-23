@@ -107,7 +107,7 @@ def test_uninitialized_project_warns_when_dispatch_is_not_recorded(tmp_path):
 def test_cli_dispatch_records_and_launches(tmp_project, tmp_path, run_hippo):
     proc = run_hippo(
         ["dispatch", "--kind", "impl", "--scope", "cli entry point", "--task", "feat/x",
-         "-m", "gpt-5.6-sol", "-c", 'model_reasoning_effort="high"'],
+         "-m", "gpt-6-sol", "-c", 'model_reasoning_effort="high"'],
         cwd=tmp_project,
         env={"PATH": _stub_codex(tmp_path, '#!/bin/sh\nprintf "%s\\n" "$@"\n')},
     )
@@ -116,7 +116,7 @@ def test_cli_dispatch_records_and_launches(tmp_project, tmp_path, run_hippo):
     assert re.fullmatch(r"d[0-9a-f]{32}", lines[0].removeprefix("dispatch:"))
     assert lines[1] == "exec"  # codex was launched untouched
     event = json.loads((tmp_project / ".hippo" / "ledger.jsonl").read_text())
-    assert event["exec"] == "codex/gpt-5.6-sol/high"
+    assert event["exec"] == "codex/gpt-6-sol/high"
     assert event["task"] == "feat/x" and event["src"] == "wrapper"
 
 
@@ -151,7 +151,7 @@ def test_cli_dispatch_help_does_not_launch(tmp_project, tmp_path, run_hippo):
 def test_cli_dispatch_fast_injects_the_service_tier(tmp_project, tmp_path, run_hippo):
     proc = run_hippo(
         ["dispatch", "--kind", "impl", "--scope", "fast lane", "--fast",
-         "-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=high"],
+         "-m", "gpt-6-sol", "-c", "model_reasoning_effort=high"],
         cwd=tmp_project,
         env={"PATH": _stub_codex(tmp_path, '#!/bin/sh\nprintf "%s\\n" "$@"\n')},
     )
@@ -159,9 +159,9 @@ def test_cli_dispatch_fast_injects_the_service_tier(tmp_project, tmp_path, run_h
     lines = proc.stdout.splitlines()[1:]
     # Prepended before the caller's args: a caller's own -c service_tier=… later wins in codex.
     assert lines[:3] == ["exec", "-c", 'service_tier="fast"']
-    assert lines[3:] == ["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=high"]
+    assert lines[3:] == ["-m", "gpt-6-sol", "-c", "model_reasoning_effort=high"]
     event = json.loads((tmp_project / ".hippo" / "ledger.jsonl").read_text())
-    assert event["exec"] == "codex/gpt-5.6-sol/high"  # the exec axis carries no tier
+    assert event["exec"] == "codex/gpt-6-sol/high"  # the exec axis carries no tier
 
 
 def test_cli_dispatch_without_fast_injects_nothing(tmp_project, tmp_path, run_hippo):
@@ -271,7 +271,7 @@ UUID = "01234567-abcd-7000-8000-0123456789ab"
 BANNER_BODY = (
     '#!/bin/sh\n'
     'printf "OpenAI Codex stub\\n--------\\n" >&2\n'
-    f'printf "model: gpt-5.6-luna\\nsession id: {UUID}\\n--------\\n" >&2\n'
+    f'printf "model: gpt-6-luna\\nsession id: {UUID}\\n--------\\n" >&2\n'
     'printf "codex\\nOK\\n"\n'
     'printf "tokens used\\n18,169\\n" >&2\n'
 )
@@ -299,7 +299,7 @@ def test_wrapper_records_usage_from_the_rollout(tmp_project, tmp_path):
     d = [e for e in read_ledger(tmp_project) if e.get("ev") == "dispatch"][0]
     assert u["ref"] == d["id"]
     assert (u["tokens"], u["tin"], u["tcached"], u["tout"]) == (1100000, 1000000, 400000, 100000)
-    assert u["model"] == "gpt-5.6-luna"
+    assert u["model"] == "gpt-6-luna"
     assert u["src"] == "wrapper"
 
 
@@ -328,7 +328,7 @@ def test_no_usage_report_leaves_a_gap_not_a_guess(tmp_project, tmp_path):
 # sol-class counts are derived through reserve_usd() so a sheet refresh moves them rather
 # than breaking them; luna-class ≈ $0.44/child. Default budget $500, warn from $250.
 
-def _seed_children(tmp_project, n, model="gpt-5.6-sol", parent="dorch", with_usage=None):
+def _seed_children(tmp_project, n, model="gpt-6-sol", parent="dorch", with_usage=None):
     import datetime as _dt
     t = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with (tmp_project / ".hippo" / "ledger.jsonl").open("a", encoding="utf-8") as f:
@@ -342,12 +342,12 @@ def _seed_children(tmp_project, n, model="gpt-5.6-sol", parent="dorch", with_usa
 
 
 def test_expensive_wave_trips_the_budget(tmp_project, tmp_path):
-    n = int(500 // reserve_usd("gpt-5.6-sol"))   # n children fit the $500; one more breaks it
+    n = int(500 // reserve_usd("gpt-6-sol"))   # n children fit the $500; one more breaks it
     _seed_children(tmp_project, n)
     body = '#!/bin/sh\necho LAUNCHED > "$CAPTURE"\n'
     capture = tmp_path / "launched.txt"
     proc = _wrapper(tmp_project, tmp_path,
-                    ["--kind", "impl", "--scope", "one more", "-m", "gpt-5.6-sol"],
+                    ["--kind", "impl", "--scope", "one more", "-m", "gpt-6-sol"],
                     env={"HIPPO_DISPATCH": "dorch", "CAPTURE": str(capture)}, body=body)
     assert proc.returncode == 2
     assert "$500 budget" in proc.stderr
@@ -357,9 +357,11 @@ def test_expensive_wave_trips_the_budget(tmp_project, tmp_path):
 
 
 def test_a_thousand_cheap_lanes_clear_the_same_budget(tmp_project, tmp_path):
-    _seed_children(tmp_project, 1000, model="gpt-5.6-luna")   # ≈ $440 reserved
+    # Enough luna-class children to pass half the $500 budget and nowhere near all of it —
+    # read off the sheet at call time, so a price refresh moves the count, not the test.
+    _seed_children(tmp_project, int(250 // reserve_usd("gpt-6-luna")) + 1, model="gpt-6-luna")
     proc = _wrapper(tmp_project, tmp_path,
-                    ["--kind", "impl", "--scope", "and another", "-m", "gpt-5.6-luna"],
+                    ["--kind", "impl", "--scope", "and another", "-m", "gpt-6-luna"],
                     env={"HIPPO_DISPATCH": "dorch"})
     assert proc.returncode == 0, proc.stderr
     assert "$500 budget" in proc.stderr      # past half: the warning names the arithmetic
@@ -370,10 +372,10 @@ def test_measured_usage_replaces_the_reservation(tmp_project, tmp_path):
     # The same budget-filling sol children, but finished and measured tiny (0.1 Mtok in,
     # 0.01 Mtok out each): the wave is really tens of dollars, so the next launch passes
     # without a word.
-    _seed_children(tmp_project, int(500 // reserve_usd("gpt-5.6-sol")),
+    _seed_children(tmp_project, int(500 // reserve_usd("gpt-6-sol")),
                    with_usage={"tokens": 110000, "tin": 100000, "tcached": 0, "tout": 10000})
     proc = _wrapper(tmp_project, tmp_path,
-                    ["--kind", "impl", "--scope", "cheap in fact", "-m", "gpt-5.6-sol"],
+                    ["--kind", "impl", "--scope", "cheap in fact", "-m", "gpt-6-sol"],
                     env={"HIPPO_DISPATCH": "dorch"})
     assert proc.returncode == 0, proc.stderr
     assert "budget" not in proc.stderr
@@ -383,24 +385,24 @@ def test_measured_usage_replaces_the_reservation(tmp_project, tmp_path):
 def test_main_is_never_gated(tmp_project, tmp_path):
     _seed_children(tmp_project, 100)         # main's own wave, however expensive
     proc = _wrapper(tmp_project, tmp_path,
-                    ["--kind", "impl", "--scope", "mains own", "-m", "gpt-5.6-sol"])
+                    ["--kind", "impl", "--scope", "mains own", "-m", "gpt-6-sol"])
     assert proc.returncode == 0, proc.stderr
     assert any(e.get("scope") == "mains own" for e in read_ledger(tmp_project))
 
 
 def test_budget_is_configurable_and_unknown_models_reserve_high(tmp_project, tmp_path):
     (tmp_project / ".hippo" / "config.yaml").write_text(
-        "dispatch:\n  max_wave_usd: 5\n", encoding="utf-8")
+        "dispatch:\n  max_wave_usd: 3\n", encoding="utf-8")
     sol = _wrapper(tmp_project, tmp_path,
-                   ["--kind", "impl", "--scope", "sol", "-m", "gpt-5.6-sol"],
+                   ["--kind", "impl", "--scope", "sol", "-m", "gpt-6-sol"],
                    env={"HIPPO_DISPATCH": "dorch"})
-    assert sol.returncode == 2               # $11 reservation alone breaks a $5 budget
-    assert "$5 budget" in sol.stderr
+    assert sol.returncode == 2               # a $4 reservation alone breaks a $3 budget
+    assert "$3 budget" in sol.stderr
 
     luna = _wrapper(tmp_project, tmp_path,
-                    ["--kind", "impl", "--scope", "luna", "-m", "gpt-5.6-luna"],
+                    ["--kind", "impl", "--scope", "luna", "-m", "gpt-6-luna"],
                     env={"HIPPO_DISPATCH": "dorch"})
-    assert luna.returncode == 0, luna.stderr  # $0.44 fits
+    assert luna.returncode == 0, luna.stderr  # $0.20 fits
 
     mystery = _wrapper(tmp_project, tmp_path,
                        ["--kind", "impl", "--scope", "who", "-m", "mystery-9000"],

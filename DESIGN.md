@@ -132,14 +132,14 @@ One line = one JSON object. Common fields: `t` (ISO8601, stamped by the writer),
 optional `src` (`scribe|cli|wrapper|executor`).
 
 ```jsonl
-{"t":"…","ev":"dispatch","id":"d041","kind":"kernel-impl","exec":"codex/gpt-5.6-sol/high","scope":"pass2 SS-UMMA tensorize","task":"feat/x"}
+{"t":"…","ev":"dispatch","id":"d041","kind":"kernel-impl","exec":"codex/gpt-6-sol/high","scope":"pass2 SS-UMMA tensorize","task":"feat/x"}
 {"t":"…","ev":"outcome","ref":"d041","result":"refuted","attr":"work","rework":2,"by":"verify/opus","note":"circular oracle reference"}
 {"t":"…","ev":"review","id":"r007","base":"abc123f","source":"chatgpt-web","findings":4}
 {"t":"…","ev":"review-status","ref":"r007","addressed":"partial","at":"def4567"}
 {"t":"…","ev":"directive","id":"gpu-01","text":"use GPUs 0 and 1 only","state":"active"}
 {"t":"…","ev":"directive","id":"gpu-01","state":"withdrawn"}
 {"t":"…","ev":"clerk","name":"turn-scribe","ms":8100,"ok":true,"tokens":1400}
-{"t":"…","ev":"usage","ref":"d041","tokens":1100000,"tin":1000000,"tcached":400000,"tout":100000,"model":"gpt-5.6-sol"}
+{"t":"…","ev":"usage","ref":"d041","tokens":1100000,"tin":1000000,"tcached":400000,"tout":100000,"model":"gpt-6-sol"}
 {"t":"…","ev":"triage","ref":"d041","route":"accept-candidate","verify":false,"p":{"done":0.95,"blocked":0.02,"ask":0.03,"creep":0.04,"evidence":0.91,"risk":1.0}}
 ```
 
@@ -372,7 +372,7 @@ hippo scribe --transcript P --session S   # internal: the Stop hook calls it det
    what it sees today, and the reason lands on stderr. With the backend off the gate does not
    exist: no row, no section, no change in behavior. Measured live on the suite's fake transcript
    (2026-09-23): 570–640ms and 873 tokens for all five questions in one request.
-4. Resolve the backend: `config.yaml > $HIPPO_CLERK_BACKEND > automatic (codex/gpt-5.6-luna/low when
+4. Resolve the backend: `config.yaml > $HIPPO_CLERK_BACKEND > automatic (codex/gpt-6-luna/low when
    codex exists, otherwise claude -p sonnet) > mock` (for tests). 120s timeout. `$HIPPO_CLERK_MODEL`
    overrides the model on whichever backend is resolved; it is one variable for both, so pin the
    backend when you set it — a model id for one backend is invalid on the other.
@@ -492,7 +492,7 @@ reads the prompt where codex's grammar puts it — the last argument, when that 
 flag-shaped and is longer than 40 characters; otherwise it asks nothing at launch — and prints
 at most two kinds of stderr note: a routed model two tiers from what the brief's difficulty
 demands (`dispatch: note — this brief reads top-tier (scope 1.0, novelty 2.8, spec 2.1) —
-launched on gpt-5.6-luna/medium`), and a brief that may contradict a live directive the lane's
+launched on gpt-6-luna/medium`), and a brief that may contradict a live directive the lane's
 capsule will carry (`dispatch: note — brief may conflict with directive <id> (0.83): …`). Notes,
 never gates: the launch goes ahead. At exit the lane is triaged over the same state a batch
 lane gets — its final message as `report`, captured through codex's `--output-last-message`
@@ -625,7 +625,7 @@ gaps 0.1–0.3 vs 2.0, a named check 0.7–0.8 vs 0.1. The output is a table, th
 earned and `<manifest>.plan.jsonl`, one record per entry so a batch's routing decision can be
 joined to its outcomes later. The notes: no `check` where the brief names nothing runnable; a
 `kind` outside the vocabulary PRIORS aggregates on; a routed model two tiers from the demand
-(`reads top-tier (…) — routed to gpt-5.6-luna/medium`); and a brief that may contradict a
+(`reads top-tier (…) — routed to gpt-6-luna/medium`); and a brief that may contradict a
 directive its lane will carry — the same pass asks `clerks/jev/brief-check.yaml`, one question
 per live directive with audience `executor|all`, and notes those at or over 0.7 (metered as
 `jev-brief`; the measured incident is a fail-closed NO-GO from contradictory clauses).

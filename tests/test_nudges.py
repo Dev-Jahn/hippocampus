@@ -10,7 +10,7 @@ from conftest import read_ledger
 
 def test_second_verdict_from_main_is_recorded_with_a_note(tmp_project, run_hippo):
     run_hippo(["log", "dispatch", "--id", "d1", "--kind", "impl",
-               "--exec", "codex/gpt-5.6-sol/high", "--scope", "x"], cwd=tmp_project)
+               "--exec", "codex/gpt-6-sol/high", "--scope", "x"], cwd=tmp_project)
     first = run_hippo(["log", "outcome", "--ref", "d1", "--result", "revised"], cwd=tmp_project)
     assert first.returncode == 0, first.stderr
     assert "already had a verdict" not in first.stderr

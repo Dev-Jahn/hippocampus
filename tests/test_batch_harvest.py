@@ -24,7 +24,7 @@ from test_batch import _batch, _journal, _manifest, _outdir, _stub
 HALF_STUB = """\
 #!/bin/sh
 for a in "$@"; do last="$a"; done
-printf 'model: gpt-5.6-luna\\n' >&2
+printf 'model: gpt-6-luna\\n' >&2
 case "$last" in
   *FAIL*)
     printf 'ModuleNotFoundError: No module named pytest\\n' >&2
@@ -76,7 +76,7 @@ def _one_lane(project, prompt="do the thing tokens=1200", entry_id="ok-lane", ar
     return _manifest(project, "wave.yaml", f"""\
         defaults:
           kind: impl
-          model: gpt-5.6-luna
+          model: gpt-6-luna
         entries:
           - id: {entry_id}
             scope: "one lane"
@@ -89,7 +89,7 @@ def _two_lanes(project):
     return _manifest(project, "wave.yaml", """\
         defaults:
           kind: impl
-          model: gpt-5.6-luna
+          model: gpt-6-luna
         entries:
           - id: ok-lane
             scope: "the lane that worked"
@@ -154,7 +154,7 @@ def test_triage_lands_at_lane_exit_with_its_route(tmp_project, tmp_path, run_hip
     assert sent["state"]["check_output"] is None
     assert sent["state"]["changes"] is None, "a lane outside a git repository shows no changes"
     assert sent["state"]["claim"] is None
-    assert "model: gpt-5.6-luna" not in sent["state"]["stderr_tail"], "banner noise is filtered"
+    assert "model: gpt-6-luna" not in sent["state"]["stderr_tail"], "banner noise is filtered"
 
     # Self-metering: one row per call, named after its spec (§2) — the plan pass reads the
     # brief before launch, the triage reads the lane after it, and the harvest reuses that.
@@ -328,7 +328,7 @@ def test_clustering_merges_failures_one_fix_would_clear(tmp_project, tmp_path, r
     manifest = _manifest(tmp_project, "wave.yaml", """\
         defaults:
           kind: impl
-          model: gpt-5.6-luna
+          model: gpt-6-luna
         entries:
           - id: bad-one
             scope: "first failure"
@@ -382,7 +382,7 @@ def test_a_rerun_relaunches_only_what_a_relaunch_could_clear(tmp_project, tmp_pa
     manifest = _manifest(tmp_project, "wave.yaml", """\
         defaults:
           kind: impl
-          model: gpt-5.6-luna
+          model: gpt-6-luna
         entries:
           - id: lane-tr
             scope: "timed out"
@@ -517,7 +517,7 @@ def test_the_outdir_files_are_where_the_state_comes_from(tmp_project, tmp_path, 
     manifest = _manifest(tmp_project, "wave.yaml", """\
         defaults:
           kind: impl
-          model: gpt-5.6-luna
+          model: gpt-6-luna
           check: "echo CHECK-SAYS-NO; exit 3"
         entries:
           - id: ok-lane
@@ -546,7 +546,7 @@ def test_the_outdir_files_are_where_the_state_comes_from(tmp_project, tmp_path, 
 VERIFY_STUB = """\
 #!/bin/sh
 for a in "$@"; do last="$a"; done
-printf 'model: gpt-5.6-luna\\n' >&2
+printf 'model: gpt-6-luna\\n' >&2
 case "$last" in
   *PROSE*)
     printf 'I read the whole diff and it holds together.\\n'
@@ -576,7 +576,7 @@ def _verify_lane(project, prompt="review the retry path"):
     return _manifest(project, "wave.yaml", f"""\
         defaults:
           kind: verify
-          model: gpt-5.6-luna
+          model: gpt-6-luna
         entries:
           - id: verifier
             scope: "boundary check of the retry path"
@@ -647,7 +647,7 @@ def test_only_a_verify_entry_is_ranked(tmp_project, tmp_path, run_hippo):
     manifest = _manifest(tmp_project, "wave.yaml", """\
         defaults:
           kind: impl
-          model: gpt-5.6-luna
+          model: gpt-6-luna
         entries:
           - id: builder
             scope: "not a verification lane"

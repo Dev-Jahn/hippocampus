@@ -40,7 +40,7 @@ def _seed(tmp_project, run_hippo):
             "--kind",
             "docs",
             "--exec",
-            "codex/gpt-5.6-luna/low",
+            "codex/gpt-6-luna/low",
             "--scope",
             "seed line",
         ],

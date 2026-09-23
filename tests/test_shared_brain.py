@@ -11,7 +11,7 @@ from conftest import read_ledger
 
 def _launch(run_hippo, cwd, did="dlane1"):
     proc = run_hippo(["log", "dispatch", "--id", did, "--kind", "impl",
-                      "--exec", "codex/gpt-5.6-sol/high", "--scope", "pass2 tensorize"],
+                      "--exec", "codex/gpt-6-sol/high", "--scope", "pass2 tensorize"],
                      cwd=cwd)
     assert proc.returncode == 0, proc.stderr
     return did
@@ -104,7 +104,7 @@ def test_mains_verdict_after_a_claim_draws_no_second_verdict_note(tmp_project, r
 
 def test_task_ref_still_resolves_to_a_claimed_dispatch(tmp_project, run_hippo):
     run_hippo(["log", "dispatch", "--id", "dt1", "--kind", "impl",
-               "--exec", "codex/gpt-5.6-sol/high", "--scope", "x", "--task", "feat/x"],
+               "--exec", "codex/gpt-6-sol/high", "--scope", "x", "--task", "feat/x"],
               cwd=tmp_project)
     _claim(run_hippo, tmp_project, "dt1")
     proc = run_hippo(["log", "outcome", "--ref", "task:feat/x", "--result", "accepted"],
@@ -311,9 +311,9 @@ def test_log_dispatch_takes_depth_and_parent(tmp_project, run_hippo):
 
 def test_usage_validation_is_fail_closed(tmp_project, run_hippo):
     run_hippo(["log", "dispatch", "--id", "du1", "--kind", "impl",
-               "--exec", "codex/gpt-5.6-luna/low", "--scope", "x"], cwd=tmp_project)
+               "--exec", "codex/gpt-6-luna/low", "--scope", "x"], cwd=tmp_project)
     ok = run_hippo(["log", "raw", json.dumps(
-        {"ev": "usage", "ref": "du1", "tokens": 500, "model": "gpt-5.6-luna"})],
+        {"ev": "usage", "ref": "du1", "tokens": 500, "model": "gpt-6-luna"})],
         cwd=tmp_project)
     assert ok.returncode == 0, ok.stderr
 
@@ -329,7 +329,7 @@ def test_usage_validation_is_fail_closed(tmp_project, run_hippo):
 
 def test_the_scribe_may_not_record_usage(tmp_project, run_hippo, fake_transcript, tmp_path):
     run_hippo(["log", "dispatch", "--id", "du1", "--kind", "impl",
-               "--exec", "codex/gpt-5.6-luna/low", "--scope", "x"], cwd=tmp_project)
+               "--exec", "codex/gpt-6-luna/low", "--scope", "x"], cwd=tmp_project)
     mock = tmp_path / "usage.json"
     mock.write_text(json.dumps({"worklog": "w", "events": [
         {"ev": "usage", "ref": "du1", "tokens": 500}]}), encoding="utf-8")
@@ -349,19 +349,19 @@ def test_priors_price_the_cells(repo_root):
     from datetime import datetime, timezone
     now = datetime(2026, 8, 2, 12, 0, 0, tzinfo=timezone.utc)
     prices = {"as_of": "2026-08-02",
-              "models": {"gpt-5.6-luna": {"input": 0.20, "cached": 0.02, "output": 1.20}}}
+              "models": {"gpt-6-luna": {"input": 0.20, "cached": 0.02, "output": 1.20}}}
     t = "2026-08-02T11:00:00Z"
 
     def d(i):
         return {"t": t, "ev": "dispatch", "id": f"d{i}", "kind": "impl",
-                "exec": "codex/gpt-5.6-luna/low", "scope": "x"}
+                "exec": "codex/gpt-6-luna/low", "scope": "x"}
 
     def o(i):
         return {"t": t, "ev": "outcome", "ref": f"d{i}", "result": "accepted", "src": "cli"}
 
     rows = [d(i) for i in range(4)] + [o(i) for i in range(4)] + [
         {"t": t, "ev": "usage", "ref": "d0", "tokens": 1100000, "tin": 1000000,
-         "tcached": 0, "tout": 100000, "model": "gpt-5.6-luna", "src": "wrapper"},
+         "tcached": 0, "tout": 100000, "model": "gpt-6-luna", "src": "wrapper"},
         {"t": t, "ev": "usage", "ref": "d1", "tokens": 7, "model": "mystery-model",
          "src": "wrapper"},
     ]

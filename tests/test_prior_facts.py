@@ -18,7 +18,7 @@ def _t(minutes_ago):
     return (NOW - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _d(did, kind="impl", ex="codex/gpt-5.6-sol/xhigh", minutes_ago=60, task=None):
+def _d(did, kind="impl", ex="codex/gpt-6-sol/xhigh", minutes_ago=60, task=None):
     e = {"t": _t(minutes_ago), "ev": "dispatch", "id": did, "kind": kind, "exec": ex,
          "scope": "x"}
     if task:
@@ -52,7 +52,7 @@ def test_a_refutation_is_never_rounded_away():
     rows += [_o(f"d{i}") for i in range(4)] + [_o("d4", "refuted")]
     out = facts(rows)
     assert "4/5 (80.0%)" in out
-    assert "| codex/gpt-5.6-sol/xhigh | 5 | 1 | 20.0% |" in out
+    assert "| codex/gpt-6-sol/xhigh | 5 | 1 | 20.0% |" in out
 
 
 def test_a_thin_cell_gets_no_rate_but_is_still_named():
@@ -62,7 +62,7 @@ def test_a_thin_cell_gets_no_rate_but_is_still_named():
     out = facts(rows)
     assert "100.0%" not in out
     assert "below the n=4 threshold" in out
-    assert "research×codex/gpt-5.6-sol/xhigh (n=1)" in out
+    assert "research×codex/gpt-6-sol/xhigh (n=1)" in out
 
 
 def test_only_the_first_outcome_decides_first_pass():
@@ -135,20 +135,20 @@ def test_the_page_and_plan_mode_read_the_same_cells():
                  "src": "executor"})  # a claim is not a verdict and enters no cell
 
     cells = hippo_cli.prior_cells(rows)
-    cell = cells[("impl", "codex/gpt-5.6-sol/xhigh")]
+    cell = cells[("impl", "codex/gpt-6-sol/xhigh")]
     assert (cell["judged"], cell["accepted"]) == (5, 4)
     assert hippo_cli.prior_n(cell) == 5
-    assert hippo_cli.prior_n(cells[("verify", "codex/gpt-5.6-sol/xhigh")]) == 0
+    assert hippo_cli.prior_n(cells[("verify", "codex/gpt-6-sol/xhigh")]) == 0
 
     # And the page renders from exactly those numbers.
-    assert "| impl | codex/gpt-5.6-sol/xhigh | 5 | 4/5 (80.0%)" in facts(rows)
+    assert "| impl | codex/gpt-6-sol/xhigh | 5 | 4/5 (80.0%)" in facts(rows)
 
 
 def test_the_clerk_is_not_handed_the_raw_ledger(tmp_project, run_hippo, tmp_path):
     """The point of computing the numbers here is that there is nothing left to compute from —
     sending the events anyway would put them back within reach."""
     run_hippo(["log", "dispatch", "--id", "d1", "--kind", "impl",
-               "--exec", "codex/gpt-5.6-sol/high", "--scope", "a distinctive scope string"],
+               "--exec", "codex/gpt-6-sol/high", "--scope", "a distinctive scope string"],
               cwd=tmp_project)
     captured = tmp_path / "payload.txt"
     mock = tmp_path / "priors.md"
