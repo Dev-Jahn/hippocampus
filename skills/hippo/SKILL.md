@@ -61,5 +61,5 @@ hippo dispatch --batch <manifest.yaml> [--dry-run]
 - The dispatch wrapper records the launch, the lane's usage and its triage.
 - Recording through the CLI only raises certainty; nothing breaks if you skip a record.
 
-In Claude Code `hippo` is on PATH. **In Codex it is not** — resolve `../../bin/hippo` relative
-to this SKILL.md into an absolute path and call that.
+In Claude Code, and in any lane `hippo dispatch` launched, `hippo` is on PATH. **In a Codex main
+session it is not** — resolve `../../bin/hippo` relative to this SKILL.md into an absolute path.

@@ -447,7 +447,10 @@ exactly the point to collect them automatically (principle 6). It takes the `--k
 `-c service_tier="fast"` to the codex arguments — a per-launch latency choice carried in argv like
 the rest of codex's grammar, invisible to the exec axis. It also plants
 `HIPPO_DISPATCH=<id>`, `HIPPO_DEPTH` and `HIPPO_DIR`
-in the child's environment — the whole of the executor data plane's wiring (§9.1, §9.2, §9.5). A
+in the child's environment, and puts its own `bin/` first on the child's `PATH` — the whole of the
+executor data plane's wiring (§9.1, §9.2, §9.5). The `PATH` entry exists because codex adds no
+plugin `bin/` (§8), and the dispatch skill had told main to pin the absolute `bin/hippo` in
+COMMON.md: a versioned cache path that the next plugin update deleted (1.14.2, found in steno). A
 launch made from inside a lane records that lane as `parent`. Since 1.10.0 the wrapper is a
 pass-through rather than an exec: it stays alive to *read* (never rewrite) the stream — the
 banner's session id and model, the "tokens used" footer — and at lane exit records `ev:usage`
@@ -711,7 +714,7 @@ engine (measured on 0.144.6).
 |---|---|---|
 | Manifest | `.claude-plugin/plugin.json` | `.codex-plugin/plugin.json` (names the `skills` and `hooks` paths) |
 | Hooks | `hooks/hooks.json` | **the same file** — event keys (PascalCase), matcher, stdin payload fields and the SessionStart `hookSpecificOutput.additionalContext` envelope are all identical (codex ≥0.146 rejects bare text, §3.4) |
-| Plugin `bin/` | added to PATH automatically | **not added** → a skill resolves `bin/hippo` relative to its own SKILL.md |
+| Plugin `bin/` | added to PATH automatically | **not added** → a skill resolves `bin/hippo` relative to its own SKILL.md; a dispatched lane gets it from the wrapper (§3.6) |
 | Transcript | Claude JSONL | codex rollout JSONL — `digest_lite.py` detects the format from the first lines and reduces both to the same line vocabulary |
 
 Constraints specific to codex (0.144.6):

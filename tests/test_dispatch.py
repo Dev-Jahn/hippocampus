@@ -3,7 +3,7 @@ import os
 import re
 import subprocess
 
-from conftest import SCRIPTS_DIR, read_ledger, reserve_usd
+from conftest import REPO_ROOT, SCRIPTS_DIR, read_ledger, reserve_usd
 
 
 def _stub_codex(tmp_path, body="#!/bin/sh\nexit 0\n"):
@@ -232,6 +232,14 @@ def test_the_wrapper_plants_the_ledger_it_recorded_into(tmp_project, tmp_path):
     proc = _wrapper(tmp_project, tmp_path, ["--kind", "impl", "--scope", "lane"], body=body)
     assert proc.returncode == 0, proc.stderr
     assert f"DIR={tmp_project.resolve() / '.hippo'}" in proc.stdout
+
+
+def test_a_lane_finds_the_hippo_that_launched_it_on_path(tmp_project, tmp_path):
+    # Codex puts no plugin bin/ on PATH; the wrapper does, so no brief pins a versioned cache path.
+    body = '#!/bin/sh\nprintf "HIPPO=%s" "$(command -v hippo)"\n'
+    proc = _wrapper(tmp_project, tmp_path, ["--kind", "impl", "--scope", "lane"], body=body)
+    assert proc.returncode == 0, proc.stderr
+    assert f"HIPPO={REPO_ROOT / 'bin' / 'hippo'}" in proc.stdout
 
 
 def test_a_launch_inside_a_lane_records_its_parent(tmp_project, tmp_path):

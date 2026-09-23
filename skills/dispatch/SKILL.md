@@ -49,15 +49,17 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   `--fast` = codex's fast service tier, same exec axis.
 - **Sandbox**: the bypass flag because the lane runs unattended (the worktree makes it safe),
   `--skip-git-repo-check` because the worktree's `.git` is a file. Drop both for read-only lanes.
-- The wrapper records the launch, closes stdin, and plants `HIPPO_DISPATCH`/`HIPPO_DEPTH`/
-  `HIPPO_DIR`: the lane's capsule carries its directives and report line, and its
+- The wrapper records the launch, closes stdin, plants `HIPPO_DISPATCH`/`HIPPO_DEPTH`/
+  `HIPPO_DIR`, and puts its own `bin/` first on the lane's PATH (a bare `hippo` works on both
+  hosts): the lane's capsule carries its directives and report line, and its
   `log outcome` is a **claim** — the verdict is main's. Launch through `run_in_background`,
   never nohup/disown (orphans). A codex argument that collides with a wrapper flag goes after `--`.
 - `--depth 1` = an orchestrator lane that may spawn; its children start at 0. Lane-origin
   launches pass a dollar breaker ($500 per parent per 24h, `dispatch: {max_wave_usd: N}` in
   `.hippo/config.yaml`); main is never gated.
-- **COMMON.md carries only what nothing injects**: the seeded bootstrap, the absolute `bin/hippo`
-  path on the Codex host (its `bin/` is not on PATH), and shared task background.
+- **COMMON.md carries only what nothing injects**: the seeded bootstrap and shared task
+  background. Never a `bin/hippo` path — cache paths carry the plugin version and the next
+  update deletes them.
 - **Neutral vocabulary**: GPU memory "overlap", "contamination", "injection" tripped the
   executor's content filter ten times — write safety statements in neutral academic terms.
 - To steer a lane mid-flight, kill it and resume by explicit session id (never `--last` when
