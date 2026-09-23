@@ -2764,11 +2764,28 @@ def triage_line(t):
     return f"triage {t['route']} ({nums} · verify {'yes' if t['verify'] else 'no'})"
 
 
+def lane_report(en, outdir):
+    """What the lane said, as the judge should read it. A codex lane's stdout is the agent's
+    own output; a claude lane's is the one JSON object `claude -p --output-format json` prints,
+    whose `result` is the report and whose other keys (usage, ids, model lists) are volume
+    without signal. Measured on the first two claude lanes judged: both routed `escalate` on
+    scope_creep .87–.96 with a clean tree — the envelope was being read as the report. An
+    envelope that does not parse is handed over whole, never dropped."""
+    text = _read_text(outdir / f"{en['id']}.out")
+    if text is None or en.get("executor") != "claude":
+        return text
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    return obj["result"] if isinstance(obj, dict) and isinstance(obj.get("result"), str) else text
+
+
 def triage_entry(hp, en, ex, outdir, claim, jrnl):
     """A batch lane's triage → its journal record. The files in the outdir are the lane."""
     eid = en["id"]
     state = triage_state(en.get("scope"), en.get("kind"), en.get("prompt"), ex, claim,
-                         _read_text(outdir / f"{eid}.out"),
+                         lane_report(en, outdir),
                          stderr_excerpt(outdir / f"{eid}.err"),
                          _read_text(outdir / f"{eid}.check"),
                          lane_dir(en.get("args"), en["cwd"]))
@@ -3006,7 +3023,7 @@ def run_harvest(mp, entries, journal, outdir, hp, fresh=()):
         if rec:
             r.update(route=rec["route"], verify=rec["verify"], answers=rec["answers"] or {})
         if on and en.get("kind") == "verify":
-            r["findings"] = rank_findings(hp, en, _read_text(outdir / f"{en['id']}.out"),
+            r["findings"] = rank_findings(hp, en, lane_report(en, outdir),
                                           ex.get("attempt"), jrnl)
         rows.append(r)
         if r["route"] == "failed":

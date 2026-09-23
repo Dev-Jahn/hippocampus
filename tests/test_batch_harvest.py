@@ -16,7 +16,7 @@ import subprocess
 
 import pytest
 
-from conftest import read_ledger
+from conftest import REPO_ROOT, read_ledger
 from test_batch import _batch, _journal, _manifest, _outdir, _stub
 
 # codex 0.144.6 (measured): the banner rides stderr. `FAIL` in the prompt makes this stub the
@@ -668,3 +668,21 @@ def test_with_the_judge_off_a_verify_lane_harvests_as_it_always_did(tmp_project,
     assert "judge off — no TYPESAFE_API_KEY" in proc.stderr
     assert _records(manifest, "findings") == []
     assert [ln for ln in proc.stdout.splitlines() if ln.startswith("  ▸")] == []
+
+
+def test_a_claude_lane_report_is_the_result_field_not_the_json_envelope(tmp_path):
+    """`claude -p --output-format json` prints one envelope; the judge reads its `result`.
+    Measured: the envelope routed two clean lanes to `escalate` on scope_creep."""
+    import sys as _sys
+    cli = str(REPO_ROOT / "cli")
+    if cli not in _sys.path:
+        _sys.path.insert(0, cli)
+    import hippo_cli
+    outdir = tmp_path
+    (outdir / "c.out").write_text(json.dumps({"result": "all done", "usage": {"x": 1}}), encoding="utf-8")
+    (outdir / "x.out").write_text(json.dumps({"result": "agent text"}), encoding="utf-8")
+    (outdir / "b.out").write_text("{not json", encoding="utf-8")
+    assert hippo_cli.lane_report({"id": "c", "executor": "claude"}, outdir) == "all done"
+    assert hippo_cli.lane_report({"id": "x", "executor": "codex"}, outdir).startswith("{")
+    assert hippo_cli.lane_report({"id": "b", "executor": "claude"}, outdir) == "{not json"
+    assert hippo_cli.lane_report({"id": "missing", "executor": "claude"}, outdir) is None
