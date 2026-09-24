@@ -38,6 +38,12 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   "$(cat .hippo/briefs/COMMON.md .hippo/briefs/pass2.md)"
 ```
 
+- **On Claude Code, launch a single lane through the lane agent**: `Agent(subagent_type:
+  "hippo:lane", description: "<scope>", prompt: "<the hippo dispatch command above>")`. The
+  lane gets a row in the agent panel with its latest command or message (Enter opens it, x
+  stops it — the kill is recorded), and one notification arrives when it ends: rc, triage,
+  report path, raw-log path. Read the report from there. The plain Bash form stays for the
+  Codex host and for a lane launched from inside a lane.
 - **`--kind` is the PRIORS axis — reuse a tag**: `impl fix perf verify audit design research
   spike docs infra chore` (one ledger carried 26 tags over 108 dispatches, 19 used once). The
   subject goes in `--scope`.
@@ -52,10 +58,10 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
 - The wrapper records the launch, closes stdin, plants `HIPPO_DISPATCH`/`HIPPO_DEPTH`/
   `HIPPO_DIR`, and puts its own `bin/` first on the lane's PATH (a bare `hippo` works on both
   hosts): the lane's capsule carries its directives and report line, and its
-  `log outcome` is a **claim** — the verdict is main's. Launch through `run_in_background`,
-  never nohup/disown (orphans), and never redirect its output (`> log 2>&1`): the wrapper keeps
-  codex's raw stderr in `.hippo/lanes/<id>.log` and the report in `<id>.out`, and prints one
-  short line per command or message. A killed lane still records its rc and usage. A codex
+  `log outcome` is a **claim** — the verdict is main's. The plain form launches through
+  `run_in_background`, never nohup/disown (orphans), and never redirects its output
+  (`> log 2>&1`): the wrapper keeps codex's raw stderr in `.hippo/lanes/<id>.log` and the
+  report in `<id>.out`, and prints one short line per command or message. A killed lane still records its rc and usage. A codex
   argument that collides with a wrapper flag goes after `--`.
 - `--depth 1` = an orchestrator lane that may spawn; its children start at 0. Lane-origin
   launches pass a dollar breaker ($500 per parent per 24h, `dispatch: {max_wave_usd: N}` in

@@ -39,6 +39,8 @@ The plugin, its slash commands, and the CLI are all named `hippo`.
   session into worklog + ledger events, `distiller` regenerates `PRIORS.md`
   (the scribe runs it when the page is a week old and five new verdicts have
   landed; `hippo prior distill` runs it by hand).
+- **agent** (`agents/lane.md`, Claude Code) — `hippo:lane` runs one codex lane so it has a
+  row in the agent panel, and hands main the lane's final lines when it ends.
 - **skills** (`skills/*`) — `hippo` (the whole CLI grammar, one screen),
   `checkup` (project diagnosis, recommend-first), `dispatch` (delegation
   lanes with evidence-proportional verification).

@@ -440,3 +440,15 @@ def test_watch_outside_a_project_says_where_records_live(uninitialized_dir):
     (uninitialized_dir / ".git").mkdir()
     proc = _watch(uninitialized_dir, "dabc")
     assert proc.returncode == 2 and "lane records live in .hippo/lanes/" in proc.stderr
+
+
+def test_the_lane_agent_is_a_haiku_relay_with_bash_alone():
+    """A frontmatter Claude Code cannot parse drops the agent without a word, and every lane
+    launched through it would fail to start."""
+    import yaml
+    text = (REPO_ROOT / "agents" / "lane.md").read_text(encoding="utf-8")
+    m = re.match(r"---\n(.*?)\n---\n", text, re.S)
+    front = yaml.safe_load(m.group(1))
+    assert (front["name"], front["model"], front["tools"]) == ("lane", "haiku", "Bash")
+    assert "run_in_background: true" in text and "hippo dispatch --watch <id>" in text
+    assert re.search(r"grep -m1 -o 'dispatch:d\[0-9a-f\]\*'", text)

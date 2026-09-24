@@ -93,6 +93,7 @@ Judge guardrails (invariant):
 ```
 runtime (thin):   bin/hippo (shim) + cli/hippo_cli.py + 2 hooks + scripts/{clerk_run,digest_lite,dispatch}
 cognition (text): clerks/{turn-scribe,distiller}.md + clerks/jev/*.yaml + skills/{hippo,checkup,dispatch}
+                  + agents/lane.md
 resident (small): the capsule injected at SessionStart (§6 below)
 enforcement:      none
 ```
@@ -519,6 +520,27 @@ is `lost` if not. Once the lane ended it waits up to 2s for the wrapper to exit,
 that ran the lane finishes inside the call rather than after it; `--for 0` is a one-shot read.
 It exists for the lane agent below, which must keep its turn open while the lane runs — and a
 blocking foreground call, never a sleep, is what keeps it open.
+
+**The lane agent** (`agents/lane.md`, Claude Code). A codex lane launched as
+`Agent(subagent_type: "hippo:lane", description: "<scope>", prompt: "<the hippo dispatch
+command>")` gets a row in the agent panel — Enter opens its transcript, x stops it, and the
+kill trap records the stop. The agent is haiku with Bash alone: it runs the command verbatim
+in the background, reads the id off its output's `dispatch:<id>` line, loops `--watch` in the
+foreground, and replies with the final lines, which reach main as the one completion
+notification. Measured before building (spike, 2026-09-24): an agent that ends its turn while
+its background job runs shows `completed` on its row, and main then gets an interim
+notification plus an extra wake-up turn when the job ends; an agent whose turn stays open on
+blocking calls causes neither. Measured end to end (2.1.281, a stub codex behind a real
+hippo:lane, 2026-09-24): main got one notification per lane — the lane shell's own completion
+reached the agent inside its last watch call, not after its turn — and x on the row was
+recorded `killed by SIGTERM`, triage included, within a second. The relay's cost on a 1m27s
+lane: 4 haiku calls, 17.1k cache-read + 7.1k cache-write + 1.5k output tokens (≈$0.02 at API
+list price), 7.6k final context; each further 9-minute watch window adds one call of about 7k
+cache-read tokens. It is a relay, not the delegate
+surface §4 retired: it routes nothing and binds no role — main still chose the exec in the
+command it hands over — and it never edits that command, stops the lane or does its work, so
+no judgment of its own reaches the record. The plain Bash form stays for the Codex host, which
+has no agent panel, and for a lane launched from inside a lane.
 
 Why it is a CLI subcommand: a plugin puts only `bin/` on PATH, and `${CLAUDE_PLUGIN_ROOT}` is empty
 in an ordinary Bash call. Leaving it in `scripts/` means every consuming project grows its own shim
