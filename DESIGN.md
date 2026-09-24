@@ -67,7 +67,8 @@ Clerk guardrails (invariant):
   files; it never edits configuration or CLAUDE.md directly (it may propose, no more).
 - **Self-metering**: running a clerk is itself recorded in the ledger (`ev:clerk`).
 - **A variant of "no silent death"**: the system survives a dead clerk by design, but it never fills
-  the gap by inventing content. Failures land in `failures/` and checkup reports them.
+  the gap by inventing content. Failures land in `failures/` and checkup reports them; a scribe
+  failing three runs in a row also puts one line in the capsule (§6).
 
 Judge guardrails (invariant):
 
@@ -832,6 +833,16 @@ The `cli:` line is main's only (a lane has its `report:` line instead): the comm
 because the capsule is what re-arrives after a compaction and that is exactly when the grammar
 was being re-read — measured, 405 `--help` calls across 19 projects, and 59 of Codex's 96 (61%)
 came within 30 tool calls of a compaction.
+
+A `scribe:` line (main's only) appears when the latest three or more `ev:clerk name:turn-scribe`
+rows all failed — the streak and the newest scribe dump's first line, which carries the backend's
+own first words —
+`· scribe: the last 7 runs failed — clerk rc=1: codex: ERROR: unexpected status 401 Unauthorized… (.hippo/failures/)`.
+Measured on b200 (2026-09-24): the scribe failed 7 runs in a row on an expired codex login and
+nothing said so, and each dump read `clerk rc=1` over an empty stderr — `clerk_run.sh` threw the
+backend's stderr away. It now keeps it in a temp file and, on a non-zero exit, prints the last
+error lines, the cause first. One failure is noise (a timeout, a flaky network); three in a row is
+an organ that stopped working.
 
 `in flight` is delegations launched and not yet judged, within 24h, **counting only what a
 launcher wrote** (`src` `wrapper`/`cli`). A lane's self-report does not land an entry — it rides

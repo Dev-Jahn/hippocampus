@@ -913,6 +913,33 @@ def in_flight(hp):
     return out
 
 
+SCRIBE_FAILING_AT = 3  # this many turn-scribe runs failed in a row earns a capsule line
+
+
+def scribe_failing(hp):
+    """The capsule line for a scribe that keeps failing, or None (§6, main's capsule only).
+
+    Measured on b200 (2026-09-24): the scribe failed 7 runs in a row on an expired codex login
+    and nothing said so — every dump sat in failures/, which nothing mentions until checkup
+    runs. One failure is noise (a timeout, a flaky network), so the line waits for three in a
+    row, and it quotes the newest scribe dump's first line: the reason, carrying the backend's
+    own first words when it said any (clerk_run.sh puts the cause first)."""
+    runs = [e.get("ok") for e in read_ledger(hp)
+            if e.get("ev") == "clerk" and e.get("name") == "turn-scribe"]
+    n = 0
+    for ok in reversed(runs):
+        if ok is not False:
+            break
+        n += 1
+    if n < SCRIBE_FAILING_AT:
+        return None
+    # A dump name starts with its second-resolution stamp, so name order is time order.
+    dumps = sorted((hp / "failures").glob("*-scribe-*"))
+    head = (_read_text(dumps[-1]) or "").strip().splitlines() if dumps else []
+    cause = f" — {one_line(head[0], 100)}" if head else ""
+    return f"· scribe: the last {n} runs failed{cause} (.hippo/failures/)"
+
+
 def status_lines(hp):
     """DESIGN §6 resident surface (header + live directives + in flight + last).
 
@@ -993,6 +1020,9 @@ def status_lines(hp):
             "long runs go to background — never poll with a foreground sleep"
         )
     else:
+        failing = scribe_failing(hp)
+        if failing:
+            lines.append(failing)
         # The grammar, where main re-reads after a compaction. Measured: 405 `--help` calls in
         # 19 projects, 59 of Codex's 96 within 30 tool calls of a compaction — the moment this
         # capsule re-arrives. A lane has its `report:` line instead.
@@ -3894,7 +3924,10 @@ def cmd_scribe(args):
         die(f"scribe failed: {reason} — dump: {p}")
 
     if rc != 0:
-        fail(f"clerk rc={rc}")
+        # The backend's own first words ride the reason line (clerk_run.sh puts the cause
+        # first on stderr): it is the line the capsule quotes once the failures repeat (§6).
+        cause = next((ln.strip() for ln in err.splitlines() if ln.strip()), "")
+        fail(f"clerk rc={rc}" + (f": {cause}" if cause else ""))
     obj = extract_json(out)
     if obj is None:
         fail("no JSON object found")

@@ -79,3 +79,35 @@ def test_model_override_lands_on_either_backend(tmp_path):
 def test_auto_with_no_backend_exits_3(tmp_path):
     proc, _ = _run_clerk(tmp_path, [])
     assert proc.returncode == 3
+
+
+FAILING_CODEX = """#!/bin/sh
+echo "OpenAI Codex v0.156.1" >&2
+echo "ERROR: Reconnecting... 5/5" >&2
+echo "ERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication" >&2
+exit 1
+"""
+
+
+def test_a_failing_backend_says_why_in_the_scribe_dump(tmp_project, run_hippo, fake_transcript,
+                                                       tmp_path):
+    """Measured on b200: 7 failed scribe runs whose dumps all read `clerk rc=1` with an empty
+    stderr — clerk_run.sh threw codex's stderr away. Its last error line is the cause, and it
+    now leads the dump (the line the capsule quotes)."""
+    stub = tmp_path / "stub-bin"
+    stub.mkdir()
+    codex = stub / "codex"
+    codex.write_text(FAILING_CODEX, encoding="utf-8")
+    codex.chmod(0o755)
+    proc = run_hippo(
+        ["scribe", "--transcript", str(fake_transcript), "--session", "s-fail"],
+        cwd=tmp_project,
+        env={"HIPPO_CLERK_BACKEND": "codex", "PATH": f"{stub}:{os.environ['PATH']}"},
+    )
+    assert proc.returncode != 0
+    [dump] = (tmp_project / ".hippo" / "failures").glob("*-scribe-*")
+    text = dump.read_text(encoding="utf-8")
+    assert text.splitlines()[0] == (
+        "clerk rc=1: codex: ERROR: unexpected status 401 Unauthorized: Missing bearer or basic "
+        "authentication")
+    assert "ERROR: Reconnecting... 5/5" in text.split("--- stderr ---", 1)[1]
