@@ -485,11 +485,12 @@ sixteen real logs) and per agent message (`… · said: <first sentence, ≤120 
 one line per 3s with the newest event winning, then the final line (`exited rc=0 · 14 cmds ·
 187,135 tokens · raw log <path>`) and the triage line. No compact line may read as a prompt:
 Claude Code wakes main when a background shell has not grown for 45s and its last line matches
-`Continue?`, `Overwrite?`, `Press any key|Enter`, `(y/n)` or a `Do you|Would you|Shall I|Are you
-sure|Ready to …?` question, so the three characters those need — `?`, the space after `Press`,
-the slash of `(y/n)` — are swapped for look-alikes. `.hippo/lanes/<id>.json` holds only what
-the rollout cannot give back cheaply — `id scope exec pid pgid started codex_session cmds last
-last_at log report`, then `status` (`exited|killed`), `rc`, `signal`, `triage` and, written
+one of seven patterns in its binary — `(y/n)`, `[y/n]`, `(yes/no)`, a `Do you|Would you|Shall
+I|Are you sure|Ready to …?` question, `Press any key|Enter` (no word boundary: `express any key`
+matches), `Continue?`, `Overwrite?` — so the three characters those need — `?`, the space after
+`press`, the slash of `y/n` — are swapped for look-alikes. `.hippo/lanes/<id>.json` holds only
+what the rollout cannot give back cheaply — `id scope exec pid pgid started codex_session cmds
+last last_at log report` (paths absolute: the record is read from any cwd), then `status` (`exited|killed`), `rc`, `signal`, `triage` and, written
 last, `ended` — rewritten whole at the stream's cadence, and a new lane start prunes lane files
 older than 7 days (no schedule, §4). Batch lanes run through the same machinery: `<id>.err`
 keeps its shape as the raw log, the compact lines join the batch's stderr, and each lane gets
@@ -498,10 +499,13 @@ a temp file the final line names.
 
 **The kill trap.** codex runs in a session of its own, so a signal reaches it only through the
 wrapper: SIGTERM, SIGHUP and SIGINT are forwarded to codex's process group (SIGKILL after 5s if
-it lingers, and whatever of the group outlives codex is killed with it), the lane is recorded
-`killed` with its signal and rc, `ev:usage` comes from the rollout as on any exit, triage runs
-when the judge is on, and the wrapper exits 128+signal (a batch stops launching, signals every
-running lane and exits the same way; rerunning it resumes). Before 1.15.0 a killed lane recorded
+it lingers, and whatever of the group outlives codex is killed with it), the record says
+`killed` and the signal within 0.5s — not once codex has exited: a stub codex taking 3s to exit
+was SIGKILLed with its wrapper before either was on record — and gets its rc when codex exits,
+`ev:usage` comes from the rollout as on any exit, triage runs when the judge is on, and the
+wrapper exits 128+signal (a batch stops launching, signals every running lane and exits the
+same way; rerunning it resumes). The handlers hold only while codex can run: a signal during
+the launch notes, or during a batch's harvest, takes its default action and stops the wrapper. Before 1.15.0 a killed lane recorded
 no rc, no usage and no triage — and Claude Code does kill background shells: under critical
 memory pressure once main has been idle 30 minutes with no agent running, and with a stopped
 agent's shells. Its kill is SIGTERM to the whole process tree, then SIGKILL 1.5s later
@@ -516,8 +520,8 @@ and exits 3; ended, it prints the final lines — `lane <id> exited rc=0 after 5
 no record is 2, outside a project too (like the launch, this surface is never silent: a
 watcher told nothing would read it as an end). It reads `.hippo/lanes/` and writes nothing.
 A record without `ended` whose
-wrapper pid is gone has ended if it holds a status (the wrapper died while the judge read) and
-is `lost` if not. Once the lane ended it waits up to 2s for the wrapper to exit, so the shell
+wrapper pid is gone has ended if it holds a status (the wrapper died before codex exited, or
+while the judge read) and is `lost` if not. Once the lane ended it waits up to 2s for the wrapper to exit, so the shell
 that ran the lane finishes inside the call rather than after it; `--for 0` is a one-shot read.
 It exists for the lane agent below, which must keep its turn open while the lane runs — and a
 blocking foreground call, never a sleep, is what keeps it open.
@@ -550,7 +554,8 @@ dispatch id from that agent's transcript (the last `dispatch:<id>` or `--watch <
 the prompt, which comes first, is main's text and may quote other ids), reads
 `.hippo/lanes/<id>.json` walking up from the row's cwd, and prints `{"id": …, "content": "codex
 · <scope> · <elapsed> · <cmds> cmds · <last event>"}`, cut to the row's width; an ended lane
-shows its status, rc and duration instead. Every other row is left out, which keeps Claude
+shows its status, rc and duration instead, and one whose wrapper is gone with no status shows
+`lost` — never a timer still counting. Every other row is left out, which keeps Claude
 Code's own rendering (measured, 2.1.281: `◯ general-purpose  <description> … 15s · ↓ 20.3k
 tokens`; documented: an omitted id keeps the default, an empty content hides the row) — a
 printed row replaces the whole default, type, description and stats alike. Stdlib only and no
@@ -562,9 +567,14 @@ it expanded to nothing), the documented placeholder list covers skill and agent 
 and monitor commands and MCP/LSP servers only, the plugin `bin/` is on the Bash tool's PATH
 but not this command's, and the command runs in the project directory. So the command is a
 short `sh` walk up from there to `.hippo/lanes/.statusline`, a pointer holding the script's
-absolute path that every lane start rewrites — the wrapper is the one process that knows where
-the plugin lives — and a project that never launched a lane pays one `sh` per tick and no
-python. After a plugin update the pointer names a deleted cache path until the next lane
+absolute path that every lane start rewrites (best effort: lanes starting in one instant share
+its tmp file, and a lost rename must not cost a lane its record) — the wrapper is the one
+process that knows where the plugin lives — and a project that never launched a lane pays one
+`sh` per tick and no python. The pointer is data that names code the command runs as the user,
+on every tick of any session with the plugin on, so the walk stops where `find_hippo` does (a
+`.git` directory, `$HOME`: an ancestor's `.hippo/` may be another user's — a world-writable
+`/tmp` is one), and it runs only an absolute `…/scripts/lane_status.py` the user owns, named by
+a pointer the user owns. After a plugin update the pointer names a deleted cache path until the next lane
 start, and until then every row keeps its default. The plugin's value is a default: a user's
 own `subagentStatusLine` replaces it (and would have to render hippo:lane rows itself).
 

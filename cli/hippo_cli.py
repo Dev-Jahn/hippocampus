@@ -2190,14 +2190,15 @@ def unprompt(text):
     """A compact line that cannot read as an interactive prompt.
 
     Claude Code wakes main when a background shell has not grown for 45s and its last line
-    looks like a prompt: `Continue?`, `Overwrite?`, `Press any key|Enter`, `(y/n)`, or `Do
-    you|Would you|Shall I|Are you sure|Ready to … ?` at the end (measured, 2.1.281). A lane
+    looks like a prompt: `(y/n)`, `[y/n]`, `(yes/no)`, `Do you|Would you|Shall I|Are you
+    sure|Ready to … ?` at the end, `Press any key|Enter` (anywhere, `express any key` too),
+    `Continue?` or `Overwrite?` — seven patterns, read from the 2.1.281 binary. A lane
     thinking for a minute after `said: Shall I start with the parser?` would wake main for
-    nothing. Each shape needs a literal `?`, the plain space after `Press` or the plain slash
-    in `(y/n)`, so exactly those are swapped for look-alikes — a person reads the same line."""
+    nothing. Each shape needs a literal `?`, the plain space after `press` or the plain slash
+    in `y/n`, so exactly those are swapped for look-alikes — a person reads the same line."""
     text = text.replace("?", "\uff1f")
-    text = re.sub(r"(?i)\b(press) (any key|enter)", "\\1\u00a0\\2", text)
-    return re.sub(r"(?i)\((y)/(n)\)", "(\\1\u2215\\2)", text)
+    text = re.sub(r"(?i)(press) (any key|enter)", "\\1\u00a0\\2", text)
+    return re.sub(r"(?i)\b(y|yes)/(n|no)\b", "\\1\u2215\\2", text)
 
 
 def codex_command(line):
@@ -2229,7 +2230,15 @@ def lanes_dir(hp):
             pass  # a directory, or a concurrent prune got there first
     ptr, script = d / LANE_STATUSLINE, str(SCRIPTS / "lane_status.py")
     if _read_text(ptr) != script:
-        write_durable(ptr, script)
+        # Lanes started in the same instant rewrite it through one tmp file, and every loser's
+        # rename fails (measured: 2 of 3 simultaneous starts). The winner wrote the same path,
+        # so only a pointer still not ours makes a sound — never the lane's record.
+        try:
+            write_durable(ptr, script)
+        except OSError as err:
+            if _read_text(ptr) != script:
+                print(f"dispatch: {ptr} not written ({err}) — agent-panel rows keep their "
+                      "default", file=sys.stderr)
     return d
 
 
@@ -2258,7 +2267,8 @@ class Lane:
         self.t0 = time.monotonic()
         self.rec = {"id": did, "scope": scope, "exec": exec_, "pid": os.getpid(), "pgid": None,
                     "started": now_iso(), "codex_session": None, "cmds": 0, "last": None,
-                    "last_at": None, "log": str(log), "report": str(report) if report else None}
+                    "last_at": None, "log": str(Path(log).absolute()),
+                    "report": str(Path(report).absolute()) if report else None}
         self.session_id = self.model = ""
         self.footer_total = None
         self.tail = collections.deque(maxlen=400)  # what triage reads of stderr — never more
@@ -2321,11 +2331,17 @@ class Lane:
         self.out.flush()
 
     def tick(self):
-        """Emit the newest pending event and write the record, when the cadence allows."""
+        """Emit the newest pending event and write the record, when the cadence allows — and a
+        stop at once, whatever the cadence (see stop)."""
+        stopped = self.signal is not None and "status" not in self.rec
+        if stopped:
+            self.rec.update(status="killed", signal=signal.Signals(self.signal).name)
         if self._pending is not None and time.monotonic() - self._said >= LANE_EVERY:
             self._said = time.monotonic()
             self.say(self._pending)
             self._pending = None
+            self.write()
+        elif stopped:
             self.write()
 
     def write(self):
@@ -2340,7 +2356,12 @@ class Lane:
                       file=sys.stderr)
 
     def stop(self, signum):
-        """A signal to the wrapper: remembered, and forwarded to codex's process group."""
+        """A signal to the wrapper: remembered, and forwarded to codex's process group. The
+        record learns of it on pump_lane's next wake (≤0.5s), not when codex has exited: Claude
+        Code SIGKILLs the tree 1.5s after its SIGTERM, and a codex slower than that to exit left
+        no status at all (measured, a stub taking 3s). Not written from here: a handler that
+        interrupts a write in progress would rewrite the same tmp file under it. rc follows
+        in finish, when there is one."""
         if self.signal is None:
             self.signal, self._signal_at = signum, time.monotonic()
         self.kill(signum)
@@ -2385,7 +2406,10 @@ def pump_lane(child, lane, raw, deadline=None):
     """Read codex's stderr to its end — every line into the raw log (bytes, unmodified), every
     line through the lane's parser — while the compact stream keeps its cadence through
     codex's silences: a reader thread feeds a queue and this loop wakes twice a second. Stops
-    LANE_DRAIN after codex exits even if a child it left behind still holds stderr open.
+    LANE_DRAIN after codex exits even if a child it left behind still holds stderr open — and
+    keeps writing to it: a cutoff checked only on a silent poll never fired for a child that
+    logs every 0.2s, and held a batch lane until its timeout killed it (measured). What codex
+    itself left in the pipe is one buffer, read in milliseconds.
     Returns whether `deadline` (monotonic) had to kill the lane."""
     lines = queue.Queue()
 
@@ -2415,7 +2439,7 @@ def pump_lane(child, lane, raw, deadline=None):
             lane.kill(signal.SIGKILL)
         if exited_at is None and child.poll() is not None:
             exited_at = now
-        if exited_at is not None and not line and now - exited_at > LANE_DRAIN:
+        if exited_at is not None and now - exited_at > LANE_DRAIN:
             return timed_out
 
 
@@ -2491,8 +2515,6 @@ def run_dispatch(argv):
         os.close(fd)
         log, report_copy, record = Path(name), None, None
     lane = Lane(did, scope, exec_label(rest), record, log, report_copy)
-    for s in LANE_SIGNALS:
-        signal.signal(s, lambda signum, _frame: lane.stop(signum))
     print(f"dispatch:{did}", flush=True)
     # The lane inherits its own dispatch id (§9.2): every hippo write it makes arrives as
     # src=executor, and `log outcome` needs no --ref. Set even when the record failed — the
@@ -2522,7 +2544,11 @@ def run_dispatch(argv):
     # 0.156.1) and run to megabytes, so stderr goes whole to the raw log and the shell gets the
     # compact stream instead; stdout passes through byte for byte and is kept as the report.
     # The wrapper interprets nothing bound for codex. stdin closed: left open, codex exec
-    # blocks. A session of its own, so the lane's signal is the wrapper's to forward.
+    # blocks. A session of its own, so the lane's signal is the wrapper's to forward — from
+    # here on, not before: a signal during the launch notes takes its default action, rather
+    # than being swallowed while codex starts anyway only to be killed.
+    for s in LANE_SIGNALS:
+        signal.signal(s, lambda signum, _frame: lane.stop(signum))
     try:
         child = subprocess.Popen(
             ["codex", "exec", *rest], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -2612,8 +2638,8 @@ def pid_alive(pid):
 
 def watch_state(rec):
     """ended | running | lost. `ended` is the wrapper's last write (Lane.close), and a wrapper
-    that died after recording its status — SIGKILLed while the judge was still reading — has
-    ended too; one that recorded nothing and is gone is lost."""
+    that died after recording its status — SIGKILLed before codex exited, or while the judge
+    was still reading — has ended too; one that recorded nothing and is gone is lost."""
     if rec.get("ended"):
         return "ended"
     if pid_alive(rec.get("pid")):
@@ -2644,8 +2670,8 @@ def watch_lines(rec, state):
     took = lane_elapsed(_iso_seconds(rec.get("started"), rec.get("ended") or rec.get("last_at")))
     how = (f"killed by {rec['signal']}" if rec.get("signal") else
            "timed out" if rec.get("timed_out") else rec.get("status", "ended"))
-    lines = [f"lane {did} {how} rc={rec.get('rc')} after {took} · {cmds} cmds · "
-             f"{rec.get('scope')}"]
+    rc = "" if rec.get("rc") is None else f" rc={rec['rc']}"  # none: SIGKILLed before codex exited
+    lines = [f"lane {did} {how}{rc} after {took} · {cmds} cmds · {rec.get('scope')}"]
     if rec.get("triage"):
         lines.append(rec["triage"])
     report = rec.get("report")
@@ -3984,8 +4010,10 @@ def run_batch(argv):
             for lane in running:
                 lane.stop(signum)
 
-    for s in LANE_SIGNALS:
-        signal.signal(s, on_signal)
+    # Only while lanes can run: the harvest after them is a judge pass that a signal must be
+    # able to stop, as it could before 1.15.0 (measured: kept installed, a SIGTERM during the
+    # harvest was swallowed and the batch exited 0).
+    prev = {s: signal.signal(s, on_signal) for s in LANE_SIGNALS}
 
     def jrnl(rec):
         with BATCH_LOCK:
@@ -4125,6 +4153,8 @@ def run_batch(argv):
             futs = [pool.submit(run_entry, en, attempts.get(en["id"], 0) + 1) for en in todo]
             for f in concurrent.futures.as_completed(futs):
                 f.result()  # a wrapper bug dies loudly, never as a silently thinner batch
+    for s, handler in prev.items():
+        signal.signal(s, handler)
     if signaled:
         # The harvest is a judge pass over every lane; a batch being stopped does not start one.
         # The journal holds every exit, so the same command resumes.

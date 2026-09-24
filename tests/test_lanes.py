@@ -25,11 +25,13 @@ from test_dispatch import _fake_rollout, _stub_codex
 sys.path.insert(0, str(REPO_ROOT / "cli"))
 import hippo_cli  # noqa: E402
 
-# Claude Code 2.1.281's idle-shell watchdog, verbatim: the last line of a background shell that
-# has not grown for 45s is matched against these, and a match wakes main.
+# Claude Code 2.1.281's idle-shell watchdog, verbatim (the pattern array in its binary): the
+# last line of a background shell that has not grown for 45s is matched against these, and a
+# match wakes main.
 WATCHDOG = [re.compile(p, re.I) for p in (
-    r"Continue\?", r"Overwrite\?", r"Press (any key|Enter)", r"\(y/n\)",
-    r"\b(?:Do you|Would you|Shall I|Are you sure|Ready to)\b.*\? *$")]
+    r"\(y\/n\)", r"\[y\/n\]", r"\(yes\/no\)",
+    r"\b(?:Do you|Would you|Shall I|Are you sure|Ready to)\b.*\? *$",
+    r"Press (any key|Enter)", r"Continue\?", r"Overwrite\?")]
 
 SESSION = "01234567-abcd-7000-8000-0123456789ab"
 # codex 0.156.1's stderr, in the shape sixteen real lane logs show: the banner, the prompt
@@ -159,7 +161,11 @@ def test_the_compact_stream_is_throttled_but_the_record_counts_every_command(
 def test_no_compact_line_can_read_as_a_prompt():
     for text in ("said: Shall I continue with the parser?", "exec: rm -i x  # Overwrite?",
                  "said: Continue? (y/n)", "exec: read -p 'Press any key' x",
-                 "said: Press Enter to go on", "said: Are you sure ?  "):
+                 "said: Press Enter to go on", "said: Are you sure ?  ",
+                 "exec: read -r -p 'Apply the migration [y/N] ' ans",
+                 "said: Answer (yes/no) in the summary.",
+                 "said: I will express any key trade-offs in the report.",
+                 "exec: printf 'compress enter\\n'"):
         assert any(p.search(text) for p in WATCHDOG), text  # the raw text would wake main
         assert not any(p.search(hippo_cli.unprompt(text)) for p in WATCHDOG), text
 
@@ -282,7 +288,9 @@ def test_batch_keeps_its_err_shape_and_writes_the_same_lane_records(tmp_project,
           - {id: one, scope: "lane one", prompt: go}
           - {id: two, scope: "lane two", prompt: go}
         """)
-    proc = run_hippo(["dispatch", "--batch", str(manifest)], cwd=tmp_project,
+    # A relative manifest, as it is usually given: the record is read from any cwd, so its
+    # paths are absolute.
+    proc = run_hippo(["dispatch", "--batch", manifest.name], cwd=tmp_project,
                      env={"HIPPO_DISPATCH": "",
                           "PATH": _stub_codex(tmp_path, _stub_body(REAL_STDERR))})
     assert proc.returncode == 0, proc.stderr
@@ -293,6 +301,7 @@ def test_batch_keeps_its_err_shape_and_writes_the_same_lane_records(tmp_project,
         rec = _record(tmp_project, exits[eid]["dispatch"])
         assert (rec["scope"], rec["cmds"], rec["status"], rec["rc"]) == (scope, 3, "exited", 0)
         assert rec["log"] == str(_outdir(manifest) / f"{eid}.err")
+        assert rec["report"] == str(_outdir(manifest) / f"{eid}.out")
         assert any(ln.startswith(f"lane {scope} · ") for ln in proc.stderr.splitlines())
     assert not any("succeeded in" in ln for ln in proc.stderr.splitlines())
 
@@ -331,6 +340,123 @@ def test_a_signal_to_a_batch_reaches_every_running_lane(tmp_project, tmp_path):
     exits = [r for r in _journal(manifest) if r["event"] == "exit"]
     assert sorted(r["rc"] for r in exits) == [-15, -15]
     assert "stopped by SIGTERM" in err.decode()
+
+
+def test_a_batch_gives_its_signals_back_before_the_harvest(tmp_project, tmp_path, monkeypatch,
+                                                           capsys):
+    """The harvest is a judge pass a signal must be able to stop: kept installed, the batch's
+    forwarding handler swallowed a SIGTERM there and the batch exited 0."""
+    manifest = _manifest(tmp_project, "calm.yaml", """\
+        defaults: {kind: impl, executor: codex, model: gpt-6-luna, effort: low}
+        entries:
+          - {id: one, scope: "lane one", prompt: go}
+        """)
+    monkeypatch.chdir(tmp_project)
+    monkeypatch.setenv("PATH", _stub_codex(tmp_path))
+    before = {s: signal.getsignal(s) for s in hippo_cli.LANE_SIGNALS}
+    during, real = {}, hippo_cli.run_harvest
+
+    def harvest(*args, **kw):
+        during.update({s: signal.getsignal(s) for s in hippo_cli.LANE_SIGNALS})
+        return real(*args, **kw)
+
+    monkeypatch.setattr(hippo_cli, "run_harvest", harvest)
+    with pytest.raises(SystemExit) as done:
+        hippo_cli.run_batch(["--batch", str(manifest)])
+    assert done.value.code == 0, capsys.readouterr().err
+    assert during == before
+
+
+def test_a_child_codex_left_writing_to_stderr_does_not_hold_the_lane(tmp_project, tmp_path,
+                                                                   run_hippo):
+    """codex exits 0 and leaves a job logging to the stderr it inherited every 0.2s. The lane
+    ends LANE_DRAIN after codex, not when that job does — and a batch does not kill it as
+    timed out (measured before the fix: held to its timeout, recorded `killed`)."""
+    body = ("#!/bin/sh\n"
+            f"printf 'session id: {SESSION}\\n' >&2\n"
+            "( i=0; while [ $i -lt 100 ]; do echo \"bg log line $i\" >&2; sleep 0.2; "
+            "i=$((i+1)); done ) &\n"
+            "printf 'All green.\\n'\n")
+    manifest = _manifest(tmp_project, "chatty.yaml", """\
+        defaults: {kind: impl, executor: codex, model: gpt-6-luna, effort: low}
+        entries:
+          - {id: chatty, scope: "chatty child", prompt: go, timeout: 10}
+        """)
+    t0 = time.monotonic()
+    proc = run_hippo(["dispatch", "--batch", str(manifest)], cwd=tmp_project,
+                     env={"HIPPO_DISPATCH": "", "PATH": _stub_codex(tmp_path, body)})
+    took = time.monotonic() - t0
+    (ex,) = [r for r in _journal(manifest) if r["event"] == "exit"]
+    rec = _record(tmp_project, ex["dispatch"])
+    try:
+        os.killpg(rec["pgid"], signal.SIGKILL)  # the job, still logging
+    except ProcessLookupError:
+        pass
+    assert proc.returncode == 0, proc.stderr
+    assert took < 8, f"the lane waited {took:.1f}s on a child of codex"
+    assert (ex["rc"], "timed_out" in ex) == (0, False)
+    assert (rec["status"], rec["rc"], "timed_out" in rec) == ("exited", 0, False)
+
+
+def test_lanes_starting_in_one_instant_all_keep_their_records(tmp_project):
+    """Each start rewrites a stale statusline pointer through the same tmp file, and every
+    rename but the first finds it gone (measured: 2 of 3 simultaneous starts lost their
+    record). The pointer is best effort; the record is not."""
+    import concurrent.futures
+    import threading
+    hp = tmp_project / ".hippo"
+    ptr = hippo_cli.lanes_dir(hp) / ".statusline"
+    gate = threading.Barrier(3)
+
+    def start():
+        gate.wait()
+        return hippo_cli.lanes_dir(hp)
+
+    with concurrent.futures.ThreadPoolExecutor(3) as pool:
+        for _ in range(30):
+            ptr.write_text("/gone/1.14.0/scripts/lane_status.py", encoding="utf-8")
+            assert [f.result() for f in [pool.submit(start) for _ in range(3)]] == \
+                [hp / "lanes"] * 3
+    assert ptr.read_text(encoding="utf-8") == str(REPO_ROOT / "scripts" / "lane_status.py")
+
+
+def test_a_stop_is_on_record_before_a_slow_codex_exits(tmp_project, tmp_path):
+    """Claude Code SIGKILLs the whole tree 1.5s after its SIGTERM. A codex slower than that to
+    exit left no status at all, and the lane read as running; the stop goes on record at once."""
+    body = ("#!/bin/sh\n"
+            f"printf 'session id: {SESSION}\\n' >&2\n"
+            "trap 'sleep 4; exit 1' TERM\n"
+            "sleep 300 &\n"
+            "wait\n")
+    child, did = _launch(tmp_project, tmp_path, body)
+    pgid = None
+    try:
+        t_end = time.monotonic() + 20
+        while not (pgid := _record(tmp_project, did)["pgid"]):
+            assert time.monotonic() < t_end, "codex never started"
+            time.sleep(0.1)
+        time.sleep(0.5)  # the stub's trap is set
+        wrapper = _record(tmp_project, did)["pid"]  # bin/hippo's python, under uv
+        os.kill(wrapper, signal.SIGTERM)
+        t_end = time.monotonic() + 1.2
+        while "status" not in _record(tmp_project, did):
+            assert time.monotonic() < t_end, "the stop was not on record inside Claude Code's 1.5s"
+            time.sleep(0.05)
+        for pid in (wrapper, child.pid):  # Claude Code's SIGKILL to the tree, codex in its trap
+            os.kill(pid, signal.SIGKILL)
+        child.wait(timeout=10)
+    finally:
+        child.kill()
+        if pgid:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    rec = _record(tmp_project, did)
+    assert (rec["status"], rec["signal"], rec.get("rc"), rec.get("ended")) == \
+        ("killed", "SIGTERM", None, None)
+    first = _watch(tmp_project, did, "--for", "0").stdout.splitlines()[0]
+    assert first.startswith(f"lane {did} killed by SIGTERM after "), first
 
 
 # --------------------------------------------------------------------------
@@ -461,12 +587,13 @@ def test_the_lane_agent_is_a_haiku_relay_with_bash_alone():
 DID = "d" + "ab" * 16
 
 
-def _statusline(cwd, ctx):
+def _statusline(cwd, ctx, env=None):
     """Run the plugin's own subagentStatusLine command the way Claude Code does: through a
     shell, in the project directory, with the rows as JSON on stdin."""
     cmd = json.loads((REPO_ROOT / "settings.json").read_text(encoding="utf-8"))
     return subprocess.run(["/bin/sh", "-c", cmd["subagentStatusLine"]["command"]], cwd=cwd,
-                          input=json.dumps(ctx), capture_output=True, text=True, timeout=30)
+                          input=json.dumps(ctx), capture_output=True, text=True, timeout=30,
+                          env={**os.environ, "PWD": str(cwd), **(env or {})})
 
 
 def _session(tmp_path, project, agents):
@@ -486,8 +613,8 @@ def _session(tmp_path, project, agents):
 def _lane_record(project, **over):
     lanes = _lanes(project)
     lanes.mkdir(exist_ok=True)
-    rec = {"id": DID, "scope": "pass2 tensorize", "exec": "codex/gpt-6-sol/high", "pid": 1,
-           "pgid": None, "started": hippo_cli.now_iso(), "codex_session": None, "cmds": 14,
+    rec = {"id": DID, "scope": "pass2 tensorize", "exec": "codex/gpt-6-sol/high",
+           "pid": os.getpid(), "pgid": None, "started": hippo_cli.now_iso(), "codex_session": None, "cmds": 14,
            "last": "exec: pytest -q tests/test_pass2.py", "last_at": hippo_cli.now_iso(),
            **over}
     (lanes / f"{DID}.json").write_text(json.dumps(rec), encoding="utf-8")
@@ -524,6 +651,57 @@ def test_a_lane_row_follows_the_last_id_its_agent_named_and_shows_the_end(tmp_pr
     ctx["columns"] = 0
     content = json.loads(_statusline(sub, ctx).stdout)["content"]
     assert content == "codex · pass2 tensorize · killed by SIGTERM rc=-15 · 3m05s · 14 cmds"
+
+
+def test_a_lane_row_whose_wrapper_died_stops_counting(tmp_project, tmp_path):
+    """SIGKILLed before codex exited: the stop is on record but no rc, and the row neither
+    prints `rc=None` nor keeps a timer running. A wrapper that recorded nothing and is gone
+    shows `lost`, as `--watch` says."""
+    hippo_cli.lanes_dir(tmp_project / ".hippo")
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    ctx = _session(tmp_path, tmp_project, [("alane", "hippo:lane", f"dispatch:{DID}\n")])
+    _lane_record(tmp_project, pid=dead.pid, status="killed", signal="SIGTERM",
+                 started="2026-09-24T00:00:00Z", last_at="2026-09-24T00:00:16Z")
+    assert json.loads(_statusline(tmp_project, ctx).stdout)["content"] == \
+        "codex · pass2 tensorize · killed by SIGTERM · 16s · 14 cmds"
+    _lane_record(tmp_project, pid=dead.pid, started="2026-09-24T00:00:00Z",
+                 last_at="2026-09-24T00:00:16Z")
+    assert json.loads(_statusline(tmp_project, ctx).stdout)["content"] == (
+        "codex · pass2 tensorize · lost, its wrapper is gone · 16s · 14 cmds · "
+        "exec: pytest -q tests/test_pass2.py")
+
+
+def test_the_statusline_runs_no_pointer_it_cannot_trust(tmp_path):
+    """The command runs, as the user, whatever script the pointer names — so it looks only
+    where find_hippo looks (a .git directory and $HOME stop the walk: an ancestor's .hippo/
+    may be someone else's), and runs only a `…/scripts/lane_status.py` the user owns, named by
+    a pointer the user owns (ownership needs a second user to test; the rest is here)."""
+    shared, ran = tmp_path / "shared", tmp_path / "ran"
+    planted = shared / "x" / "scripts" / "lane_status.py"
+    other = shared / "other.py"
+    planted.parent.mkdir(parents=True)
+    for script in (planted, other):
+        script.write_text(f"open({str(ran)!r}, 'w').write('x')\n", encoding="utf-8")
+    ptr = shared / ".hippo" / "lanes" / ".statusline"
+    ptr.parent.mkdir(parents=True)
+    ptr.write_text(str(planted), encoding="utf-8")
+    (repo := shared / "repo" / "src").mkdir(parents=True)
+    (shared / "repo" / ".git").mkdir()
+    (home := shared / "home" / "proj").mkdir(parents=True)
+    (plain := shared / "plain").mkdir()
+    ctx = {"transcript_path": str(tmp_path / "s.jsonl"), "tasks": [{"id": "a1"}]}
+
+    for cwd, env in ((repo, None), (home, {"HOME": str(home.parent)})):
+        proc = _statusline(cwd, ctx, env)
+        assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), cwd
+        assert not ran.exists(), f"the walk from {cwd} went past its ceiling"
+    assert _statusline(plain, ctx).returncode == 0 and ran.exists(), \
+        "reached with no ceiling between, the same pointer is followed"
+    ran.unlink()
+    ptr.write_text(str(other), encoding="utf-8")
+    assert _statusline(plain, ctx).returncode == 0 and not ran.exists(), \
+        "a pointer to anything but a lane_status.py is not run"
 
 
 def test_a_lane_row_before_the_id_is_known_says_so(tmp_project, tmp_path):

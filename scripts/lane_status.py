@@ -9,6 +9,7 @@ place of that row's default. A row this script leaves out keeps Claude Code's ow
 tick of every session with the plugin enabled: stdlib only, no subprocess, small files only.
 """
 import json
+import os
 import re
 import sys
 import unicodedata
@@ -65,6 +66,19 @@ def dispatch_id(transcript):
     return found[-1] if found else None
 
 
+def alive(pid):
+    """The wrapper's pid still runs — the check `hippo dispatch --watch` makes (watch_state)."""
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def lane_record(cwd, did):
     """.hippo/lanes/<id>.json, walking up from the agent's cwd the way the CLI finds .hippo/."""
     for d in (cwd, *cwd.parents):
@@ -87,11 +101,14 @@ def lane_row(row, transcript):
         return f"codex · {row.get('description') or 'lane'} · {did} · no lane record yet"
     head = f"codex · {rec.get('scope')}"
     cmds = f"{rec.get('cmds', 0)} cmds"
+    last = rec.get("last") or "no event yet"
+    took = elapsed(seconds_since(rec.get("started"), rec.get("ended") or rec.get("last_at")))
     if rec.get("status"):
         how = f"killed by {rec['signal']}" if rec.get("signal") else rec["status"]
-        took = elapsed(seconds_since(rec.get("started"), rec.get("ended") or rec.get("last_at")))
-        return f"{head} · {how} rc={rec.get('rc')} · {took} · {cmds}"
-    last = rec.get("last") or "no event yet"
+        rc = "" if rec.get("rc") is None else f" rc={rec['rc']}"  # none: SIGKILLed before codex exited
+        return f"{head} · {how}{rc} · {took} · {cmds}"
+    if not alive(rec.get("pid")):  # a dead lane's timer must not keep counting
+        return f"{head} · lost, its wrapper is gone · {took} · {cmds} · {last}"
     return f"{head} · {elapsed(seconds_since(rec.get('started')))} · {cmds} · {last}"
 
 
