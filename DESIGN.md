@@ -72,8 +72,8 @@ Clerk guardrails (invariant):
 
 Judge guardrails (invariant):
 
-- **No hook of its own** — it rides a surface that already exists (the cap of two hooks is
-  untouched, §3.4).
+- **No hook of its own** — it rides a surface that already exists (§3.4 lists every hook, each
+  with its measured reason).
 - It **never writes a verdict, an outcome, or a directive state**. Its answers are evidence that a
   code policy thresholds; the policy is what decides, and it is readable in one place.
 - Every judge-backed path is a **pure addition on top of the deterministic one**. When the judge is
@@ -91,7 +91,7 @@ Judge guardrails (invariant):
 ## 3. Components
 
 ```
-runtime (thin):   bin/hippo (shim) + cli/hippo_cli.py + 2 hooks + scripts/{clerk_run,digest_lite,dispatch}
+runtime (thin):   bin/hippo (shim) + cli/hippo_cli.py + 4 hooks (2 on Codex) + scripts/{clerk_run,digest_lite,dispatch}
 cognition (text): clerks/{turn-scribe,distiller}.md + clerks/jev/*.yaml + skills/{hippo,checkup,dispatch}
 resident (small): the capsule injected at SessionStart (§6 below)
 enforcement:      none
@@ -336,9 +336,19 @@ hippo scribe --transcript P --session S   # internal: the Stop hook calls it det
   to be unique and greppable — `hippo dispatch` mints one, the scribe writes a short one, and a
   hand-written one just needs to be something an `outcome` can name later.
 
-### 3.4 Hooks (exactly two — adding a third is forbidden)
+### 3.4 Hooks (four — each one here with its measured reason)
 
-`hooks/hooks.json`:
+A hook runs on the host's clock, so each one needs a reason measured and written here; a hook that
+fires on every tool call or prompt stays out (§4). `hooks/hooks.json` is Claude Code's and
+carries all four. The Codex manifest names `hooks/codex-hooks.json` instead — SessionStart and
+Stop only, the same entries command for command (a test holds them equal) — because codex reads
+a manifest-named hooks path *in place of* the default `hooks/hooks.json` (0.156.1's
+`load_plugin_hooks`): that keeps SubagentStart and PreCompact off codex until they are measured
+there (0.156.1's hook config lists SubagentStart but not PreCompact, and a moved contract has
+already broken the capsule once, below). The scripts share `hooks/lib.sh` — the clerk gate, the
+stdin reader, the project walk, the CLI call and the JSON envelope — and tell the CLI which
+moment they inject for through `HIPPO_INJECT`, an internal env var rather than a flag: a
+SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads it).
 
 - **SessionStart** (startup, resume, clear, compact): `hooks/session_start.sh` → silent exit 0 with
   no `.hippo/`; otherwise `hippo status --inject` (the §6 format), wrapped as
@@ -352,7 +362,56 @@ hippo scribe --transcript P --session S   # internal: the Stop hook calls it det
   file (§3.3), so a dispatched lane whose host fires hooks gets the same treatment — its
   audience slice plus the `report:` line, at start and after every compaction. The lane-side
   gap this closes is the same measured loss, unhandled: a long lane compacts and its brief's
-  constraints evaporate.
+  constraints evaporate. On source=compact main's capsule ends with the `compact:` line (§6),
+  which points at the summary's `## hippo deltas` (PreCompact, below).
+- **SubagentStart** (Claude Code; matcher `*`): `hooks/subagent_start.sh` → silent exit 0 with no
+  `.hippo/`, for agent type `fork` (it already carries main's context, capsule included) and for
+  `hippo:lane` (it only watches a codex lane, whose capsule comes from codex's own SessionStart);
+  otherwise the live directives addressed to executors, in the same envelope with
+  `hookEventName: "SubagentStart"` — and nothing at all when none is. The reason: SessionStart
+  never fires for a native subagent (neither subagent transcript in the session measured below
+  carries one), so until this hook a user's standing rule reached a Claude Code worker only if
+  main retyped it into the brief — the gap the audience axis (§9.4) closed for lanes. The slice
+  is directives only: no `report:` line (a native worker runs without `HIPPO_DISPATCH`, so its
+  `log outcome` would land as src=cli — main's verdict on its own work — while the scribe
+  records the run and main's verdict itself, §3.5.3c), no depth line
+  (`HIPPO_DEPTH` indexes wrapper lanes, §9.5; a subagent's nesting is main's call in its brief).
+  Measured on 2.1.281 (2026-09-24): it fires for general-purpose, Explore, fork, claude, custom
+  and workflow-subagent agents, foreground and background, the matcher being the agent type;
+  stdin carries `session_id`, `transcript_path` (the parent's), `cwd`, `prompt_id`, `agent_id`,
+  `agent_type` and `hook_event_name` — no brief text; only the JSON envelope is injected (plain
+  text is dropped), and it lands in the subagent's own transcript as a `hook_additional_context`
+  attachment, never in the parent's; a failing hook never blocks the subagent, but a running one
+  holds its first request — 113ms in a headless session (the host's own `durationMs`), 94ms
+  median over 15 direct runs, 73ms of it the one CLI call. In that session a general-purpose
+  subagent quoted back exactly the executor slice, and a fork quoted main's capsule — its own
+  context, with nothing injected.
+- **PreCompact** (Claude Code): `hooks/pre_compact.sh` → silent exit 0 with no `.hippo/`, and
+  inside a subagent (an `agent_id` on stdin — a guard: main's PreCompact carries none, measured;
+  a subagent's own compaction was not); otherwise plain text with exit 0, which the host
+  appends to the compaction instructions: end the summary with `## hippo deltas`, one line per
+  change the conversation made that hippo's lists do not show yet, each the exact command that
+  records it (`hippo task done <id> --note '…'`, `hippo task set <id> notes '…'`, `hippo directive
+  withdraw <id>` only if the user said so, `hippo directive add --id <id> --text '…'` when the
+  user changed one, `edit <file>: '<old>' → '<new>'` for a memory or doc line now false), or
+  `none`; then the open tasks (most recently updated first: id — title — the first 80 chars of
+  notes) and main's live directives (id — the first 80 chars), 3,000 chars at most with the cut
+  items counted. The reason: a compaction is the one moment the summarizer still sees everything
+  the conversation changed, and the capsule that follows it re-injects hippo's *records* — the
+  very state that went stale when a task shipped or a ruling moved without a call. Measured on
+  2.1.281 (2026-09-24, manual and auto): the summary followed the appended request — a
+  `## hippo deltas` section with the right statuses, updated again on a second compaction — but
+  its formatting drifted (bullets added, a `task ` prefix dropped), so every line is a command
+  main reads, checks and runs or skips (§6's `compact:` line), never a shape a parser depends
+  on. With this hook (haiku, manual `/compact`) the summary carried `## hippo deltas:` over the
+  three exact commands the conversation called for — `task done`, `task set … notes`, `directive
+  withdraw` — main, resumed, ran all three, and the next compaction's section read `none`. hippo
+  applies none of them itself: a stale-state flag is shown, never applied (§6 — a clerk once
+  withdrew a live hold). SessionStart(compact) runs after the summary lands in main's
+  context, which is what lets the capsule point at it. PreCompact can fire with no compaction
+  following ("no assistant messages in summarize set, bailing"), which costs nothing — the text
+  only asks. A manual `/compact` writes the text into the transcript main reads next (an auto
+  one does not), hence main's audience only (§9.4).
 - **Stop**: `hooks/stop.sh` — parse `transcript_path`, `session_id` and `cwd` from the stdin JSON;
   silent exit 0 with no `.hippo/`; otherwise `setsid hippo scribe … >/dev/null 2>&1 &` and then
   **exit 0 immediately** (<100ms). Under `HIPPO_DISPATCH` it exits at once instead: the executor
@@ -809,7 +868,7 @@ engine (measured on 0.144.6).
 | | Claude Code | Codex CLI |
 |---|---|---|
 | Manifest | `.claude-plugin/plugin.json` | `.codex-plugin/plugin.json` (names the `skills` and `hooks` paths) |
-| Hooks | `hooks/hooks.json` | **the same file** — event keys (PascalCase), matcher, stdin payload fields and the SessionStart `hookSpecificOutput.additionalContext` envelope are all identical (codex ≥0.146 rejects bare text, §3.4) |
+| Hooks | `hooks/hooks.json` — all four (§3.4) | `hooks/codex-hooks.json`, named by the manifest — SessionStart and Stop only, the same entries command for command; event keys (PascalCase), matcher, stdin payload fields and the SessionStart `hookSpecificOutput.additionalContext` envelope are all identical (codex ≥0.146 rejects bare text, §3.4) |
 | Plugin `bin/` | added to PATH automatically | **not added** → a skill resolves `bin/hippo` relative to its own SKILL.md; a dispatched lane gets it from the wrapper (§3.6) |
 | Transcript | Claude JSONL | codex rollout JSONL — `digest_lite.py` detects the format from the first lines and reduces both to the same line vocabulary |
 
@@ -892,7 +951,7 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 | review packet, ingest, receipt, attestation | Replies stay raw in the chat (a review saved to a file dies in attention — demonstrated across 6 rounds of whack-a-mole). One field, `ev:review.base`, is enough pinning |
 | a delegate surface, role-binding config | Routing comes from main's judgment plus the evidence in PRIORS. Freezing it in config is the source of stale-instruction incidents |
 | typed brief facts, assurance DAG | Intent belongs in short documents and conversation. Drift is handled by making it visible, not by control |
-| PreToolUse/PostToolUse/UserPromptSubmit hooks | Latency on every call, plus hooks measured to produce no output. Two hooks is the ceiling |
+| PreToolUse/PostToolUse/UserPromptSubmit hooks | Latency on every call, plus hooks measured to produce no output. The four in §3.4 fire once per session, subagent, compaction or turn, each for a measured reason |
 | OPERATING CONTRACT-style resident injection | 8–14KB re-injected, measured. The only resident thing is the one block in §6 |
 | a hand-written PROGRESS.md | It goes stale. Replaced by worklog (generated) + ledger (facts) + PRIORS (distilled) |
 | typed refusal gates, frozen sidecars, remote verify | Record, never enforce (principle 3) |
@@ -924,6 +983,15 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 · last: merged the v2 Pareto duo, full gate green (1421)
 · cli: task add|set|done|list · log dispatch|outcome|review|review-status · directive add|withdraw · prior · dispatch [--batch] — /hippo:hippo has the flags
 ```
+
+After a compaction (SessionStart source=compact) main's capsule closes on one more line —
+``· compact: if the summary above has a `## hippo deltas` section, run those commands first — they
+are proposals; skip any that are wrong`` — because the summary lands in main's context before the
+capsule does (measured), and PreCompact asked it for those commands (§3.4). "Has", not "ends
+with": the host appends its own paragraphs after the summary. The condition is there for Codex,
+which fires SessionStart(compact) but gets no PreCompact. A native subagent gets
+none of this block: SubagentStart hands it the `[hippo] directives N live — the user's standing
+rules for this project` header and its executor-audience directive lines, nothing else (§3.4).
 
 The `cli:` line is main's only (a lane has its `report:` line instead): the command grammar,
 because the capsule is what re-arrives after a compaction and that is exactly when the grammar
@@ -1155,11 +1223,11 @@ parent's dispatch id means a batch's cost sums itself.
 ### 9.7 Consequences to settle before building
 
 - **The executor gets no scribe** (enforced by the Stop hook's `HIPPO_DISPATCH` gate since
-  1.8.1). Running the Stop hook per lane multiplies clerk cost by the batch width, and the hook
-  cap is two (§3.4). It *does* get the capsule — SessionStart's side of the same gate — because
-  a lane that compacts loses its brief's constraints exactly the way main used to (§3.4). If a
-  depth-1 orchestrator's reasoning is worth keeping, the
-  distillation belongs in the dispatch wrapper at lane exit — not in a third hook.
+  1.8.1). Running the Stop hook per lane multiplies clerk cost by the batch width. It *does* get
+  the capsule — SessionStart's side of the same gate — because a lane that compacts loses its
+  brief's constraints exactly the way main used to (§3.4). If a depth-1 orchestrator's reasoning
+  is worth keeping, the distillation belongs in the dispatch wrapper at lane exit — not in
+  another hook.
 - **A discarded lane's events survive in the ledger while its code does not.** This is a feature —
   "this approach was tried and failed" is recorded nowhere today — but it requires the dispatch to
   carry an ending (merged / discarded / killed), or a derived view will present abandoned work as

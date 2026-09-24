@@ -961,17 +961,41 @@ def scribe_failing(hp):
     return f"· scribe: the last {n} runs failed{cause} (.hippo/failures/)"
 
 
-def status_lines(hp):
+def live_directives(hp, reader):
+    """The active directives addressed to `reader` (§9.4): `all`, and absent, reach both."""
+    return [d for d in directives(hp).values() if d.get("state") == "active"
+            and (d.get("audience") or "all") in (reader, "all")]
+
+
+def directive_lines(live):
+    """One `· live: …` line per directive, in ledger order and in full.
+
+    Every active directive appears whole: a directive that is invisible at session start is
+    effectively not there (principle 9, read backwards), and that is as true of the ninth one as
+    of the first. Volume is handled by warning the author at `directive add` time, not by
+    dropping text here. Age is the whole staleness mechanism (nothing expires by itself — the
+    verdict stays with main and the user), so it is shown only once it is worth a glance."""
+    now = datetime.now(timezone.utc)
+    out = []
+    for d in live:
+        t = event_time(d)
+        age = (now - t).days if t else 0
+        label = f"live({age}d)" if age >= DIRECTIVE_AGE_SHOW_D else "live"
+        out.append(f"· {label}: {one_line(d.get('text', ''))}")
+    return out
+
+
+def status_lines(hp, compacted=False):
     """DESIGN §6 resident surface (header + live directives + in flight + last).
 
     Audience (§9.4): inside a dispatched lane (HIPPO_DISPATCH set) the capsule carries the
     directives addressed to executors; everywhere else, the ones addressed to main. `all`
-    (and absent, its default) reaches both."""
+    (and absent, its default) reaches both. `compacted` is SessionStart's source=compact: main's
+    capsule then closes on the line that points at the summary's `## hippo deltas` (§3.4)."""
     data = tasks_load(hp)
     n_open = sum(1 for t in data["tasks"] if t.get("status") in OPEN_STATUSES)
     reader = "executor" if os.environ.get("HIPPO_DISPATCH") else "main"
-    live = [d for d in directives(hp).values() if d.get("state") == "active"
-            and (d.get("audience") or "all") in (reader, "all")]
+    live = live_directives(hp, reader)
 
     def stamp(name):
         p = hp / name
@@ -987,18 +1011,7 @@ def status_lines(hp):
             f"· priors {stamp('PRIORS.md')} · worklog {stamp('worklog.md')}"
         )
     ]
-    # Ledger order. Every active directive appears in full: a directive that is invisible at
-    # session start is effectively not there (principle 9, read backwards), and that is as true
-    # of the ninth one as of the first. Volume is handled by warning the author at `directive
-    # add` time, not by dropping text here.
-    now = datetime.now(timezone.utc)
-    for d in live:
-        # Age is the whole staleness mechanism (nothing expires by itself — the verdict stays
-        # with main and the user), so it is shown only once it is worth a glance.
-        t = event_time(d)
-        age = (now - t).days if t else 0
-        label = f"live({age}d)" if age >= DIRECTIVE_AGE_SHOW_D else "live"
-        lines.append(f"· {label}: {one_line(d.get('text', ''))}")
+    lines += directive_lines(live)
     # Nothing flying → no line. The capsule only spends a line on a question that has an answer.
     flying = in_flight(hp)
     if flying:
@@ -1051,14 +1064,110 @@ def status_lines(hp):
             "· cli: task add|set|done|list · log dispatch|outcome|review|review-status "
             "· directive add|withdraw · prior · dispatch [--batch] — /hippo:hippo has the flags"
         )
+        if compacted:
+            # The summary lands in main's context before this capsule does (measured), so the
+            # pointer reads "above". "Has", not "ends with": the host appends its own paragraphs
+            # after the summary (measured). Worded as a condition because Codex fires
+            # SessionStart(compact) too but gets no PreCompact, so its summary has no such section.
+            lines.append(
+                "· compact: if the summary above has a `## hippo deltas` section, run those "
+                "commands first — they are proposals; skip any that are wrong"
+            )
+    return lines
+
+
+def subagent_lines(hp):
+    """What SubagentStart injects into a native subagent (§3.4): the live directives addressed
+    to executors, and nothing else — nothing at all when there is none.
+
+    Not a lane's capsule. No `report:` line: a native worker runs without HIPPO_DISPATCH, so its
+    `log outcome` would land as src=cli — main's verdict on its own work — while the scribe
+    already records the run and main's verdict at the end of the turn (§3.5.3c). No depth line:
+    HIPPO_DEPTH indexes wrapper lanes (§9.5), and a subagent's nesting is main's call in its
+    brief. No tasks, in-flight or last: those are main's state, and a worker acts on them
+    through main's brief, not beside it (principle 2)."""
+    live = live_directives(hp, "executor")
+    if not live:
+        return []
+    return [f"[hippo] directives {len(live)} live — the user's standing rules for this project",
+            *directive_lines(live)]
+
+
+PRECOMPACT_CAP = 3000  # chars of the whole text: it is appended to every compaction's instructions
+PRECOMPACT_ITEM = 80  # chars of a task's notes or a directive's text per list line
+
+
+def precompact_lines(hp):
+    """What PreCompact appends to the compaction instructions (§3.4): end the summary with
+    `## hippo deltas` — the exact commands that would record what this conversation changed and
+    hippo's lists do not show yet — then those lists.
+
+    Measured (2026-09-24, Claude Code 2.1.281, manual and auto compaction): the summarizer wrote
+    a requested section like this with the right statuses, but its formatting drifted (bullets
+    added, a prefix dropped). So each line asks for a whole command main can read, check and run
+    or skip after the compaction — never a shape a parser depends on; the capsule's `compact:`
+    line is where main is told to (status_lines). With this text (haiku, manual /compact) the
+    section held the three commands the conversation called for, and main, resumed, ran them.
+
+    Main's audience only (§9.4): a manual /compact writes this text into the transcript main
+    reads next. Open tasks run most-recently-updated first, the ones this conversation most
+    likely touched; past the cap, items are cut from the ends of the lists and counted."""
+    head = [
+        "hippo: end the summary with a section headed exactly `## hippo deltas`: one line per "
+        "change this conversation made that hippo's lists below do not show yet, each written as "
+        "the exact command that records it —",
+        "  hippo task done <id> --note '…'   (a listed task that is finished)",
+        "  hippo task set <id> notes '…'   (a listed task that moved on; replaces its notes)",
+        "  hippo directive withdraw <id>   (only if the user said so)",
+        "  hippo directive add --id <id> --text '…'   (the user changed it)",
+        "  edit <file>: '<old>' → '<new>'   (a memory or doc line that is now false)",
+        "or the single line `none` if nothing changed. They are run after the compaction, so "
+        "write each one complete.",
+    ]
+
+    def notes_of(t):
+        n = t.get("notes") or []
+        return " / ".join(map(str, n)) if isinstance(n, list) else str(n)
+
+    tasks = sorted((t for t in tasks_load(hp)["tasks"] if t.get("status") in OPEN_STATUSES),
+                   key=lambda t: str(t.get("updated") or ""), reverse=True)
+    t_items = [" — ".join(filter(None, (f"- {t.get('id')}", one_line(t.get("title", ""), 100),
+                                        one_line(notes_of(t), PRECOMPACT_ITEM))))
+               for t in tasks]
+    d_items = [f"- {d['id']} — {one_line(d.get('text', ''), PRECOMPACT_ITEM)}"
+               for d in live_directives(hp, "main")]
+    t_head, d_head = "open tasks (id — title — notes):", "live directives (id — text):"
+    # Directives first into the budget: a handful at most, and never folded away elsewhere (§6).
+    room = PRECOMPACT_CAP - len("\n".join([*head, t_head, d_head])) - 60  # 60: the cut line
+    kept = {}
+    for name, items in (("d", d_items), ("t", t_items)):
+        kept[name] = []
+        for it in items:
+            if len(it) + 1 > room:
+                break
+            kept[name].append(it)
+            room -= len(it) + 1
+    lines = [*head, t_head, *(kept["t"] if t_items else ["(none open)"]),
+             d_head, *(kept["d"] if d_items else ["(none live)"])]
+    cut = len(t_items) - len(kept["t"]) + len(d_items) - len(kept["d"])
+    if cut:
+        lines.append(f"({cut} more not shown: `hippo task list` / `hippo directive list`)")
     return lines
 
 
 def cmd_status(args):
     hp = args.hp
-    print("\n".join(status_lines(hp)))
     if args.inject:
+        # The hook names its moment in HIPPO_INJECT — internal, never a flag (§3.4): SessionStart
+        # passes its source, SubagentStart `subagent`, PreCompact `precompact`.
+        moment = os.environ.get("HIPPO_INJECT", "")
+        lines = (subagent_lines(hp) if moment == "subagent"
+                 else precompact_lines(hp) if moment == "precompact"
+                 else status_lines(hp, compacted=moment == "compact"))
+        if lines:
+            print("\n".join(lines))
         return
+    print("\n".join(status_lines(hp)))
     open_tasks = [
         t for t in tasks_load(hp)["tasks"] if t.get("status") in OPEN_STATUSES
     ]
@@ -4596,7 +4705,7 @@ def build_parser():
 
     s = sub.add_parser("status", help="one-block summary")
     s.add_argument(
-        "--inject", action="store_true", help="SessionStart hook injection format (§6)"
+        "--inject", action="store_true", help="what the hooks inject (§3.4, §6)"
     )
     s.set_defaults(fn=cmd_status)
 

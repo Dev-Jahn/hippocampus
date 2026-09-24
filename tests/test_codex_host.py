@@ -1,7 +1,8 @@
 """Codex CLI host support (DESIGN §3.8).
 
-Everything pinned here comes from measuring codex-cli 0.144.6: the two hosts share the hook
-file, and only the transcript format differs.
+Everything pinned here comes from measuring codex-cli 0.144.6 and reading 0.156.1's plugin
+loader: the two hosts share the hook scripts and their commands, codex reads its own hook file,
+and only the transcript format differs.
 """
 import json
 import subprocess
@@ -12,6 +13,7 @@ from conftest import REPO_ROOT
 CODEX_MANIFEST = REPO_ROOT / ".codex-plugin" / "plugin.json"
 CLAUDE_MANIFEST = REPO_ROOT / ".claude-plugin" / "plugin.json"
 HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.json"
+CODEX_HOOKS_JSON = REPO_ROOT / "hooks" / "codex-hooks.json"
 DIGEST = REPO_ROOT / "scripts" / "digest_lite.py"
 
 
@@ -33,21 +35,31 @@ def test_codex_manifest_paths_are_plugin_relative():
     for key in ("skills", "hooks"):
         assert x[key].startswith("./"), key
         assert ".." not in x[key], key
-    assert x["hooks"] == "./hooks/hooks.json"
+    assert x["hooks"] == "./hooks/codex-hooks.json"
     assert (REPO_ROOT / x["hooks"][2:]).is_file()
     assert (REPO_ROOT / x["skills"][2:]).is_dir()
 
 
-def test_hooks_json_is_shared_by_both_hosts():
+def test_codex_gets_only_the_hooks_measured_on_it():
+    """A manifest-named hooks path replaces codex's default hooks/hooks.json (0.156.1's
+    load_plugin_hooks), so codex never sees SubagentStart/PreCompact until they are measured
+    there — while the entries both hosts run stay the same entries, command for command."""
+    cc, cx = _json(HOOKS_JSON)["hooks"], _json(CODEX_HOOKS_JSON)["hooks"]
+    assert set(cc) == {"SessionStart", "SubagentStart", "PreCompact", "Stop"}
+    assert set(cx) == {"SessionStart", "Stop"}
+    for event in cx:
+        assert cx[event] == cc[event], event
+
+
+def test_hook_handlers_are_plain_commands():
     """codex 0.144.6 runs only `type: command` handlers under PascalCase event keys.
     `async: true` parses but is skipped, so a hook must earn its non-blocking behavior itself."""
-    h = _json(HOOKS_JSON)["hooks"]
-    assert set(h) == {"SessionStart", "Stop"}
-    for groups in h.values():
-        for g in groups:
-            for handler in g["hooks"]:
-                assert handler["type"] == "command"
-                assert handler.get("async") is not True
+    for path in (HOOKS_JSON, CODEX_HOOKS_JSON):
+        for groups in _json(path)["hooks"].values():
+            for g in groups:
+                for handler in g["hooks"]:
+                    assert handler["type"] == "command"
+                    assert handler.get("async") is not True
 
 
 def _run_digest(path):

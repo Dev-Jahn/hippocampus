@@ -19,7 +19,7 @@
     "agentic-development"
   ],
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json",
+  "hooks": "./hooks/codex-hooks.json",
   "interface": {
     "displayName": "hippocampus",
     "shortDescription": "Perception and memory for coding agents",

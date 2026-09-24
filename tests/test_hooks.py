@@ -214,3 +214,107 @@ def test_stop_exits_at_once_for_a_lane_and_spawns_no_scribe(
     assert not (tmp_project / ".hippo" / "cursors.json").exists()
     ledger = (tmp_project / ".hippo" / "ledger.jsonl").read_text(encoding="utf-8")
     assert '"ev": "clerk"' not in ledger and '"ev":"clerk"' not in ledger
+
+
+# --------------------------------------------------------------------------
+# SubagentStart and PreCompact (1.15.0, Claude Code only — §3.4)
+# --------------------------------------------------------------------------
+
+def _directives(project, run_hippo):
+    for did, aud, text in (("gpu-pin", "all", "use GPUs 0 and 1 only"),
+                           ("main-only", "main", "keep review replies in context"),
+                           ("worker-rule", "executor", "never push; main merges")):
+        proc = run_hippo(["directive", "add", "--id", did, "--audience", aud, "--text", text],
+                         cwd=project)
+        assert proc.returncode == 0, proc.stderr
+
+
+def _subagent(project, repo_root, agent_type="general-purpose"):
+    payload = {"session_id": "s", "transcript_path": str(project / "t.jsonl"),
+               "cwd": str(project), "agent_id": "a1b2c3", "agent_type": agent_type,
+               "hook_event_name": "SubagentStart"}
+    return _run_hook(repo_root / "hooks" / "subagent_start.sh", payload, cwd=project)
+
+
+def test_a_subagent_gets_the_executor_directives_and_nothing_else(tmp_project, repo_root,
+                                                                  run_hippo):
+    """Only the envelope is injected into a subagent (plain text is dropped, measured), and the
+    slice is the executor audience — no report line (a native worker's `log outcome` would land
+    as main's verdict), no depth line, no tasks."""
+    _directives(tmp_project, run_hippo)
+    proc = _subagent(tmp_project, repo_root)
+    assert proc.returncode == 0, proc.stderr
+    hs = json.loads(proc.stdout)["hookSpecificOutput"]
+    assert hs["hookEventName"] == "SubagentStart"
+    lines = hs["additionalContext"].splitlines()
+    assert lines[0].startswith("[hippo] directives 2 live")
+    assert lines[1:] == ["· live: use GPUs 0 and 1 only", "· live: never push; main merges"]
+
+
+def test_a_subagent_hook_is_silent_for_forks_lanes_and_no_directive(tmp_project, repo_root,
+                                                                    run_hippo, uninitialized_dir):
+    for agent_type in ("general-purpose", "fork", "hippo:lane"):
+        proc = _subagent(tmp_project, repo_root, agent_type)  # no directive at all yet
+        assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), agent_type
+    _directives(tmp_project, run_hippo)
+    for agent_type in ("fork", "hippo:lane"):
+        proc = _subagent(tmp_project, repo_root, agent_type)
+        assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), agent_type
+    proc = _subagent(uninitialized_dir, repo_root)
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
+
+
+def _pre_compact(project, repo_root, **extra):
+    payload = {"session_id": "s", "transcript_path": str(project / "t.jsonl"),
+               "cwd": str(project), "hook_event_name": "PreCompact", "trigger": "auto",
+               "custom_instructions": None, **extra}
+    return _run_hook(repo_root / "hooks" / "pre_compact.sh", payload, cwd=project)
+
+
+def test_pre_compact_asks_for_hippo_deltas_over_main_s_lists(tmp_project, repo_root, run_hippo):
+    """Plain text with exit 0 is what the host appends to the compaction instructions."""
+    _directives(tmp_project, run_hippo)
+    for tid, title in (("feat/alpha", "Alpha"), ("fix/beta", "Beta")):
+        assert run_hippo(["task", "add", tid, "--title", title, "--notes", "parser written"],
+                         cwd=tmp_project).returncode == 0
+    assert run_hippo(["task", "done", "fix/beta"], cwd=tmp_project).returncode == 0
+    proc = _pre_compact(tmp_project, repo_root)
+    assert proc.returncode == 0, proc.stderr
+    text = proc.stdout
+    assert "`## hippo deltas`" in text and "hippo task done <id> --note" in text
+    assert "- feat/alpha — Alpha — parser written" in text
+    assert "fix/beta" not in text  # done is not open
+    assert "- gpu-pin — use GPUs 0 and 1 only" in text and "- main-only —" in text
+    assert "worker-rule" not in text  # main's audience: a manual /compact shows this to main
+
+
+def test_pre_compact_is_capped_and_counts_what_it_cut(tmp_project, repo_root, run_hippo):
+    tasks = tmp_project / ".hippo" / "tasks.yaml"
+    tasks.write_text("tasks:\n" + "".join(
+        f"- {{id: feat/t{i:02d}, title: task number {i}, status: pending, notes: ['{'n' * 90}']}}\n"
+        for i in range(40)), encoding="utf-8")
+    proc = _pre_compact(tmp_project, repo_root)
+    assert proc.returncode == 0, proc.stderr
+    assert len(proc.stdout) <= 3000
+    shown = proc.stdout.count("- feat/t")
+    assert 0 < shown < 40
+    assert f"({40 - shown} more not shown" in proc.stdout
+
+
+def test_pre_compact_is_silent_inside_a_subagent_and_outside_a_project(
+    tmp_project, repo_root, uninitialized_dir
+):
+    for proc in (_pre_compact(tmp_project, repo_root, agent_id="a1b2c3"),
+                 _pre_compact(uninitialized_dir, repo_root)):
+        assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
+
+
+def test_the_capsule_after_a_compaction_points_at_the_deltas(tmp_project, repo_root):
+    def capsule(source):
+        payload = {"cwd": str(tmp_project), "hook_event_name": "SessionStart", "source": source}
+        proc = _run_hook(repo_root / "hooks" / "session_start.sh", payload, cwd=tmp_project)
+        assert proc.returncode == 0, proc.stderr
+        return _capsule(proc)
+
+    assert "## hippo deltas" in capsule("compact").splitlines()[-1]
+    assert "hippo deltas" not in capsule("startup")

@@ -60,6 +60,8 @@ hippo dispatch --batch <manifest.yaml> [--dry-run]
   each Claude Code subagent and Workflow run with its cost, and regenerates PRIORS when it is a
   week old and five new verdicts have landed.
 - The capsule, at session start and after every compaction: tasks, live directives, in flight.
+  In Claude Code each subagent gets the directives addressed to executors — no need to copy them
+  into its brief — and a compaction summary ends with `## hippo deltas`, commands to check and run.
 - The judge, only when `TYPESAFE_API_KEY` is set: gate hints for the scribe, notes on directives,
   routing and triage on dispatch and on a subagent's report. Without the key nothing changes.
 - The dispatch wrapper records the launch, the lane's usage and its triage.
