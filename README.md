@@ -30,7 +30,8 @@ The plugin, its slash commands, and the CLI are all named `hippo`.
 - **CLI** (`bin/hippo`) — `.hippo/` project data: tasks, ledger, priors.
 - **lanes** (`.hippo/lanes/`) — `hippo dispatch` keeps each codex lane's raw stderr
   (`<id>.log`), its final message (`<id>.out`) and a small record (`<id>.json`); the shell
-  sees one short line per command or message instead of megabytes of codex output.
+  sees one short line per command or message instead of megabytes of codex output, and
+  `hippo dispatch --watch <id>` blocks until a lane ends and prints its final lines.
 - **2 hooks** (`hooks/hooks.json`) — `SessionStart` re-injects a ≤6-line
   status block (survives compaction); `Stop` fires the scribe clerk detached,
   never blocking.
@@ -129,6 +130,7 @@ hippo prior show
 hippo prior distill [--days N]
 hippo dispatch --kind K --scope S [--task T] [--depth N] [--fast] [--] <codex exec args…>
 hippo dispatch --batch <manifest.yaml> [--dry-run]
+hippo dispatch --watch <dispatch-id> [--for SECONDS]
 # a bare noun reads: task → list, log → tail, directive → list, prior → show
 ```
 

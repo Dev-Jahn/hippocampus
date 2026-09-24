@@ -331,3 +331,112 @@ def test_a_signal_to_a_batch_reaches_every_running_lane(tmp_project, tmp_path):
     exits = [r for r in _journal(manifest) if r["event"] == "exit"]
     assert sorted(r["rc"] for r in exits) == [-15, -15]
     assert "stopped by SIGTERM" in err.decode()
+
+
+# --------------------------------------------------------------------------
+# `hippo dispatch --watch <id> [--for SECONDS]` — reads .hippo/lanes/ only
+# --------------------------------------------------------------------------
+
+SLOW = (
+    "#!/bin/sh\n"
+    f"printf 'session id: {SESSION}\\nexec\\n/bin/zsh -lc \"pytest -q\" in /w\\n' >&2\n"
+    "python3 -c 'import time; time.sleep(float(\"'\"${SLOW:-4}\"'\"))'\n"
+    "printf 'All green.\\n'\n"
+)
+
+
+def _watch(project, *args, timeout=60):
+    return subprocess.run([str(HIPPO_BIN), "dispatch", "--watch", *args], cwd=project,
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def _launch(project, tmp_path, body=SLOW, env=None):
+    full = {**os.environ, "PATH": _stub_codex(tmp_path, body), "HIPPO_DISPATCH": "",
+            **(env or {})}
+    child = subprocess.Popen([str(HIPPO_BIN), "dispatch", "--kind", "impl", "--scope",
+                              "watched lane", "go"], cwd=project, env=full,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return child, _did(child.stdout.readline())
+
+
+def test_watch_reports_a_running_lane_and_exits_3_when_its_time_is_up(tmp_project, tmp_path):
+    child, did = _launch(tmp_project, tmp_path, env={"SLOW": "8"})
+    try:
+        # Past one LANE_EVERY: the command that followed the session line is on record.
+        t0 = time.monotonic()
+        proc = _watch(tmp_project, did, "--for", "4")
+        assert 4 <= time.monotonic() - t0 < 7, "it blocks for --for, no longer"
+        assert proc.returncode == hippo_cli.WATCH_RUNNING, proc.stderr
+        (line,) = proc.stdout.splitlines()
+        assert line.startswith(f"lane {did} running · ") and " · 1 cmds · last: " in line, line
+        now = _watch(tmp_project, f"dispatch:{did}", "--for", "0")  # the printed token works too
+        assert now.returncode == hippo_cli.WATCH_RUNNING and now.stdout.startswith(f"lane {did}")
+    finally:
+        child.communicate(timeout=30)
+
+
+def test_watch_blocks_until_the_lane_ends_then_prints_its_final_lines(tmp_project, tmp_path):
+    from test_batch_harvest import ACCEPT, _jev, _mock
+    judge = _jev(_mock(tmp_path, {"answers": ACCEPT,
+                                  "default": {"noul": 0.5, "choice": "none", "score": 1.0}}),
+                 tmp_path / "sent.json")
+    child, did = _launch(tmp_project, tmp_path, env=judge)
+    try:
+        t0 = time.monotonic()
+        proc = _watch(tmp_project, did)  # the default window: far longer than the lane
+        took = time.monotonic() - t0
+    finally:
+        child.communicate(timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert took < 15, "it returns when the lane ends, not when the window closes"
+    assert child.poll() is not None, "the wrapper is gone before watch returns"
+    lanes = _lanes(tmp_project)
+    assert proc.stdout.splitlines() == [
+        proc.stdout.splitlines()[0],
+        "triage accept-candidate (done .95 · blocked .02 · ask .03 · creep .04 · verify no)",
+        f"report: {lanes / f'{did}.out'}",
+        f"raw log: {lanes / f'{did}.log'}",
+    ]
+    first = proc.stdout.splitlines()[0]
+    assert first.startswith(f"lane {did} exited rc=0 after ") and \
+        first.endswith(" · 1 cmds · watched lane"), first
+
+
+def test_watch_names_a_lane_whose_wrapper_vanished(tmp_project, tmp_path):
+    lanes = _lanes(tmp_project)
+    lanes.mkdir()
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    rec = {"id": "dgone", "scope": "s", "exec": "codex/x/y", "pid": dead.pid, "pgid": None,
+           "started": "2026-09-24T00:00:00Z", "codex_session": None, "cmds": 4,
+           "last": "exec: make", "last_at": "2026-09-24T00:01:00Z", "log": "/l", "report": "/r"}
+    (lanes / "dgone.json").write_text(json.dumps(rec), encoding="utf-8")
+    proc = _watch(tmp_project, "dgone")
+    assert proc.returncode == 0
+    assert proc.stdout.splitlines() == [
+        f"lane dgone lost — its wrapper (pid {dead.pid}) is gone and recorded no end · 4 cmds "
+        "· last: exec: make", "raw log: /l"]
+    # Status recorded, `ended` not (SIGKILLed while the judge read): that lane has ended.
+    (lanes / "dgone.json").write_text(json.dumps({**rec, "status": "killed", "rc": -15,
+                                                  "signal": "SIGTERM"}), encoding="utf-8")
+    lines = _watch(tmp_project, "dgone").stdout.splitlines()
+    assert lines[0] == "lane dgone killed by SIGTERM rc=-15 after 1m00s · 4 cmds · s"
+    assert lines[1:] == ["report: none — the lane printed no final message", "raw log: /l"]
+
+
+@pytest.mark.parametrize("args, says", [
+    (["dnope"], "no lane record"),
+    (["dnope", "--for", "soon"], "--for takes seconds"),
+    (["../../etc/passwd"], "a dispatch id is required"),
+    (["dnope", "--kind", "x"], "unexpected argument"),
+])
+def test_watch_refuses_what_it_cannot_read(tmp_project, args, says):
+    proc = _watch(tmp_project, *args)
+    assert proc.returncode == 2 and says in proc.stderr, proc.stderr
+    assert "usage: hippo dispatch --watch" in proc.stderr or says == "no lane record"
+
+
+def test_watch_outside_a_project_says_where_records_live(uninitialized_dir):
+    (uninitialized_dir / ".git").mkdir()
+    proc = _watch(uninitialized_dir, "dabc")
+    assert proc.returncode == 2 and "lane records live in .hippo/lanes/" in proc.stderr

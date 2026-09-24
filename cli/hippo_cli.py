@@ -2002,7 +2002,9 @@ DISPATCH_USAGE = (
     "       children, which start at depth 0 (§9.5 — the clause is indexed, never enforced)\n"
     '       --fast: launch on codex\'s fast service tier (-c service_tier="fast"); '
     "the exec axis is unchanged\n"
-    "       batch form: hippo dispatch --batch <manifest.yaml> [--dry-run]"
+    "       batch form: hippo dispatch --batch <manifest.yaml> [--dry-run]\n"
+    "       watch form: hippo dispatch --watch <dispatch-id> [--for SECONDS] — blocks until the\n"
+    "       lane ends (exit 0, its final lines) or SECONDS pass (default 540; exit 3, its state)"
 )
 
 
@@ -2442,6 +2444,8 @@ def run_dispatch(argv):
     head = argv[: argv.index("--")] if "--" in argv else argv
     if "--batch" in head:
         return run_batch(argv)
+    if "--watch" in head:
+        return run_watch(argv)
     kind, scope, task, depth, fast, rest = split_dispatch_argv(argv)
     if fast:
         # Prepended, so a caller's own -c service_tier=… later in argv still wins (codex takes
@@ -2554,6 +2558,133 @@ def run_dispatch(argv):
             report.unlink(missing_ok=True)
     lane.close(line)
     sys.exit(128 + lane.signal if lane.signal is not None else rc)
+
+
+WATCH_FOR = 540  # seconds: under the Bash tool's 600s ceiling, so one call never outlives it
+WATCH_POLL = 1.0
+WATCH_RUNNING = 3  # exit status while the lane runs on; 0 once it ended, 2 for no such lane
+WATCH_USAGE = "usage: hippo dispatch --watch <dispatch-id> [--for SECONDS]"
+
+
+def parse_watch_argv(argv):
+    did, secs, i = None, float(WATCH_FOR), 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--watch", "--for") and i + 1 < len(argv):
+            val, i = argv[i + 1], i + 2
+        elif a.split("=", 1)[0] in ("--watch", "--for") and "=" in a:
+            a, val = a.split("=", 1)
+            i += 1
+        else:
+            die(f"dispatch --watch: unexpected argument {a!r}\n{WATCH_USAGE}", 2)
+        if a == "--watch":
+            did = val.removeprefix("dispatch:")
+            continue
+        try:
+            secs = float(val)
+        except ValueError:
+            secs = -1.0
+        if secs < 0:
+            die(f"dispatch --watch: --for takes seconds, 0 or more: {val!r}\n{WATCH_USAGE}", 2)
+    if not did or not re.fullmatch(r"[A-Za-z0-9_-]+", did):
+        die(f"dispatch --watch: a dispatch id is required, as printed on `dispatch:<id>`\n"
+            f"{WATCH_USAGE}", 2)
+    return did, secs
+
+
+def pid_alive(pid):
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def watch_state(rec):
+    """ended | running | lost. `ended` is the wrapper's last write (Lane.close), and a wrapper
+    that died after recording its status — SIGKILLed while the judge was still reading — has
+    ended too; one that recorded nothing and is gone is lost."""
+    if rec.get("ended"):
+        return "ended"
+    if pid_alive(rec.get("pid")):
+        return "running"
+    return "ended" if rec.get("status") else "lost"
+
+
+def _iso_seconds(a, b=None):
+    try:
+        t0 = datetime.strptime(a, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        t1 = (datetime.strptime(b, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+              if b else datetime.now(timezone.utc))
+    except (TypeError, ValueError):
+        return 0
+    return (t1 - t0).total_seconds()
+
+
+def watch_lines(rec, state):
+    """What `--watch` prints: one line while the lane runs, its final lines once it ended."""
+    did, cmds = rec.get("id"), rec.get("cmds", 0)
+    last = rec.get("last") or "no event yet"
+    if state == "running":
+        took = lane_elapsed(_iso_seconds(rec.get("started")))
+        return [f"lane {did} running · {took} · {cmds} cmds · last: {last}"]
+    if state == "lost":
+        return [f"lane {did} lost — its wrapper (pid {rec.get('pid')}) is gone and recorded no "
+                f"end · {cmds} cmds · last: {last}", f"raw log: {rec.get('log')}"]
+    took = lane_elapsed(_iso_seconds(rec.get("started"), rec.get("ended") or rec.get("last_at")))
+    how = (f"killed by {rec['signal']}" if rec.get("signal") else
+           "timed out" if rec.get("timed_out") else rec.get("status", "ended"))
+    lines = [f"lane {did} {how} rc={rec.get('rc')} after {took} · {cmds} cmds · "
+             f"{rec.get('scope')}"]
+    if rec.get("triage"):
+        lines.append(rec["triage"])
+    report = rec.get("report")
+    if report and (_read_text(Path(report)) or "").strip():
+        lines.append(f"report: {report}")
+    else:
+        lines.append("report: none — the lane printed no final message")
+    lines.append(f"raw log: {rec.get('log')}")
+    return lines
+
+
+def run_watch(argv):
+    """`hippo dispatch --watch <id> [--for SECONDS]` (§3.6): block until the lane's record says
+    it ended or SECONDS pass, then print its state. Reads .hippo/lanes/ only and writes
+    nothing, so the hippo:lane agent can loop it in the foreground — a blocking call is what
+    keeps that agent's turn open, and an open turn is one final notification instead of an
+    interim one plus an extra wake-up (measured)."""
+    did, secs = parse_watch_argv(argv)
+    hp = find_hippo()
+    if hp is None:
+        die("dispatch --watch: no .hippo/ found from here — lane records live in .hippo/lanes/", 2)
+    path = hp / "lanes" / f"{did}.json"
+    deadline = time.monotonic() + secs
+    while True:
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            die(f"dispatch --watch: no lane record {path}", 2)
+        except (OSError, json.JSONDecodeError):
+            rec = None  # replaced whole on every write, so this is a passing moment
+        state = watch_state(rec) if isinstance(rec, dict) else "running"
+        if state != "running":
+            # The wrapper exits right after its last write; waiting for that lets the shell that
+            # ran it finish inside this call, not after the caller's turn.
+            gone_by = time.monotonic() + LANE_DRAIN
+            while pid_alive(rec.get("pid")) and time.monotonic() < gone_by:
+                time.sleep(0.1)
+            print("\n".join(watch_lines(rec, state)))
+            sys.exit(0)
+        left = deadline - time.monotonic()
+        if left <= 0:
+            if isinstance(rec, dict):
+                print(watch_lines(rec, state)[0])
+            sys.exit(WATCH_RUNNING)
+        time.sleep(min(WATCH_POLL, left))
 
 
 def prompt_of(rest):

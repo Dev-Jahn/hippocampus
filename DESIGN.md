@@ -299,6 +299,7 @@ hippo prior show
 hippo prior distill [--days N]
 hippo dispatch --kind K --scope S [--task T] [--depth N] [--fast] [--] <codex exec args…>
 hippo dispatch --batch <manifest.yaml> [--dry-run]
+hippo dispatch --watch <dispatch-id> [--for SECONDS]
 # a bare noun reads: task → list, log → tail, directive → list, prior → show
 hippo scribe --transcript P --session S   # internal: the Stop hook calls it detached
 ```
@@ -504,6 +505,20 @@ memory pressure once main has been idle 30 minutes with no agent running, and wi
 agent's shells. Its kill is SIGTERM to the whole process tree, then SIGKILL 1.5s later
 (2.1.281), so the order is status and rc first, then usage, then the judge — the part that may
 not fit in 1.5s is the part that may go missing.
+
+**Watching a lane.** `hippo dispatch --watch <id> [--for SECONDS]` blocks until the lane's
+record says it ended or SECONDS pass (default 540, under the Bash tool's 600s ceiling). Still
+running, it prints one line — `lane <id> running · <elapsed> · <cmds> cmds · last: <event>` —
+and exits 3; ended, it prints the final lines — `lane <id> exited rc=0 after 5m12s · 14 cmds ·
+<scope>`, the triage line when there is one, `report: <path>`, `raw log: <path>` — and exits 0;
+no record is 2, outside a project too (like the launch, this surface is never silent: a
+watcher told nothing would read it as an end). It reads `.hippo/lanes/` and writes nothing.
+A record without `ended` whose
+wrapper pid is gone has ended if it holds a status (the wrapper died while the judge read) and
+is `lost` if not. Once the lane ended it waits up to 2s for the wrapper to exit, so the shell
+that ran the lane finishes inside the call rather than after it; `--for 0` is a one-shot read.
+It exists for the lane agent below, which must keep its turn open while the lane runs — and a
+blocking foreground call, never a sleep, is what keeps it open.
 
 Why it is a CLI subcommand: a plugin puts only `bin/` on PATH, and `${CLAUDE_PLUGIN_ROOT}` is empty
 in an ordinary Bash call. Leaving it in `scripts/` means every consuming project grows its own shim
