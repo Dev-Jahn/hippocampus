@@ -26,12 +26,14 @@ SHIP=(
   .gitignore
   LICENSE
   README.md
+  agents
   bin
   cli
   clerks
   hooks
   prices.yaml
   scripts
+  settings.json
   skills
 )
 

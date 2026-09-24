@@ -1,0 +1,6 @@
+{
+  "subagentStatusLine": {
+    "type": "command",
+    "command": "d=$PWD; p=; while :; do if [ -f \"$d/.hippo/lanes/.statusline\" ]; then p=$d/.hippo/lanes/.statusline; break; fi; if [ -z \"$d\" ] || [ -d \"$d/.git\" ] || [ \"$d\" = \"$HOME\" ]; then break; fi; d=${d%/*}; done; if [ -n \"$p\" ] && [ -O \"$p\" ]; then s=$(cat \"$p\"); case $s in /*/scripts/lane_status.py) [ -f \"$s\" ] && [ -O \"$s\" ] && exec python3 \"$s\";; esac; fi; exec cat >/dev/null"
+  }
+}

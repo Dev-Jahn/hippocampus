@@ -92,7 +92,9 @@ Judge guardrails (invariant):
 
 ```
 runtime (thin):   bin/hippo (shim) + cli/hippo_cli.py + 4 hooks (2 on Codex) + scripts/{clerk_run,digest_lite,dispatch}
+                  + settings.json → scripts/lane_status.py (the lane row in Claude Code's agent panel)
 cognition (text): clerks/{turn-scribe,distiller}.md + clerks/jev/*.yaml + skills/{hippo,checkup,dispatch}
+                  + agents/lane.md
 resident (small): the capsule injected at SessionStart (§6 below)
 enforcement:      none
 ```
@@ -108,13 +110,14 @@ enforcement:      none
   cursors.json      # the scribe's per-session transcript cursors
   failures/         # dumps of clerk output that failed validation (checkup reports them)
   briefs/           # delegation briefs (COMMON.md + one file per task) — see below
+  lanes/            # per codex lane: its record, raw stderr and report (§3.6); pruned after 7 days
   config.yaml       # optional: overrides such as the clerk backend (everything works without it)
 ```
 
 In a directory with no `.hippo/`, every hook and every CLI command is a **completely silent no-op**
 (zero contamination of other projects).
 
-Every file hippo rewrites (tasks, worklog, PRIORS, cursors) is replaced whole: written to a tmp file
+Every file hippo rewrites (tasks, worklog, PRIORS, cursors, lane records) is replaced whole: written to a tmp file
 beside it, fsync'd, then renamed over it (`write_durable`). The ledger is only ever appended to.
 Measured (b200, 2026-09-23): a node failure during an in-place worklog rewrite left steno's 412KB
 worklog.md at 0 bytes on a shared filesystem that kept the truncation and lost the data.
@@ -313,6 +316,7 @@ hippo prior show
 hippo prior distill [--days N]
 hippo dispatch --kind K --scope S [--task T] [--depth N] [--fast] [--] <codex exec args…>
 hippo dispatch --batch <manifest.yaml> [--dry-run]
+hippo dispatch --watch <dispatch-id> [--for SECONDS]
 # a bare noun reads: task → list, log → tail, directive → list, prior → show
 hippo scribe --transcript P --session S   # internal: the Stop hook calls it detached
 ```
@@ -529,7 +533,9 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
    **Codex is unchanged**: a `spawn_agent`'s brief is encrypted in the rollout
    (`gAAAAB…`), so the clerk keeps recording those children from the digest.
 4. Resolve the backend: `config.yaml > $HIPPO_CLERK_BACKEND > automatic (codex/gpt-6-luna/low when
-   codex exists, otherwise claude -p sonnet) > mock` (for tests). 120s timeout. `$HIPPO_CLERK_MODEL`
+   codex exists, otherwise claude -p sonnet at low effort) > mock` (for tests). That pair is hippo's
+   one cheap tier (the lane agent, §3.6, is its sonnet-low half); hippo runs no haiku (the A/B note
+   in clerk_run.sh). 120s timeout. `$HIPPO_CLERK_MODEL`
    overrides the model on whichever backend is resolved; it is one variable for both, so pin the
    backend when you set it — a model id for one backend is invalid on the other.
 5. Prompt = `clerks/turn-scribe.md` + the live directive roster + the recent dispatch roster + the
@@ -613,7 +619,7 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
 A codex exec wrapper: the point that already knows the model and effort from its own argv is
 exactly the point to collect them automatically (principle 6). It takes the `--kind`, `--scope` and
 `--task` labels, records `ev:dispatch`, prints the dispatch id on stdout's first line, and then runs
-`codex exec … < /dev/null`, forwarding every line unmodified. A `--fast` flag prepends
+`codex exec … < /dev/null`, passing its stdout through unmodified. A `--fast` flag prepends
 `-c service_tier="fast"` to the codex arguments — a per-launch latency choice carried in argv like
 the rest of codex's grammar, invisible to the exec axis. It also plants
 `HIPPO_DISPATCH=<id>`, `HIPPO_DEPTH` and `HIPPO_DIR`
@@ -625,11 +631,119 @@ launch made from inside a lane records that lane as `parent`. Since 1.10.0 the w
 pass-through rather than an exec: it stays alive to *read* (never rewrite) the stream — the
 banner's session id and model, the "tokens used" footer — and at lane exit records `ev:usage`
 from the rollout or the footer (§9.6). Those markers ride codex's *stderr* (measured, 0.144.6;
-stdout carries only the agent's own output) — so stderr is the one piped-and-forwarded stream,
-and stdout passes through untouched. 1.10.0–1.11.0 read stdout instead, saw no session id, and
+stdout carries only the agent's own output) — so stderr is the stream it reads, and stdout
+passes through untouched. 1.10.0–1.11.0 read stdout instead, saw no session id, and
 silently recorded nothing — the stub test had encoded the wrong stream; fixed in 1.11.1. It does not record an
 outcome — the acceptance judgment belongs to main (through the CLI directly) or to the scribe
 (by inference); what the lane itself records under that id is a claim, never the verdict.
+
+**The lane's own record** (1.15.0). In Claude Code a background `hippo dispatch` showed as a
+shell row labelled with its raw command, and nobody could see what the lane was doing: codex's
+raw stderr runs to megabytes (one lane: 56k lines, 2.3MB), so 18 of 18 real background launches
+redirected it (`> log 2>&1; tail`), and the shell's details view shows the last 10 lines of the
+last 8KB. The wrapper now keeps what those redirects improvised. codex's raw stderr goes whole
+to `.hippo/lanes/<id>.log` — still read on the way for the banner, the footer and triage's
+400-line tail — and stdout, passed through byte for byte, is kept as `<id>.out`: the agent's
+final message, which is the lane's report. The shell's stderr gets a compact stream instead:
+one line per new codex command (`lane <scope> · <elapsed> · exec: <command, one line, ≤100
+chars>`, recognized only in codex's own `<shell> -lc '…' in <cwd>` shape — 1,657 of 1,657 in
+sixteen real logs) and per agent message (`… · said: <first sentence, ≤120 chars>`), at most
+one line per 3s with the newest event winning, then the final line (`exited rc=0 · 14 cmds ·
+187,135 tokens · raw log <path>`) and the triage line. No compact line may read as a prompt:
+Claude Code wakes main when a background shell has not grown for 45s and its last line matches
+one of seven patterns in its binary — `(y/n)`, `[y/n]`, `(yes/no)`, a `Do you|Would you|Shall
+I|Are you sure|Ready to …?` question, `Press any key|Enter` (no word boundary: `express any key`
+matches), `Continue?`, `Overwrite?` — so the three characters those need — `?`, the space after
+`press`, the slash of `y/n` — are swapped for look-alikes. `.hippo/lanes/<id>.json` holds only
+what the rollout cannot give back cheaply — `id scope exec pid pgid started codex_session cmds
+last last_at log report` (paths absolute: the record is read from any cwd), then `status` (`exited|killed`), `rc`, `signal`, `triage` and, written
+last, `ended` — rewritten whole at the stream's cadence, and a new lane start prunes lane files
+older than 7 days (no schedule, §4). Batch lanes run through the same machinery: `<id>.err`
+keeps its shape as the raw log, the compact lines join the batch's stderr, and each lane gets
+its record under its dispatch id. Without `.hippo/` there is no record, and the raw log goes to
+a temp file the final line names.
+
+**The kill trap.** codex runs in a session of its own, so a signal reaches it only through the
+wrapper: SIGTERM, SIGHUP and SIGINT are forwarded to codex's process group (SIGKILL after 5s if
+it lingers, and whatever of the group outlives codex is killed with it), the record says
+`killed` and the signal within 0.5s — not once codex has exited: a stub codex taking 3s to exit
+was SIGKILLed with its wrapper before either was on record — and gets its rc when codex exits,
+`ev:usage` comes from the rollout as on any exit, triage runs when the judge is on, and the
+wrapper exits 128+signal (a batch stops launching, signals every running lane and exits the
+same way; rerunning it resumes). The handlers hold only while codex can run: a signal during
+the launch notes, or during a batch's harvest, takes its default action and stops the wrapper. Before 1.15.0 a killed lane recorded
+no rc, no usage and no triage — and Claude Code does kill background shells: under critical
+memory pressure once main has been idle 30 minutes with no agent running, and with a stopped
+agent's shells. Its kill is SIGTERM to the whole process tree, then SIGKILL 1.5s later
+(2.1.281), so the order is status and rc first, then usage, then the judge — the part that may
+not fit in 1.5s is the part that may go missing.
+
+**Watching a lane.** `hippo dispatch --watch <id> [--for SECONDS]` blocks until the lane's
+record says it ended or SECONDS pass (default 540, under the Bash tool's 600s ceiling). Still
+running, it prints one line — `lane <id> running · <elapsed> · <cmds> cmds · last: <event>` —
+and exits 3; ended, it prints the final lines — `lane <id> exited rc=0 after 5m12s · 14 cmds ·
+<scope>`, the triage line when there is one, `report: <path>`, `raw log: <path>` — and exits 0;
+no record is 2, outside a project too (like the launch, this surface is never silent: a
+watcher told nothing would read it as an end). It reads `.hippo/lanes/` and writes nothing.
+A record without `ended` whose
+wrapper pid is gone has ended if it holds a status (the wrapper died before codex exited, or
+while the judge read) and is `lost` if not. Once the lane ended it waits up to 2s for the wrapper to exit, so the shell
+that ran the lane finishes inside the call rather than after it; `--for 0` is a one-shot read.
+It exists for the lane agent below, which must keep its turn open while the lane runs — and a
+blocking foreground call, never a sleep, is what keeps it open.
+
+**The lane agent** (`agents/lane.md`, Claude Code). A codex lane launched as `Agent(subagent_type:
+"hippo:lane", description: "<scope>", prompt: "<the hippo dispatch command>")` gets a row in the
+agent panel — Enter opens its transcript, x stops it, and the kill trap records the stop. The agent
+is sonnet at low effort with Bash alone (hippo's cheap Claude tier; it runs no haiku — §3.5.4): it
+runs the command verbatim in the background, reads the id off its output's `dispatch:<id>` line,
+loops `--watch` in the foreground, and replies with the final lines, which reach main as the one
+completion notification. Measured before building (spike, 2026-09-24): an agent that ends its turn
+while its background job runs shows `completed` on its row, and main then gets an interim
+notification plus an extra wake-up turn when the job ends; an agent whose turn stays open on
+blocking calls causes neither. Measured end to end (2.1.281, a stub codex behind a real hippo:lane,
+2026-09-24): main got one notification per lane — the lane shell's own completion reached the agent
+inside its last watch call, not after its turn — and x on the row was recorded `killed by SIGTERM`,
+triage included, within a second. The relay's cost, re-measured at sonnet/low (headless 2.1.281, a
+stub codex, 2026-09-24): 4 calls, 10.4k cache-read + 4.5k cache-write + 0.6k output tokens for a
+24s lane, with exactly the three Bash calls its body names; each further 9-minute watch window adds
+one short call. (The first build ran haiku: 17.1k + 7.1k + 1.5k on a 1m27s lane, and it did not
+keep to the body's calls.) It is a relay, not the delegate surface §4 retired: it routes nothing
+and binds no role — main still chose the exec in the command it hands over — and it never edits
+that command, stops the lane or does its work, so no judgment of its own reaches the record. The
+plain Bash form stays for the Codex host, which has no agent panel, and for a lane launched from
+inside a lane.
+
+**The row** (`settings.json` → `subagentStatusLine` → `scripts/lane_status.py`). Claude Code
+runs a plugin's subagentStatusLine about every 5s with the visible agent rows on stdin. For each
+row whose `subagents/agent-<id>.meta.json` says `hippo:lane`, the script takes the lane's
+dispatch id from that agent's transcript (the last `dispatch:<id>` or `--watch <id>` in it —
+the prompt, which comes first, is main's text and may quote other ids), reads
+`.hippo/lanes/<id>.json` walking up from the row's cwd, and prints `{"id": …, "content": "codex
+· <scope> · <elapsed> · <cmds> cmds · <last event>"}`, cut to the row's width; an ended lane
+shows its status, rc and duration instead, and one whose wrapper is gone with no status shows
+`lost` — never a timer still counting. Every other row is left out, which keeps Claude
+Code's own rendering (measured, 2.1.281: `◯ general-purpose  <description> … 15s · ↓ 20.3k
+tokens`; documented: an omitted id keeps the default, an empty content hides the row) — a
+printed row replaces the whole default, type, description and stats alike. Stdlib only and no
+subprocess, because it runs on every tick of every session with the plugin on: 25ms median
+(29ms max) for a tick with a lane row and three others, 4ms where no lane ever started. How
+the plugin reaches its own script: Claude Code 2.1.281 neither substitutes
+`${CLAUDE_PLUGIN_ROOT}` in a plugin's settings.json nor exports it to that command (measured:
+it expanded to nothing), the documented placeholder list covers skill and agent content, hook
+and monitor commands and MCP/LSP servers only, the plugin `bin/` is on the Bash tool's PATH
+but not this command's, and the command runs in the project directory. So the command is a
+short `sh` walk up from there to `.hippo/lanes/.statusline`, a pointer holding the script's
+absolute path that every lane start rewrites (best effort: lanes starting in one instant share
+its tmp file, and a lost rename must not cost a lane its record) — the wrapper is the one
+process that knows where the plugin lives — and a project that never launched a lane pays one
+`sh` per tick and no python. The pointer is data that names code the command runs as the user,
+on every tick of any session with the plugin on, so the walk stops where `find_hippo` does (a
+`.git` directory, `$HOME`: an ancestor's `.hippo/` may be another user's — a world-writable
+`/tmp` is one), and it runs only an absolute `…/scripts/lane_status.py` the user owns, named by
+a pointer the user owns. After a plugin update the pointer names a deleted cache path until the next lane
+start, and until then every row keeps its default. The plugin's value is a default: a user's
+own `subagentStatusLine` replaces it (and would have to render hippo:lane rows itself).
 
 Why it is a CLI subcommand: a plugin puts only `bin/` on PATH, and `${CLAUDE_PLUGIN_ROOT}` is empty
 in an ordinary Bash call. Leaving it in `scripts/` means every consuming project grows its own shim
@@ -889,6 +1003,7 @@ engine (measured on 0.144.6).
 | Hooks | `hooks/hooks.json` (the default) plus `hooks/claude-hooks.json`, named by the manifest — all four (§3.4) | `hooks/hooks.json`, named by the manifest — SessionStart and Stop, **the same file**; event keys (PascalCase), matcher, stdin payload fields and the SessionStart `hookSpecificOutput.additionalContext` envelope are all identical (codex ≥0.146 rejects bare text, §3.4) |
 | Plugin `bin/` | added to PATH automatically | **not added** → a skill resolves `bin/hippo` relative to its own SKILL.md; a dispatched lane gets it from the wrapper (§3.6) |
 | Transcript | Claude JSONL | codex rollout JSONL — `digest_lite.py` detects the format from the first lines and reduces both to the same line vocabulary |
+| Agent panel | `agents/lane.md` (`hippo:lane`) + `settings.json` `subagentStatusLine` (§3.6) | none — a lane launches through plain Bash, and `hippo dispatch --watch` works the same |
 
 Constraints specific to codex (0.144.6):
 

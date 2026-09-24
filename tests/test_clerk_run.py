@@ -58,6 +58,7 @@ def test_auto_falls_back_to_claude(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert argv[0] == "-p"
     assert argv[argv.index("--model") + 1] == "sonnet"
+    assert argv[argv.index("--effort") + 1] == "low"
     assert "--strict-mcp-config" in argv
     assert "--setting-sources" in argv
     # --tools "" — the empty argument really is empty, not dropped.

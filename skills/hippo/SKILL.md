@@ -37,6 +37,7 @@ hippo prior show
 hippo prior distill [--days N]
 hippo dispatch --kind K --scope S [--task T] [--depth N] [--fast] [--] <codex exec args…>
 hippo dispatch --batch <manifest.yaml> [--dry-run]
+hippo dispatch --watch <dispatch-id> [--for SECONDS]
 # a bare noun reads: task → list, log → tail, directive → list, prior → show
 ```
 
@@ -48,7 +49,8 @@ hippo dispatch --batch <manifest.yaml> [--dry-run]
   `--audience main` when a lane never needs it. A rule for the next answer only is not one.
 - An external review arrives → `log review`; its findings dealt with → `log review-status`.
 - Before routing a delegation → `prior`.
-- Codex lanes → `dispatch`; many at once → `--batch` (`/hippo:dispatch` has the contract).
+- Codex lanes → `dispatch`; many at once → `--batch` (`/hippo:dispatch` has the contract);
+  `--watch <id>` waits for one to end and prints its report path.
 - A subagent or Workflow run (in Codex, a `spawn_agent` child): no call — hippo records the
   launch and your verdict from the transcript at the end of the turn (in Claude Code its cost
   too, under the id `ag-<agentId>`).
