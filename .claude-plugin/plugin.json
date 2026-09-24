@@ -1,6 +1,6 @@
 {
   "name": "hippo",
-  "version": "1.14.3",
+  "version": "1.15.0",
   "description": "hippocampus — perception and memory for coding agents: task registry, outcome ledger, and background clerks that turn transcripts into evidence. Records; never enforces. CLI and slash commands are `hippo`.",
   "author": {
     "name": "Jahn",
@@ -8,6 +8,7 @@
   },
   "repository": "https://github.com/Dev-Jahn/hippocampus",
   "license": "MIT",
+  "hooks": "./hooks/claude-hooks.json",
   "keywords": [
     "hippocampus",
     "memory",

@@ -1,6 +1,6 @@
 ---
 name: dispatch
-description: Operating contract for delegation lanes — hand several tasks to external executors (codex exec, claude -p) and subagents at once while main collects, verifies and merges. Use when the user says "launch in parallel", "split it up", "run a batch", or "start everything you can". Worth reading for a single delegation too, when the call pattern or worktree isolation matters.
+description: Operating contract for delegation lanes — hand several tasks to external executors (codex exec) and subagents at once while main collects, verifies and merges. Use when the user says "launch in parallel", "split it up", "run a batch", or "start everything you can". Worth reading for a single delegation too, when the call pattern or worktree isolation matters.
 ---
 
 # hippo: dispatch — delegation lanes
@@ -38,6 +38,12 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   "$(cat .hippo/briefs/COMMON.md .hippo/briefs/pass2.md)"
 ```
 
+- **On Claude Code, launch a single lane through the lane agent**: `Agent(subagent_type:
+  "hippo:lane", description: "<scope>", prompt: "<the hippo dispatch command above>")`. The
+  lane gets a row in the agent panel with its latest command or message (Enter opens it, x
+  stops it — the kill is recorded), and one notification arrives when it ends: rc, triage,
+  report path, raw-log path. Read the report from there. The plain Bash form stays for the
+  Codex host and for a lane launched from inside a lane.
 - **`--kind` is the PRIORS axis — reuse a tag**: `impl fix perf verify audit design research
   spike docs infra chore` (one ledger carried 26 tags over 108 dispatches, 19 used once). The
   subject goes in `--scope`.
@@ -52,8 +58,13 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
 - The wrapper records the launch, closes stdin, plants `HIPPO_DISPATCH`/`HIPPO_DEPTH`/
   `HIPPO_DIR`, and puts its own `bin/` first on the lane's PATH (a bare `hippo` works on both
   hosts): the lane's capsule carries its directives and report line, and its
-  `log outcome` is a **claim** — the verdict is main's. Launch through `run_in_background`,
-  never nohup/disown (orphans). A codex argument that collides with a wrapper flag goes after `--`.
+  `log outcome` is a **claim** — the verdict is main's. The plain form launches through
+  `run_in_background`, never nohup/disown (orphans), and never redirects its output
+  (`> log 2>&1`): the wrapper keeps codex's raw stderr in `.hippo/lanes/<id>.log` and the
+  report in `<id>.out`, and prints one short line per command or message. A killed lane still
+  records its rc and usage. A codex argument that collides with a wrapper flag goes after `--`.
+- A subagent, fork or Workflow run — or a Codex `spawn_agent` child — needs no hippo call: the
+  scribe records it and your verdict (in Claude Code its cost too, as `ag-<agentId>`).
 - `--depth 1` = an orchestrator lane that may spawn; its children start at 0. Lane-origin
   launches pass a dollar breaker ($500 per parent per 24h, `dispatch: {max_wave_usd: N}` in
   `.hippo/config.yaml`); main is never gated.
@@ -87,8 +98,8 @@ entries:
 - **`--dry-run` is the plan**: difficulty per brief, the suggested exec, notes. An entry with
   no `model` launches on the suggestion when `TYPESAFE_API_KEY` is set; without it, `model` is
   required. The manifest is per-batch data, never standing config.
-- Editing entries get worktrees created by main first: codex via `-C` in `args`, claude via
-  `cwd: .claude/worktrees/<id>` (claude has no `-C`).
+- Editing entries get worktrees created by main first: `-C` in `args`, or
+  `cwd: .claude/worktrees/<id>`.
 - **One batch per stage; main stays between stages.** Do not encode a DAG into one manifest.
 - **Mass-identical failures are one defect**: 130 identical check failures were one missing
   `pytest.ini`, paid as 130 repair lanes. Diagnose the cluster, repair it with one brief.

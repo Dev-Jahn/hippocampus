@@ -28,13 +28,27 @@ The plugin, its slash commands, and the CLI are all named `hippo`.
 ## Components
 
 - **CLI** (`bin/hippo`) — `.hippo/` project data: tasks, ledger, priors.
-- **2 hooks** (`hooks/hooks.json`) — `SessionStart` re-injects a ≤6-line
-  status block (survives compaction); `Stop` fires the scribe clerk detached,
-  never blocking.
+- **lanes** (`.hippo/lanes/`) — `hippo dispatch` keeps each codex lane's raw stderr
+  (`<id>.log`), its final message (`<id>.out`) and a small record (`<id>.json`); the shell
+  sees one short line per command or message instead of megabytes of codex output, and
+  `hippo dispatch --watch <id>` blocks until a lane ends and prints its final lines.
+- **4 hooks** (`hooks/hooks.json` on both hosts, plus Claude Code's
+  `hooks/claude-hooks.json`) — `SessionStart` re-injects a ≤6-line status
+  block (survives compaction); `Stop` fires the scribe clerk detached, never
+  blocking; in Claude Code, `SubagentStart` hands each subagent the directives
+  addressed to executors, and `PreCompact` asks the compaction summary to end
+  with `## hippo deltas` — commands for main to check and run afterwards.
 - **clerks** (`clerks/*.md`) — headless prompts: `turn-scribe` digests a
-  session into worklog + ledger events, `distiller` regenerates `PRIORS.md`
+  session into worklog + ledger events (Claude Code subagents and Workflow
+  runs are recorded like codex lanes: launch, cost per model, your verdict —
+  no call needed), `distiller` regenerates `PRIORS.md`
   (the scribe runs it when the page is a week old and five new verdicts have
   landed; `hippo prior distill` runs it by hand).
+- **agent** (`agents/lane.md`, Claude Code) — `hippo:lane` runs one codex lane so it has a
+  row in the agent panel, and hands main the lane's final lines when it ends. The plugin's
+  `settings.json` points the panel's `subagentStatusLine` at `scripts/lane_status.py`, so that
+  row reads `codex · <scope> · <elapsed> · <cmds> cmds · <last command or message>`; other
+  agents' rows are left as Claude Code draws them.
 - **skills** (`skills/*`) — `hippo` (the whole CLI grammar, one screen),
   `checkup` (project diagnosis, recommend-first), `dispatch` (delegation
   lanes with evidence-proportional verification).
@@ -90,10 +104,12 @@ With `TYPESAFE_API_KEY` in the environment, hippo asks TypeSafe's Jev — a judg
 that returns probabilities, never prose — a few typed questions at moments where it already
 holds the text: the scribe's digest (advisory hints for the clerk), the live directive set
 (`directive add`, `directive list`), every dispatch's brief before it launches and
-its report at exit (single and `--batch` alike). Answers are evidence a code policy thresholds;
-the judge never writes a verdict. There is no setting and no prompt: without the
-key, every command behaves exactly as it always has. Question specs are text in
-`clerks/jev/*.yaml`; the design is `DESIGN.md` §2 (judge), §3.6, §3.9.
+its report at exit (single and `--batch` alike), and each Claude Code subagent's or
+Workflow run's brief and report at its first completion, which the scribe finds at Stop.
+Answers are evidence a code policy thresholds; the judge never writes a verdict. There is no
+setting and no prompt: without the key, every command behaves exactly as it always has.
+Question specs are text in `clerks/jev/*.yaml`; the design is `DESIGN.md` §2 (judge), §3.5,
+§3.6, §3.9.
 
 ## CLI cheat sheet
 
@@ -126,6 +142,7 @@ hippo prior show
 hippo prior distill [--days N]
 hippo dispatch --kind K --scope S [--task T] [--depth N] [--fast] [--] <codex exec args…>
 hippo dispatch --batch <manifest.yaml> [--dry-run]
+hippo dispatch --watch <dispatch-id> [--for SECONDS]
 # a bare noun reads: task → list, log → tail, directive → list, prior → show
 ```
 

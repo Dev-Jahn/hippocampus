@@ -37,6 +37,7 @@ hippo prior show
 hippo prior distill [--days N]
 hippo dispatch --kind K --scope S [--task T] [--depth N] [--fast] [--] <codex exec args…>
 hippo dispatch --batch <manifest.yaml> [--dry-run]
+hippo dispatch --watch <dispatch-id> [--for SECONDS]
 # a bare noun reads: task → list, log → tail, directive → list, prior → show
 ```
 
@@ -48,16 +49,23 @@ hippo dispatch --batch <manifest.yaml> [--dry-run]
   `--audience main` when a lane never needs it. A rule for the next answer only is not one.
 - An external review arrives → `log review`; its findings dealt with → `log review-status`.
 - Before routing a delegation → `prior`.
-- Codex lanes → `dispatch`; many at once → `--batch` (`/hippo:dispatch` has the contract).
+- Codex lanes → `dispatch`; many at once → `--batch` (`/hippo:dispatch` has the contract);
+  `--watch <id>` waits for one to end and prints its report path.
+- A subagent or Workflow run (in Codex, a `spawn_agent` child): no call — hippo records the
+  launch and your verdict from the transcript at the end of the turn (in Claude Code its cost
+  too, under the id `ag-<agentId>`).
 - Lost your place → `status`.
 
 ## What runs by itself
 
-- The scribe, at every Stop: turns the transcript into ledger events and a worklog line, and
-  regenerates PRIORS when it is a week old and five new verdicts have landed.
+- The scribe, at every Stop: turns the transcript into ledger events and a worklog line, records
+  each Claude Code subagent and Workflow run with its cost, and regenerates PRIORS when it is a
+  week old and five new verdicts have landed.
 - The capsule, at session start and after every compaction: tasks, live directives, in flight.
+  In Claude Code each subagent gets the directives addressed to executors — no need to copy them
+  into its brief — and a compaction summary ends with `## hippo deltas`, commands to check and run.
 - The judge, only when `TYPESAFE_API_KEY` is set: gate hints for the scribe, notes on directives,
-  routing and triage on dispatch. Without the key nothing changes.
+  routing and triage on dispatch and on a subagent's report. Without the key nothing changes.
 - The dispatch wrapper records the launch, the lane's usage and its triage.
 - Recording through the CLI only raises certainty; nothing breaks if you skip a record.
 
