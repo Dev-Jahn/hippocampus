@@ -338,14 +338,34 @@ def tasks_load(hp):
     return data
 
 
-def tasks_save(hp, data):
-    p = hp / "tasks.yaml"
-    tmp = p.with_suffix(".yaml.tmp")
-    tmp.write_text(
-        yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=100),
-        encoding="utf-8",
-    )
+def write_durable(p, text):
+    """Replace `p` with `text` so that a crash at any instant leaves the old file or the new
+    one, never an empty or half-written one. Measured on b200 (2026-09-23): a node failure
+    during the scribe's worklog rewrite left steno's 412KB worklog.md at 0 bytes — it was
+    rewritten in place (truncate, then write), and the shared filesystem kept the truncation
+    but not the data. A tmp file in the same directory (os.replace needs one filesystem),
+    flushed and fsync'd before the rename, closes both halves of that window."""
+    tmp = p.with_name(p.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, p)
+    try:  # the rename itself lives in the directory entry; best effort where dirs can't be opened
+        fd = os.open(p.parent, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def tasks_save(hp, data):
+    write_durable(hp / "tasks.yaml",
+                  yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=100))
 
 
 def find_task(data, tid):
@@ -1892,9 +1912,7 @@ def distill(hp, days, src=None):
         )
         append_event(hp, {**meter, "ok": False}, src=src)
         return False, f"distill failed ({reason}) — dump: {p}"
-    tmp = hp / "PRIORS.md.tmp"
-    tmp.write_text(out.strip() + "\n", encoding="utf-8")
-    os.replace(tmp, hp / "PRIORS.md")
+    write_durable(hp / "PRIORS.md", out.strip() + "\n")
     append_event(hp, {**meter, "ok": True}, src=src)
     return True, f"PRIORS.md regenerated ({len(kept)} events / {days} days, {ms}ms)"
 
@@ -1951,7 +1969,7 @@ def worklog_append(hp, text):
         if lines and lines[-1].strip():
             lines.append("")
         lines += [hdr, "", entry]
-    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_durable(p, "\n".join(lines) + "\n")
 
 
 def load_cursors(hp):
@@ -1971,14 +1989,7 @@ def load_cursors(hp):
 
 
 def save_cursors(hp, cursors):
-    # tmp + os.replace: dying mid-write never leaves a half-written cursors.json.
-    # (tmp lives inside .hippo/ because os.replace requires the same filesystem.)
-    p = hp / "cursors.json"
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps(cursors, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    os.replace(tmp, p)
+    write_durable(hp / "cursors.json", json.dumps(cursors, ensure_ascii=False, indent=2) + "\n")
 
 
 DISPATCH_USAGE = (

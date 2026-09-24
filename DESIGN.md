@@ -114,6 +114,11 @@ enforcement:      none
 In a directory with no `.hippo/`, every hook and every CLI command is a **completely silent no-op**
 (zero contamination of other projects).
 
+Every file hippo rewrites (tasks, worklog, PRIORS, cursors) is replaced whole: written to a tmp file
+beside it, fsync'd, then renamed over it (`write_durable`). The ledger is only ever appended to.
+Measured (b200, 2026-09-23): a node failure during an in-place worklog rewrite left steno's 412KB
+worklog.md at 0 bytes on a shared filesystem that kept the truncation and lost the data.
+
 `briefs/` is the one directory hippo does not read. It exists because delegation briefs had no
 home: the host hands each session a different absolute scratchpad path, so every batch retyped a
 40-character prefix, and a consuming project eventually invented its own fixed path anyway
