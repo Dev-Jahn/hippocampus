@@ -1348,7 +1348,12 @@ def resolve_ref(hp, ref):
 
     Resolution is over the task's dispatches that have no outcome yet, because that is the one an
     outcome is about. Two candidates is a genuine ambiguity between parallel lanes, so it lists
-    them and fails rather than guessing."""
+    them and fails rather than guessing. An unjudged native row (`ag-`, §3.5.3c) is no candidate
+    while any other dispatch is: the scribe tags every subagent whose brief names the task, and
+    most of those — look-ups, surveys, checks — never get a verdict (the reason `prior_facts`
+    leaves them out of the open items), so counting them would make `task:` fail for good the
+    first time a subagent named the task (13 such rows for one task in a replayed mlx-vlm
+    session). Alone, a native row is still the one."""
     if not isinstance(ref, str) or not ref.startswith("task:"):
         return ref
     task = ref[len("task:"):]
@@ -1358,6 +1363,7 @@ def resolve_ref(hp, ref):
     if not hits:
         die(f"--ref {ref}: no dispatch recorded for task {task!r}")
     open_ = [e for e in hits if e.get("id") not in judged]
+    open_ = [e for e in open_ if not str(e.get("id", "")).startswith(NATIVE_PREFIX)] or open_
     if len(open_) == 1:
         return open_[0]["id"]
     if not open_:
@@ -4191,12 +4197,13 @@ def native_refs(rows, runs):
 
 
 def native_open(hp, transcript, since, end):
-    """Step 3c's first half, before the clerk → {runs, listed, window}, or None when the
-    transcript launched nothing (a Codex rollout never does: its spawn_agent children are the
-    clerk's, from the digest, as before). `listed` is what the clerk is asked for: each run
+    """Step 3c's first half, before the clerk → {runs, listed, window, recorded}, or None when
+    the transcript launched nothing (a Codex rollout never does: its spawn_agent children are
+    the clerk's, from the digest, as before). `listed` is what the clerk is asked for: each run
     with no row yet, launched within NATIVE_LIST_H — a run the clerk skips stays listed next
     window. `window` is the top-level runs this window touched, which is when a fork, subagent
-    or workflow dispatch under any other id can only be a restatement of one."""
+    or workflow dispatch under any other id can only be a restatement of one. `recorded`
+    collects the runs this clerk output gives a row (`native_record`)."""
     runs = native_index(transcript, since, end)
     if not runs:
         return None
@@ -4205,7 +4212,7 @@ def native_open(hp, transcript, since, end):
     listed = {r["id"]: r for r in runs.values() if not r["ref"] and not r["skip"]
               and (r["t"] is None or now - r["t"] <= timedelta(hours=NATIVE_LIST_H))}
     window = [r for r in runs.values() if r["seen"] and not r["parent"]]
-    return {"runs": runs, "listed": listed, "window": window}
+    return {"runs": runs, "listed": listed, "window": window, "recorded": set()}
 
 
 def native_section(native):
@@ -4339,21 +4346,33 @@ def native_record(hp, native, run, kind):
     append_event(hp, e, src="scribe")
     run["ref"] = run["id"]
     native["listed"].pop(run["id"], None)
+    native["recorded"].add(run["id"])
     return None
 
 
 def native_take(hp, e, native, alias):
-    """The clerk's dispatch, when it concerns a native run → (True, reason or None); anything
+    """The clerk's event, when it concerns a native run → (True, reason or None); anything
     else → (False, None) and the ordinary rules apply.
 
     A listed id gets its row from `native_record` — the clerk's kind, nothing else of its:
     exec, scope, task and parent are observed. A fork, subagent or workflow dispatch under any
     other id, in a window that touched a native run, is a restatement and is dumped — on
     Claude Code the Agent and Workflow tools are the only way one starts, and hippo indexed
-    those. A restatement still says which run it meant when that is unambiguous (its scope is
-    a run's description, or the window touched one run): that run is recorded with the
-    restatement's kind if it has no row yet, and an outcome naming the restated id is moved to
-    the run's row — the verdict main typed must not be lost to the clerk's choice of id."""
+    those. A restatement still says which run it meant when that is unambiguous: its scope is
+    the description of one run — this window's first, then any indexed one — or, naming none,
+    the window touched one run and this output did not already record that run under its own
+    id (had it, the restatement meant another run: a verdict on an older run must not move onto
+    the only one in sight). That run is recorded with the restatement's kind if it has no row
+    yet, and an outcome naming the restated id is moved to the run's row — the verdict main
+    typed must not be lost to the clerk's choice of id.
+
+    An outcome naming a listed run whose dispatch this output did not record — refused, or
+    skipped — is dumped with that reason: the verdict was in this window's digest, and the next
+    clerk will not see it, so the dump is its only record."""
+    if (native and isinstance(e, dict) and e.get("ev") == "outcome"
+            and isinstance(e.get("ref"), str) and e["ref"] in native["listed"]):
+        return True, (f"ev=outcome: {e['ref']} has no row — its dispatch was refused or "
+                      "skipped in this output, so this dump is the only record of the verdict")
     if (not native or not isinstance(e, dict) or e.get("ev") != "dispatch"
             or not isinstance(e.get("id"), str)):
         return False, None
@@ -4367,8 +4386,10 @@ def native_take(hp, e, native, alias):
     if not window or str(e.get("exec", "")).split("/")[0] not in ("fork", "subagent", "workflow"):
         return False, None
     key = _scope_key(e.get("scope"))
-    hits = [r for r in window if key and _scope_key(r["scope"]) == key] or (
-        window if len(window) == 1 else [])
+    top = [r for r in native["runs"].values() if not r["parent"]]
+    hits = ([r for r in window if key and _scope_key(r["scope"]) == key]
+            or [r for r in top if key and _scope_key(r["scope"]) == key]
+            or [r for r in window if len(window) == 1 and r["id"] not in native["recorded"]])
     run = hits[0] if len(hits) == 1 else None
     reason = ("ev=dispatch: hippo lists every Agent, fork and Workflow run under "
               "`# native runs to record` — record it there, under its listed id")
@@ -4659,9 +4680,17 @@ def cmd_scribe(args):
     # clerk's other events and its worklog line are still worth keeping, and the rejected event
     # is preserved in failures/ — which is what "the dump is the record" means.
     # Dispatches first: an outcome in the same output may name one — a listed native run's
-    # above all — and its ref has to exist when it is checked. The sort is stable.
-    events = sorted(obj.get("events", []),
-                    key=lambda e: not (isinstance(e, dict) and e.get("ev") == "dispatch"))
+    # above all — and its ref has to exist when it is checked. Listed native runs lead, so a
+    # restatement (native_take) is read knowing which runs this output recorded under their own
+    # ids. The sort is stable.
+    listed = native["listed"] if native else {}
+
+    def order(e):
+        if not (isinstance(e, dict) and e.get("ev") == "dispatch"):
+            return 2
+        return 0 if isinstance(e.get("id"), str) and e["id"] in listed else 1
+
+    events = sorted(obj.get("events", []), key=order)
     alias = {}  # a restated dispatch id → the native run's row (native_take)
     for e in events:
         # lifetime is retired (§3.2) and the prompt no longer asks for it; a clerk that still

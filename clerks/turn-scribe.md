@@ -67,7 +67,8 @@ events: only the four kinds below are allowed, with exactly these field names.
    | `infra` | tooling, CI, environment |
    | `chore` | maintenance with no behavior change |
 
-   Invent a tag only when nothing above fits. A tag used once never becomes evidence: the priors
+   A listed run takes a tag from this table or is skipped (above). For a dispatch you coin,
+   invent a tag only when nothing above fits. A tag used once never becomes evidence: the priors
    aggregate on (kind × exec), so `bwd-kfuse` or `audit-nvfp4` splits the sample into columns of
    one. Those are scope, not kind.
 

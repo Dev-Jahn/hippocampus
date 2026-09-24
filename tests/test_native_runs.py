@@ -196,13 +196,17 @@ def test_a_run_is_listed_until_recorded_then_costed_once(tmp_project, run_hippo,
     _write(tmp_project / "transcript.jsonl", _launch_window())
     _agent(_session(tmp_project), msgs=[_msg("m1", edit="src/fetch.py")])
     capture = tmp_path / "clerk.txt"
-    junk = {"ev": "dispatch", "id": DID, "kind": "retry-impl"}
-    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w1", [junk]), capture=capture)
+    junk = [{"ev": "dispatch", "id": DID, "kind": "retry-impl"},
+            {"ev": "outcome", "ref": DID, "result": "revised", "note": "said too early"}]
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w1", junk), capture=capture)
 
     listed = f"- {DID} · subagent · retry loop · brief: {BRIEF}"
     assert listed in _payload(capture)
     assert not _rows(tmp_project, "dispatch")
     assert "kind 'retry-impl'" in _dumps(tmp_project)
+    # the verdict went down with its run's row, and says so — not check_ref's words to main
+    assert "this dump is the only record of the verdict" in _dumps(tmp_project)
+    assert "no call needed" not in _dumps(tmp_project)
 
     _agent(_session(tmp_project), msgs=[_msg("m1", edit="src/fetch.py"),
                                         _msg("m2", read=2000, out=70)])
@@ -346,6 +350,55 @@ def test_a_restated_launch_keeps_main_s_verdict(tmp_project, run_hippo, tmp_path
     assert (d["id"], d["kind"]) == (DID, "fix")
     assert [(o["ref"], o["result"]) for o in _rows(tmp_project, "outcome")] == [(DID, "accepted")]
     assert "record it there, under its listed id" in _dumps(tmp_project)
+
+
+def test_a_restatement_names_its_run_not_the_only_one_in_sight(tmp_project, run_hippo,
+                                                              tmp_path):
+    """Window 2 touched only the retry-loop run, and main refuted a survey from window 1. The
+    clerk restated the survey under coined ids: the one whose scope is the survey's
+    description lands on the survey's row; the one naming no run is not moved onto the retry
+    loop, which this output recorded under its own id — although the restatement comes first
+    in the output (listed runs are read first). Its verdict stays in the dump."""
+    q, tq = "a1111111111111111", "toolu_01QQQQQQQQQQQQQQQQQQQQQQQQ"
+    _write(tmp_project / "transcript.jsonl", [
+        _user("survey the api in a subagent"),
+        _call(tuid=tq, desc="survey api", prompt="Survey the HTTP API."),
+        _launched(tuid=tq, agent=q, desc="survey api"),
+        _user(_note(task=q, tuid=tq, result="12 endpoints."))])
+    _agent(_session(tmp_project), agent=q, msgs=[_msg("q1")], brief="Survey the HTTP API.")
+    _scribe(run_hippo, tmp_project,
+            _clerk(tmp_path, "w1", [{"ev": "dispatch", "id": "ag-" + q, "kind": "research"}]))
+
+    _write(tmp_project / "transcript.jsonl", _launch_window(), mode="a")
+    _agent(_session(tmp_project), msgs=[_msg("r1")])
+    coined = {"kind": "research", "exec": "subagent/opus/inherit"}
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w2", [
+        {"ev": "dispatch", "id": "sv2", "scope": "the caching note", **coined},
+        {"ev": "outcome", "ref": "sv2", "result": "refuted", "note": "caching note wrong"},
+        {"ev": "dispatch", "id": "sv1", "scope": "Survey  API", **coined},
+        {"ev": "outcome", "ref": "sv1", "result": "refuted", "note": "missed the v2 endpoints"},
+        {"ev": "dispatch", "id": DID, "kind": "impl"}]))
+
+    assert [(d["id"], d["kind"]) for d in _rows(tmp_project, "dispatch")] == [
+        ("ag-" + q, "research"), (DID, "impl")]
+    assert [(o["ref"], o["result"]) for o in _rows(tmp_project, "outcome")] == [
+        ("ag-" + q, "refuted")]
+    assert "caching note wrong" in _dumps(tmp_project)
+
+
+def test_task_ref_skips_an_unjudged_native_row(tmp_project, run_hippo):
+    """A subagent whose brief names the task gets tagged with it and rarely a verdict; it must
+    not make `--ref task:<id>` ambiguous for the lane main is judging. Alone, it is the one."""
+    for e in ({"ev": "dispatch", "id": "lane1", "kind": "impl", "exec": "codex/gpt-6-sol/high",
+               "scope": "retry loop", "task": "feat/retry"},
+              {"ev": "dispatch", "id": DID, "kind": "research", "scope": "survey",
+               "exec": "subagent/claude-opus-5-5/inherit", "task": "feat/retry"}):
+        assert run_hippo(["log", "raw", json.dumps(e)], cwd=tmp_project).returncode == 0
+    for _ in range(2):
+        proc = run_hippo(["log", "outcome", "--ref", "task:feat/retry", "--result", "accepted"],
+                         cwd=tmp_project)
+        assert proc.returncode == 0, proc.stderr
+    assert [o["ref"] for o in _rows(tmp_project, "outcome")] == ["lane1", DID]
 
 
 def test_main_s_own_log_dispatch_is_the_record(tmp_project, run_hippo, tmp_path):

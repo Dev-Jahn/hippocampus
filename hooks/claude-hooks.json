@@ -1,0 +1,28 @@
+{
+  "description": "hippo (Claude Code only, named by .claude-plugin/plugin.json on top of the default hooks/hooks.json): executor directives into each subagent; a `## hippo deltas` request before a compaction.",
+  "hooks": {
+    "SubagentStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent_start.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/pre_compact.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

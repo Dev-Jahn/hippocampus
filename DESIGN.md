@@ -243,7 +243,10 @@ optional `src` (`scribe|cli|wrapper|executor`).
   recent dispatch ids (§3.5.5) instead of being asked to find them in a digest, and a caller may
   write `--ref task:<task-id>`, which resolves at write time to that task's dispatch still awaiting
   an outcome and **stores the dispatch id**. Two open dispatches for one task is a real ambiguity
-  between parallel lanes, so it lists them and fails rather than guessing. Measured afterwards on a
+  between parallel lanes, so it lists them and fails rather than guessing. An unjudged native row
+  (`ag-`, §3.5.3c) competes only when no other dispatch is open: the scribe tags every subagent
+  whose brief names the task, most never get a verdict (13 such rows for one task in a replayed
+  mlx-vlm session), and counting them would break `task:` for good. Measured afterwards on a
   consuming project that had the no-double-record rule but not the roster: of 66 scribe-written
   dispatches, 30 restated a wrapper launch under a fresh id and 6 reused the wrapper's id exactly,
   inflating the PRIORS denominator ~1.4x — a prompt cannot enforce what its inputs do not contain.
@@ -272,9 +275,11 @@ optional `src` (`scribe|cli|wrapper|executor`).
   project from beyond a real repo root); a `.git` *file* — a linked worktree — is walked through,
   so a lane calling hippo from its worktree resolves the project's real `.hippo/` (§9.1, wired
   in 1.8.0). The hooks walk conservatively for ordinary sessions (a session opened *inside* a
-  worktree gets no capsule and no scribe) with one exception: under `HIPPO_DISPATCH` —
+  worktree gets no capsule and no scribe) with two exceptions: under `HIPPO_DISPATCH` —
   a dispatched lane — SessionStart walks through the worktree's `.git` file too, which is what
-  re-injects the capsule after the lane's own compaction (§3.4, 1.8.1).
+  re-injects the capsule after the lane's own compaction (§3.4, 1.8.1); and SubagentStart
+  always does, because Claude Code isolates a subagent in `<project>/.claude/worktrees/agent-<id>`
+  (§3.4).
 - **Every subcommand has `-h/--help`, and errors attach the usage to stderr** (a direct fix for the
   largest source of friction in 0.x).
 - The surface — the block `skills/hippo/SKILL.md` carries and the README repeats, plus the one
@@ -339,11 +344,15 @@ hippo scribe --transcript P --session S   # internal: the Stop hook calls it det
 ### 3.4 Hooks (four — each one here with its measured reason)
 
 A hook runs on the host's clock, so each one needs a reason measured and written here; a hook that
-fires on every tool call or prompt stays out (§4). `hooks/hooks.json` is Claude Code's and
-carries all four. The Codex manifest names `hooks/codex-hooks.json` instead — SessionStart and
-Stop only, the same entries command for command (a test holds them equal) — because codex reads
-a manifest-named hooks path *in place of* the default `hooks/hooks.json` (0.156.1's
-`load_plugin_hooks`): that keeps SubagentStart and PreCompact off codex until they are measured
+fires on every tool call or prompt stays out (§4). `hooks/hooks.json` carries SessionStart and
+Stop for both hosts, unchanged since 1.14 — the Codex manifest names it, and codex keys a
+hook's trust by that plugin-relative path (`hippo@<marketplace>:hooks/hooks.json:session_start:0:0`
+in `~/.codex/config.toml`, 0.156.1), so a moved file would come back untrusted and be skipped
+silently (§3.8) for everyone who had trusted it, `codex exec` lanes included. SubagentStart and
+PreCompact live in `hooks/claude-hooks.json`, which only the Claude Code manifest names; Claude
+Code loads the default `hooks/hooks.json` and adds a manifest-named file (2.1.281, measured:
+each event fired once), while codex reads a manifest-named path *in place of* the default
+(0.156.1's `load_plugin_hooks`). That keeps the two new hooks off codex until they are measured
 there (0.156.1's hook config lists SubagentStart but not PreCompact, and a moved contract has
 already broken the capsule once, below). The scripts share `hooks/lib.sh` — the clerk gate, the
 stdin reader, the project walk, the CLI call and the JSON envelope — and tell the CLI which
@@ -368,7 +377,10 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
   `.hippo/`, for agent type `fork` (it already carries main's context, capsule included) and for
   `hippo:lane` (it only watches a codex lane, whose capsule comes from codex's own SessionStart);
   otherwise the live directives addressed to executors, in the same envelope with
-  `hookEventName: "SubagentStart"` — and nothing at all when none is. The reason: SessionStart
+  `hookEventName: "SubagentStart"` — and nothing at all when none is. Its walk crosses a linked
+  worktree's `.git` file (§3.3): an `isolation: "worktree"` agent starts in
+  `<project>/.claude/worktrees/agent-<id>` (measured, 2.1.281), and those are the agents that
+  edit files — the conservative stop left exactly them without "never push". The reason: SessionStart
   never fires for a native subagent (neither subagent transcript in the session measured below
   carries one), so until this hook a user's standing rule reached a Claude Code worker only if
   main retyped it into the brief — the gap the audience axis (§9.4) closed for lanes. The slice
@@ -550,8 +562,14 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
    is rejected — on Claude Code the Agent and Workflow tools are the only way one starts, and 3c
    read them. The costly way to get this wrong is to coin an id and put main's verdict on it, so
    the rejection does not cost the verdict: when the restatement says which run it meant — its
-   scope is a run's description, or the window touched one run — that run is recorded with the
-   restatement's kind if it had no row, and an outcome naming the restated id lands on the run's.
+   scope is one run's description (this window's runs first, then every indexed one), or it
+   names none and the window touched one run that this output did not record under its own id
+   — that run is recorded with the restatement's kind if it had no row, and an outcome naming
+   the restated id lands on the run's. The exception in that last clause is the restatement of
+   an *older* run in a window that touched one new run: moving its verdict onto the new run
+   would put a wrong verdict in a cell and block the right one, so it stays in the dump. For the
+   same reason an outcome naming a listed run whose dispatch this output refused or skipped is
+   dumped, saying so: the next clerk never sees that verdict.
 
    The line is *who observed the value*, not who is trusted. The launcher builds `exec` from its
    own argv and a handed vocabulary holds — measured, 0 malformed in 110, and `kind` has held the
@@ -868,7 +886,7 @@ engine (measured on 0.144.6).
 | | Claude Code | Codex CLI |
 |---|---|---|
 | Manifest | `.claude-plugin/plugin.json` | `.codex-plugin/plugin.json` (names the `skills` and `hooks` paths) |
-| Hooks | `hooks/hooks.json` — all four (§3.4) | `hooks/codex-hooks.json`, named by the manifest — SessionStart and Stop only, the same entries command for command; event keys (PascalCase), matcher, stdin payload fields and the SessionStart `hookSpecificOutput.additionalContext` envelope are all identical (codex ≥0.146 rejects bare text, §3.4) |
+| Hooks | `hooks/hooks.json` (the default) plus `hooks/claude-hooks.json`, named by the manifest — all four (§3.4) | `hooks/hooks.json`, named by the manifest — SessionStart and Stop, **the same file**; event keys (PascalCase), matcher, stdin payload fields and the SessionStart `hookSpecificOutput.additionalContext` envelope are all identical (codex ≥0.146 rejects bare text, §3.4) |
 | Plugin `bin/` | added to PATH automatically | **not added** → a skill resolves `bin/hippo` relative to its own SKILL.md; a dispatched lane gets it from the wrapper (§3.6) |
 | Transcript | Claude JSONL | codex rollout JSONL — `digest_lite.py` detects the format from the first lines and reduces both to the same line vocabulary |
 
@@ -876,7 +894,8 @@ Constraints specific to codex (0.144.6):
 
 - **Hooks are skipped silently until they are trusted.** Review and trust them once through
   `/hooks`, or bypass with `--dangerously-bypass-hook-trust`. If the capsule never appears after
-  installing, look here first.
+  installing, look here first. The trust is keyed by the hooks file's path in the plugin
+  (0.156.1), which is why codex's file never moves (§3.4).
 - Installing and trusting hippo in the Codex host is also what gives **dispatched lanes** their
   capsule (start + post-compaction, §3.4): `codex exec` fires plugin hooks — the reason
   `clerk_run.sh` must pass `--disable hooks` — so a lane launched by `hippo dispatch` carries

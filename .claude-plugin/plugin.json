@@ -8,6 +8,7 @@
   },
   "repository": "https://github.com/Dev-Jahn/hippocampus",
   "license": "MIT",
+  "hooks": "./hooks/claude-hooks.json",
   "keywords": [
     "hippocampus",
     "memory",

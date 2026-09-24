@@ -49,9 +49,9 @@ hippo dispatch --batch <manifest.yaml> [--dry-run]
 - An external review arrives → `log review`; its findings dealt with → `log review-status`.
 - Before routing a delegation → `prior`.
 - Codex lanes → `dispatch`; many at once → `--batch` (`/hippo:dispatch` has the contract).
-- A subagent or Workflow run: in Claude Code, no call — hippo records the launch, its cost and
-  your verdict at the end of the turn (its id is `ag-<agentId>`). In Codex, record `spawn_agent`
-  children yourself with `log dispatch` / `log outcome`.
+- A subagent or Workflow run (in Codex, a `spawn_agent` child): no call — hippo records the
+  launch and your verdict from the transcript at the end of the turn (in Claude Code its cost
+  too, under the id `ag-<agentId>`).
 - Lost your place → `status`.
 
 ## What runs by itself

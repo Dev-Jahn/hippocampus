@@ -1,8 +1,8 @@
 """Codex CLI host support (DESIGN §3.8).
 
 Everything pinned here comes from measuring codex-cli 0.144.6 and reading 0.156.1's plugin
-loader: the two hosts share the hook scripts and their commands, codex reads its own hook file,
-and only the transcript format differs.
+loader: the two hosts share the hook scripts and hooks/hooks.json, Claude Code adds its own
+hooks on top, and only the transcript format differs.
 """
 import json
 import subprocess
@@ -13,7 +13,7 @@ from conftest import REPO_ROOT
 CODEX_MANIFEST = REPO_ROOT / ".codex-plugin" / "plugin.json"
 CLAUDE_MANIFEST = REPO_ROOT / ".claude-plugin" / "plugin.json"
 HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.json"
-CODEX_HOOKS_JSON = REPO_ROOT / "hooks" / "codex-hooks.json"
+CLAUDE_HOOKS_JSON = REPO_ROOT / "hooks" / "claude-hooks.json"
 DIGEST = REPO_ROOT / "scripts" / "digest_lite.py"
 
 
@@ -35,26 +35,29 @@ def test_codex_manifest_paths_are_plugin_relative():
     for key in ("skills", "hooks"):
         assert x[key].startswith("./"), key
         assert ".." not in x[key], key
-    assert x["hooks"] == "./hooks/codex-hooks.json"
     assert (REPO_ROOT / x["hooks"][2:]).is_file()
     assert (REPO_ROOT / x["skills"][2:]).is_dir()
 
 
 def test_codex_gets_only_the_hooks_measured_on_it():
-    """A manifest-named hooks path replaces codex's default hooks/hooks.json (0.156.1's
-    load_plugin_hooks), so codex never sees SubagentStart/PreCompact until they are measured
-    there — while the entries both hosts run stay the same entries, command for command."""
-    cc, cx = _json(HOOKS_JSON)["hooks"], _json(CODEX_HOOKS_JSON)["hooks"]
-    assert set(cc) == {"SessionStart", "SubagentStart", "PreCompact", "Stop"}
-    assert set(cx) == {"SessionStart", "Stop"}
-    for event in cx:
-        assert cx[event] == cc[event], event
+    """Codex keys a hook's trust by the manifest-named file's plugin-relative path
+    (`hippo@<marketplace>:hooks/hooks.json:session_start:0:0`, 0.156.1), and an untrusted hook
+    is skipped silently: moving codex's file would switch the capsule and the scribe off for
+    every user who trusted them — lanes included, since `codex exec` cannot ask. So codex keeps
+    hooks/hooks.json with SessionStart and Stop, and the Claude Code-only hooks live in a file
+    only Claude Code's manifest names; Claude Code loads the default hooks/hooks.json and adds
+    it (2.1.281, measured: each event fired once). No event is in both, so none runs twice."""
+    assert _json(CODEX_MANIFEST)["hooks"] == "./hooks/hooks.json"
+    assert _json(CLAUDE_MANIFEST)["hooks"] == "./hooks/claude-hooks.json"
+    shared, claude_only = _json(HOOKS_JSON)["hooks"], _json(CLAUDE_HOOKS_JSON)["hooks"]
+    assert set(shared) == {"SessionStart", "Stop"}
+    assert set(claude_only) == {"SubagentStart", "PreCompact"}
 
 
 def test_hook_handlers_are_plain_commands():
     """codex 0.144.6 runs only `type: command` handlers under PascalCase event keys.
     `async: true` parses but is skipped, so a hook must earn its non-blocking behavior itself."""
-    for path in (HOOKS_JSON, CODEX_HOOKS_JSON):
+    for path in (HOOKS_JSON, CLAUDE_HOOKS_JSON):
         for groups in _json(path)["hooks"].values():
             for g in groups:
                 for handler in g["hooks"]:

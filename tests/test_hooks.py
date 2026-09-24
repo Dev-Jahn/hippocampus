@@ -251,6 +251,28 @@ def test_a_subagent_gets_the_executor_directives_and_nothing_else(tmp_project, r
     assert lines[1:] == ["· live: use GPUs 0 and 1 only", "· live: never push; main merges"]
 
 
+def test_a_worktree_isolated_subagent_gets_the_directives_too(tmp_project, repo_root,
+                                                              run_hippo):
+    """isolation: "worktree" starts the agent in <project>/.claude/worktrees/agent-<id>
+    (measured, 2.1.281), past the linked worktree's .git file where an ordinary session's walk
+    stops — and those are the agents that edit files, the ones "never push" is for."""
+    def git(*a):
+        subprocess.run(["git", "-C", str(tmp_project), "-c", "user.name=t",
+                        "-c", "user.email=t@t", *a], check=True, capture_output=True)
+
+    (tmp_project / "README").write_text("x\n", encoding="utf-8")
+    git("init", "-q")
+    git("add", "README")  # .hippo/ stays untracked: the worktree must not carry a copy
+    git("commit", "-qm", "init")
+    wt = tmp_project / ".claude" / "worktrees" / "agent-a1b2c3"
+    git("worktree", "add", "-q", str(wt))
+    _directives(tmp_project, run_hippo)
+    proc = _subagent(wt, repo_root)
+    assert proc.returncode == 0, proc.stderr
+    lines = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"].splitlines()
+    assert lines[1:] == ["· live: use GPUs 0 and 1 only", "· live: never push; main merges"]
+
+
 def test_a_subagent_hook_is_silent_for_forks_lanes_and_no_directive(tmp_project, repo_root,
                                                                     run_hippo, uninitialized_dir):
     for agent_type in ("general-purpose", "fork", "hippo:lane"):

@@ -28,8 +28,8 @@ The plugin, its slash commands, and the CLI are all named `hippo`.
 ## Components
 
 - **CLI** (`bin/hippo`) — `.hippo/` project data: tasks, ledger, priors.
-- **4 hooks** (`hooks/hooks.json`; Codex gets the first two from
-  `hooks/codex-hooks.json`) — `SessionStart` re-injects a ≤6-line status
+- **4 hooks** (`hooks/hooks.json` on both hosts, plus Claude Code's
+  `hooks/claude-hooks.json`) — `SessionStart` re-injects a ≤6-line status
   block (survives compaction); `Stop` fires the scribe clerk detached, never
   blocking; in Claude Code, `SubagentStart` hands each subagent the directives
   addressed to executors, and `PreCompact` asks the compaction summary to end

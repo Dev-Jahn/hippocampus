@@ -1,5 +1,5 @@
 {
-  "description": "hippo (Claude Code): status capsule at session start and after a compaction; executor directives into each subagent; a `## hippo deltas` request before a compaction; detached scribe on Stop.",
+  "description": "hippo: inject status capsule at session start (incl. post-compact re-entry); detached scribe on Stop.",
   "hooks": {
     "SessionStart": [
       {
@@ -8,29 +8,6 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.sh\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "SubagentStart": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent_start.sh\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "PreCompact": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/pre_compact.sh\"",
             "timeout": 10
           }
         ]

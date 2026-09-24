@@ -13,8 +13,10 @@ case "$(json_get agent_type)" in
   fork|hippo:lane) exit 0 ;;
 esac
 
+# `through`: an isolation:"worktree" agent starts in <project>/.claude/worktrees/agent-<id>
+# (measured, 2.1.281), past a .git file the walk would otherwise stop at.
 cwd="$(json_get cwd)"
-project_root "$cwd" >/dev/null || exit 0
+project_root "$cwd" through >/dev/null || exit 0
 
 text="$(inject subagent "$cwd")"
 [ -n "$text" ] || exit 0
