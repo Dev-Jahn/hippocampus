@@ -54,6 +54,8 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   hosts): the lane's capsule carries its directives and report line, and its
   `log outcome` is a **claim** — the verdict is main's. Launch through `run_in_background`,
   never nohup/disown (orphans). A codex argument that collides with a wrapper flag goes after `--`.
+- A Claude Code subagent, fork or Workflow run needs no hippo call — the scribe records it, its
+  cost and your verdict (`ag-<agentId>`). Codex `spawn_agent` children: `log dispatch`/`outcome`.
 - `--depth 1` = an orchestrator lane that may spawn; its children start at 0. Lane-origin
   launches pass a dollar breaker ($500 per parent per 24h, `dispatch: {max_wave_usd: N}` in
   `.hippo/config.yaml`); main is never gated.

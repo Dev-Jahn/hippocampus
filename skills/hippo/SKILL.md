@@ -49,15 +49,19 @@ hippo dispatch --batch <manifest.yaml> [--dry-run]
 - An external review arrives → `log review`; its findings dealt with → `log review-status`.
 - Before routing a delegation → `prior`.
 - Codex lanes → `dispatch`; many at once → `--batch` (`/hippo:dispatch` has the contract).
+- A subagent or Workflow run: in Claude Code, no call — hippo records the launch, its cost and
+  your verdict at the end of the turn (its id is `ag-<agentId>`). In Codex, record `spawn_agent`
+  children yourself with `log dispatch` / `log outcome`.
 - Lost your place → `status`.
 
 ## What runs by itself
 
-- The scribe, at every Stop: turns the transcript into ledger events and a worklog line, and
-  regenerates PRIORS when it is a week old and five new verdicts have landed.
+- The scribe, at every Stop: turns the transcript into ledger events and a worklog line, records
+  each Claude Code subagent and Workflow run with its cost, and regenerates PRIORS when it is a
+  week old and five new verdicts have landed.
 - The capsule, at session start and after every compaction: tasks, live directives, in flight.
 - The judge, only when `TYPESAFE_API_KEY` is set: gate hints for the scribe, notes on directives,
-  routing and triage on dispatch. Without the key nothing changes.
+  routing and triage on dispatch and on a subagent's report. Without the key nothing changes.
 - The dispatch wrapper records the launch, the lane's usage and its triage.
 - Recording through the CLI only raises certainty; nothing breaks if you skip a record.
 

@@ -178,17 +178,26 @@ optional `src` (`scribe|cli|wrapper|executor`).
   visible); a model off the sheet renders as unpriced and named, never guessed. PRIORS' routing
   table carries tokens, $ and $/accepted per cell — the question it unlocks is "the cheapest
   exec that clears the bar". A batch's total is derivable by summing children over `parent`.
+  The one other writer (1.15.0) is the scribe's own code for a native run (§3.5.3c),
+  `src=scribe`: usage it summed from the agent's own transcript, which has the standing of the
+  wrapper reading a rollout — code reading a record the host wrote, not a clerk paraphrasing
+  one; a usage event from the clerk is still rejected (§3.5.6b). Those rows are cumulative and
+  one per model (`tin` = input + cache read + cache creation, `tcached` = cache read), so PRIORS
+  reads the last row per `(ref, model)` and sums the models; a dispatch is priced only when
+  every model it ran on is.
 - `ev:triage` (1.14.0) is the judge's reading of a finished lane (§3.6) — written by the wrapper
   (`src=wrapper`) at lane exit, from single dispatch and batch alike, and rejected from the
-  scribe by the same rule as `usage`: the wrapper observed it. `route ∈ {accept-candidate,
-  escalate, no-go-candidate, failed}`, `verify` is a bool, `cause ∈ {capability, spec,
-  environment, transient}` or absent, and `p` is a flat map of the compact probabilities the
-  route was computed from (`done`, `blocked`, `ask`, `creep`, `evidence`, and `risk` on its 0–3
-  ladder — numbers only). `ref` joins a dispatch fail-closed. A judge failure writes nothing:
-  the `ev:clerk name:jev-harvest ok:false` row is the gap. A route is evidence of a check rc's
-  standing, never a verdict — and recording it closes a loop: the in-flight line shows the latest
-  route beside the lane's claim, and PRIORS tables each triaged dispatch's route against main's
-  first verdict (§3.6b), measuring the judge the way it measures executors.
+  clerk by the same rule as `usage`: the wrapper observed it. The scribe's code writes one too
+  (`src=scribe`, 1.15.0) for a native run's first completion (§3.5.3c).
+  `route ∈ {accept-candidate, escalate, no-go-candidate, failed}`, `verify` is a bool,
+  `cause ∈ {capability, spec, environment, transient}` or absent, and `p` is a flat map of the
+  compact probabilities the route was computed from (`done`, `blocked`, `ask`, `creep`,
+  `evidence`, and `risk` on its 0–3 ladder — numbers only). `ref` joins a dispatch fail-closed.
+  A judge failure writes nothing: the `ev:clerk name:jev-harvest ok:false` row is the gap. A
+  route is evidence of a check rc's standing, never a verdict — and recording it closes a loop:
+  the in-flight line shows the latest route beside the lane's claim, and PRIORS tables each
+  triaged dispatch's route against main's first verdict (§3.6b), measuring the judge the way it
+  measures executors.
 - `dispatch.depth` (int, absent = 0) and `dispatch.parent` (§9.5, built in 1.9.0): depth is how
   far a lane may re-delegate — 0 is a leaf whose capsule says so, 1 may spawn children that
   start at 0. `parent` is stamped by the wrapper from `HIPPO_DISPATCH` when a launch happens
@@ -379,15 +388,85 @@ hippo scribe --transcript P --session S   # internal: the Stop hook calls it det
    what it sees today, and the reason lands on stderr. With the backend off the gate does not
    exist: no row, no section, no change in behavior. Measured live on the suite's fake transcript
    (2026-09-23): 570–640ms and 873 tokens for all five questions in one request.
+3c. **Native runs** (1.15.0, in every mode; the key only adds the triage). Most delegation now
+   goes through the host's own subagents, which the wrapper cannot wrap — 30 days on this Mac,
+   49 `hippo log dispatch` calls, nearly all beside an Agent call — so main spent turns logging
+   what the clerk then recorded under an id of its own, and no such run's cost reached PRIORS. A
+   Claude Code session keeps every end of one on disk, and the scribe reads them itself.
+   **Index** (code, before the prefilter, so a completion in a skipped window is not lost): one
+   streaming pass over main's transcript up to the window's end — a completion may belong to a
+   launch long before the cursor — finds each Agent/Task call the host confirmed
+   (`toolUseResult.status: async_launched` and its `agentId`; a foreground call's `completed`
+   carries its report inline), each Workflow launch (`runId`, `taskId`, `workflowName`, the
+   script) and every `<task-notification>`, on a user line or a `queued_command` attachment
+   (the `queue-operation` lines around it are bookkeeping, Bash background tasks notify in the
+   same shape under ids no launch has, and after a SendMessage only the task-id names the
+   agent). An agent's own Agent calls live in its transcript, and its
+   `subagents/agent-<id>.meta.json` names the `parentAgentId`: nested runs are indexed
+   through their parent and carry `parent: ag-<parentAgentId>`. A Workflow's own agents are not
+   runs — the run is one — and a `hippo:lane` agent, which only babysits a codex lane the
+   wrapper records, is skipped. **Rows**: a run's id is `ag-<agentId>` (`ag-<runId>` for a
+   Workflow), which main sees at launch. The kind is the one slot a reading of the brief has to
+   fill, and the clerk reads the turn anyway: the payload lists each run with no row yet,
+   launched within 24h, as `ag-<id> · <executor> · <description> · brief: <first 300 chars>`,
+   the clerk answers `{"ev":"dispatch","id":"ag-…","kind":…}`, and code keeps only the kind —
+   one of the dispatch skill's tags, else the event is dumped and the run stays listed — and
+   fills the rest from what the run left behind: `exec` = `fork` (meta `isFork`), `workflow` or
+   `subagent` / the agent's own `message.model` with the context tag and snapshot date
+   stripped, which is the prices.yaml key (a Workflow run's most-used across its agents; the
+   host's `resolvedModel` while no line exists yet) / the `effort` its assistant lines record
+   (`inherit` when none does — haiku's don't); `scope` = the call's description or the
+   workflow's name; `task` = the one tasks.yaml id the brief names as a whole token; `parent`
+   as above. Main's own `log dispatch` for a run is its record — a `src=cli` dispatch within the
+   same 24h whose scope equals the description (case and spacing aside), or whose id is the
+   run's own — and that match is exact on purpose, which is its limit: a scope main paraphrased
+   is not recognized and the run gets a second row, where a similarity guess would cost runs
+   their rows (6b measured those). Main does paraphrase: all 4 of its `log dispatch` rows for
+   Agent runs in this repo's ledger did ("Jev judge layer + scribe gate (wave 1)" for "Jev wave
+   1: client + scribe gate"), which is why the skills now say no call is needed. **Usage**
+   (code): at every notification, and for a run whose row landed after its completion, the
+   run's own transcript(s) are summed per model — one API message once, though it spans
+   several lines as it streams (49 of 59 messages in one agent); nothing before the first user
+   line, because a fork's transcript opens with main's own launching message copied in, main's
+   message id and usage; no `<synthetic>` line. The notification's `subagent_tokens` is the
+   final context size, not spend, and is never read. A row equal to the last one for
+   `(ref, model)` is not written again, so re-reading a window writes nothing twice, and a
+   resumed agent gets a fresh cumulative row at its next completion.
+   **Triage** (judge on only): a run's first completion is read exactly as a wrapper lane at exit
+   (§3.6), `src=scribe`, once per dispatch, at most 8 calls a window, and only in the window
+   where it arrives — a resumed agent's later report is never triage material, even when the
+   first reading failed. An interim notification is no completion (an agent that stopped with
+   background work of its own still running says so, and notifies again when done; measured, 3
+   of the 14 agent runs in one mlx-vlm session sent only interim ones, and have no triage).
+   brief = the call's prompt (a Workflow's script); report = the notification's `<result>` (a
+   Workflow's whole result from `workflows/<runId>.json`, re-serialized compactly — the
+   notification's copy is cut at ~8k — and one that still does not fit the judge gets no
+   triage, a gap, never a shortened one); rc 0 only on `completed`; changes = the files the
+   agent edited with its edit tools plus its `edited_text_file` attachments, headed as what they
+   are (a shell edit of a file it never read is not visible), or git facts from its worktree
+   when it ran isolated and a base is honest (a HEAD that never moved: the working tree; one
+   that moved and has not reached main's branch: its merge-base with main's HEAD; else the list)
+   — never main's tree, which also holds main's work. The route never reaches the clerk.
+   Nothing here raises out of the scribe: a bug is dumped to `failures/*-native-*` and the clerk
+   runs as always. Replayed Stop by Stop over four real sessions on this Mac (2026-09-24, mock
+   clerk and judge, scratch ledgers): 55 runs — 26 subagents, 3 forks, 3 nested forks, 23
+   Workflow runs — got 55 rows; the 51 that had notified got usage (53 per-model totals over
+   seven models), and 46 were triaged — the other five being 2 Workflow results over the judge's
+   budget and the 3 interim-only runs. The clerk had recorded two of the same Workflow runs as
+   `workflow/subagent/inherit` and `workflow/unknown/inherit`; code read
+   `workflow/claude-opus-5-5/xhigh` for both. The index costs 0.05s over a 24MB transcript.
+   **Codex is unchanged**: a `spawn_agent`'s brief is encrypted in the rollout
+   (`gAAAAB…`), so the clerk keeps recording those children from the digest.
 4. Resolve the backend: `config.yaml > $HIPPO_CLERK_BACKEND > automatic (codex/gpt-6-luna/low when
    codex exists, otherwise claude -p sonnet) > mock` (for tests). 120s timeout. `$HIPPO_CLERK_MODEL`
    overrides the model on whichever backend is resolved; it is one variable for both, so pin the
    backend when you set it — a model id for one backend is invalid on the other.
 5. Prompt = `clerks/turn-scribe.md` + the live directive roster + the recent dispatch roster + the
-   digest. Both rosters exist for one reason: an id the clerk coins for a subject that already has
-   one forks it instead of updating it, and the digest cannot be relied on to contain the existing
-   id. The dispatch roster is also the set an outcome may legally `ref`. Expected output =
-   strict JSON:
+   native runs to record, when any (3c) + the digest. Both rosters exist for one reason: an id
+   the clerk coins for a subject that already has one forks it instead of updating it, and the
+   digest cannot be relied on to contain the existing id. The dispatch roster is also the set an
+   outcome may legally `ref`, with the listed native ids the same output records. Expected
+   output = strict JSON:
    `{"worklog": "…", "events": [ …ledger events without t… ]}`.
 6. Validation, **per event**: check each event by the same rules as `hippo log` (per-ev key
    whitelist — unknown keys rejected; `t` and `src` are always stamped by the writer; exec shape
@@ -397,7 +476,7 @@ hippo scribe --transcript P --session S   # internal: the Stop hook calls it det
    call itself* (no JSON, wrong envelope, nonzero rc) is still all-or-nothing and records
    `ev:clerk ok:false`. Either way the ledger is never contaminated and **the cursor advances**
    (never re-bill the same input forever). **Never fill a gap by inventing content.**
-6b. **Four extra rules, on the clerk's output only.** A scribe `usage` is rejected — the
+6b. **Five extra rules, on the clerk's output only.** A scribe `usage` is rejected — the
    wrapper observed the cost and was there when the lane ran. A scribe `dispatch` is rejected when its
    executor is `codex`, or when either closed slot of `exec` is outside its vocabulary
    (`codex|claude|fork|subagent|workflow` / `low|medium|high|xhigh|max|ultra|inherit`). A scribe
@@ -407,7 +486,13 @@ hippo scribe --transcript P --session S   # internal: the Stop hook calls it det
    `accepted` by two later scribe runs, and a verdict main had recorded through the CLI was
    restated by the scribe 26 seconds later. A prompt cannot hold a rule its writer does not
    check. Main's writes are not checked either way and should not be (a deliberate re-verdict
-   is main's call; it gets a stderr note, §3.2).
+   is main's call; it gets a stderr note, §3.2). And in a window where 3c indexed native runs,
+   a `fork`, `subagent` or `workflow` dispatch under an id 3c did not list is a restatement and
+   is rejected — on Claude Code the Agent and Workflow tools are the only way one starts, and 3c
+   read them. The costly way to get this wrong is to coin an id and put main's verdict on it, so
+   the rejection does not cost the verdict: when the restatement says which run it meant — its
+   scope is a run's description, or the window touched one run — that run is recorded with the
+   restatement's kind if it had no row, and an outcome naming the restated id lands on the run's.
 
    The line is *who observed the value*, not who is trusted. The launcher builds `exec` from its
    own argv and a handed vocabulary holds — measured, 0 malformed in 110, and `kind` has held the
@@ -668,7 +753,12 @@ The same page measures the judge (1.14.0): a `triage agreement` section tables e
 dispatch's route — the latest `ev:triage` recorded before main's first verdict, which is what
 main had in front of it — against that verdict, route × result, with one line under it for
 `accept-candidate` precision (accepted or revised, of the accept-candidates that got a verdict).
-A ledger with no triage row gets no section.
+A scribe triage (§3.5.3c) counts wherever it lands: it is written at Stop, usually after a
+verdict main typed that turn, and neither main nor the clerk ever sees it — an independent
+reading, which is what the table measures. A ledger with no triage row gets no section. The
+open items leave out native runs (`ag-` ids) with no verdict and give their count on one line:
+hippo records every Agent and Workflow run, so an unjudged quick look-up is not a forgotten
+lane, and a list of them would bury the lanes that are.
 
 The page no longer waits for a manual run: the scribe regenerates it when it is due (§3.5.8), and
 `hippo prior distill` stays for the run nobody wants to wait a week for.

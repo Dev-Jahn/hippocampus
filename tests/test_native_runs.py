@@ -1,0 +1,526 @@
+"""The scribe records native runs — Agent/Task subagents, forks, Workflow runs — like codex lanes
+(DESIGN §3.5.3c).
+
+Contract under test: in every mode, each run main's Claude Code transcript launched is listed
+for the clerk until it has a row; the clerk gives the kind and nothing else of its lands; code
+fills exec from the agent's own transcript, scope, task and parent, writes cumulative usage per
+model at completions, and — judge on only — triages a run's first completion once. A clerk
+dispatch that restates a run is dumped without costing main's verdict, main's own `log
+dispatch` for a run is its record, and a bug on this path never costs the window its clerk.
+
+Nothing here may reach the network: conftest pins HIPPO_JEV_BACKEND=off and the tests that
+want a judge pin `mock`.
+"""
+import json
+import subprocess
+import sys
+import types
+from datetime import datetime, timedelta, timezone
+
+import yaml
+
+from conftest import REPO_ROOT, read_ledger
+from test_batch_harvest import ACCEPT, DEFAULT, _mock
+
+sys.path.insert(0, str(REPO_ROOT / "cli"))
+import hippo_cli  # noqa: E402
+
+AGENT = "a0123456789abcdef"
+DID = "ag-" + AGENT
+TUID = "toolu_01ABCDEFGHJKLMNPQRSTUVWX"
+BASH_TUID = "toolu_01BashBashBashBashBash1"
+BRIEF = "Task feat/retry: add a retry loop around the fetch call; run tests/run.sh until green."
+REPORT = "Done: the retry loop is in and tests/run.sh passes (412 passed)."
+
+
+def _ts(minutes_ago=5):
+    t = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+# --------------------------------------------------------------------------
+# transcript lines, in the shapes measured on Claude Code 2.1.281
+# --------------------------------------------------------------------------
+
+def _assistant(*blocks):
+    return {"type": "assistant", "message": {"role": "assistant", "content": list(blocks)}}
+
+
+def _user(text):
+    return {"type": "user", "timestamp": _ts(), "message": {"role": "user", "content": text}}
+
+
+def _call(tuid=TUID, desc="retry loop", prompt=BRIEF, subagent_type="general-purpose"):
+    return _assistant({"type": "tool_use", "id": tuid, "name": "Agent", "input": {
+        "description": desc, "prompt": prompt, "subagent_type": subagent_type, "model": "opus"}})
+
+
+def _launched(tuid=TUID, agent=AGENT, desc="retry loop"):
+    return {"type": "user", "timestamp": _ts(),
+            "message": {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": tuid,
+                "content": [{"type": "text", "text": "Async agent launched successfully."}]}]},
+            "toolUseResult": {"isAsync": True, "status": "async_launched", "agentId": agent,
+                              "description": desc, "resolvedModel": "claude-opus-5-5[1m]"}}
+
+
+def _note(task=AGENT, tuid=TUID, status="completed", result=REPORT, interim=False):
+    head = f"<task-notification>\n<task-id>{task}</task-id>\n"
+    if tuid:
+        head += f"<tool-use-id>{tuid}</tool-use-id>\n"
+    note = ("This agent stopped with background work of its own still running." if interim
+            else "A task-notification fires each time this agent stops.")
+    body = f"<status>{status}</status>\n<summary>Agent finished</summary>\n<note>{note}</note>\n"
+    if result is not None:
+        body += f"<result>{result}</result>\n"
+    return head + body + "<usage><subagent_tokens>99999</subagent_tokens></usage>\n" \
+                         "</task-notification>"
+
+
+def _queued(text):
+    return {"type": "attachment", "attachment": {"type": "queued_command", "prompt": text,
+                                                 "commandMode": "task-notification"}}
+
+
+def _bash():
+    return [_assistant({"type": "tool_use", "id": BASH_TUID, "name": "Bash",
+                        "input": {"command": "sleep 60", "run_in_background": True}}),
+            {"type": "user", "message": {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": BASH_TUID, "content": "running: b77"}]},
+             "toolUseResult": {"backgroundTaskId": "b77"}}]
+
+
+def _write(path, lines, mode="w"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open(mode, encoding="utf-8") as f:
+        f.writelines((x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)) + "\n"
+                     for x in lines)
+    return path
+
+
+def _msg(mid, model="claude-opus-5-5", effort="xhigh", inp=10, read=1000, made=100, out=50,
+         edit=None):
+    """One API message as the agent's transcript streams it: two lines, output growing."""
+    content = [{"type": "text", "text": "working"}]
+    if edit:
+        content.append({"type": "tool_use", "id": f"toolu_{mid}", "name": "Edit",
+                        "input": {"replace_all": False, "file_path": edit}})
+
+    def line(o):
+        return {"type": "assistant", "isSidechain": True, "effort": effort,
+                "message": {"id": mid, "model": model, "role": "assistant", "content": content,
+                            "usage": {"input_tokens": inp, "cache_read_input_tokens": read,
+                                      "cache_creation_input_tokens": made, "output_tokens": o}}}
+    return [line(1), line(out)]
+
+
+def _agent(session, agent=AGENT, msgs=(), brief=BRIEF, fork=False, **meta):
+    sub = session / "subagents"
+    lines = []
+    if fork:  # a fork opens with main's own launching message copied in (measured)
+        lines += [{"type": "fork-context-ref", "agentId": agent},
+                  *_msg("msg_main", inp=5, read=900000, made=0, out=700)]
+    lines.append({"type": "user", "isSidechain": True, "agentId": agent,
+                  "message": {"role": "user", "content": brief}})
+    for m in msgs:
+        lines += m
+    _write(sub / f"agent-{agent}.jsonl", lines)
+    meta = {"agentType": "fork" if fork else "general-purpose", "isFork": fork or None,
+            "description": "retry loop", **meta}
+    (sub / f"agent-{agent}.meta.json").write_text(
+        json.dumps({k: v for k, v in meta.items() if v is not None}), encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# running the scribe
+# --------------------------------------------------------------------------
+
+def _clerk(tmp_path, name, events=()):
+    p = tmp_path / f"{name}.json"
+    p.write_text(json.dumps({"worklog": f"{name} window", "events": list(events)}),
+                 encoding="utf-8")
+    return p
+
+
+def _scribe(run_hippo, project, clerk, jev=None, session="s1", capture=None, jev_capture=None):
+    env = {"HIPPO_CLERK_BACKEND": "mock", "HIPPO_MOCK_OUTPUT": str(clerk),
+           "HIPPO_JEV_BACKEND": "off" if jev is None else "mock"}
+    if jev is not None:
+        env["HIPPO_JEV_MOCK_OUTPUT"] = str(jev)
+    if capture is not None:
+        env["HIPPO_MOCK_CAPTURE"] = str(capture)
+    if jev_capture is not None:
+        env["HIPPO_JEV_MOCK_CAPTURE"] = str(jev_capture)
+    proc = run_hippo(["scribe", "--transcript", str(project / "transcript.jsonl"),
+                      "--session", session], cwd=project, env=env)
+    assert proc.returncode == 0, proc.stderr
+    return proc
+
+
+def _rows(project, ev, **match):
+    return [e for e in read_ledger(project) if e.get("ev") == ev
+            and all(e.get(k) == v for k, v in match.items())]
+
+
+def _payload(capture):
+    return "# live directives\n" + capture.read_text(encoding="utf-8").rsplit(
+        "\n# live directives\n", 1)[1]
+
+
+def _dumps(project):
+    return "".join(p.read_text() for p in (project / ".hippo" / "failures").glob("*"))
+
+
+def _session(project):
+    return project / "transcript"
+
+
+def _launch_window():
+    return [_user("add the retry loop in a subagent"), _call(), _launched(), *_bash(),
+            _assistant({"type": "text", "text": "Launched; waiting for the report."})]
+
+
+# --------------------------------------------------------------------------
+# the scribe step, end to end
+# --------------------------------------------------------------------------
+
+def test_a_run_is_listed_until_recorded_then_costed_once(tmp_project, run_hippo, tmp_path):
+    """No key. The launch window lists the run; a kind outside the vocabulary is dumped and the
+    run stays listed. The completion window records it — the clerk's kind on exec, scope and
+    task that code observed (its exec and scope are ignored) — and an outcome in the same
+    output lands on it. Usage is the agent's own messages, each counted once. Reading the
+    same lines again writes nothing twice, and a Bash task is no run."""
+    tasks = {"tasks": [{"id": "feat/retry", "title": "t", "status": "active"},
+                       {"id": "feat/retry-v2", "title": "u", "status": "pending"}]}
+    (tmp_project / ".hippo" / "tasks.yaml").write_text(yaml.safe_dump(tasks))
+    _write(tmp_project / "transcript.jsonl", _launch_window())
+    _agent(_session(tmp_project), msgs=[_msg("m1", edit="src/fetch.py")])
+    capture = tmp_path / "clerk.txt"
+    junk = {"ev": "dispatch", "id": DID, "kind": "retry-impl"}
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w1", [junk]), capture=capture)
+
+    listed = f"- {DID} · subagent · retry loop · brief: {BRIEF}"
+    assert listed in _payload(capture)
+    assert not _rows(tmp_project, "dispatch")
+    assert "kind 'retry-impl'" in _dumps(tmp_project)
+
+    _agent(_session(tmp_project), msgs=[_msg("m1", edit="src/fetch.py"),
+                                        _msg("m2", read=2000, out=70)])
+    _write(tmp_project / "transcript.jsonl",
+           [_queued(_note()), _user(_note(task="b77", tuid=BASH_TUID, result="exit 0")),
+            _user("merged, thanks"),
+            _assistant({"type": "text", "text": "Accepted the retry loop."})], mode="a")
+    events = [{"ev": "outcome", "ref": DID, "result": "accepted", "note": "retry loop merged"},
+              {"ev": "dispatch", "id": DID, "kind": "impl", "exec": "subagent/opus/inherit",
+               "scope": "the clerk's own words"}]
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w2", events), capture=capture)
+
+    assert listed in _payload(capture), "a run the clerk skipped stays listed"
+    [d] = _rows(tmp_project, "dispatch")
+    assert (d["id"], d["kind"], d["exec"], d["scope"], d["task"], d["src"]) == (
+        DID, "impl", "subagent/claude-opus-5-5/xhigh", "retry loop", "feat/retry", "scribe")
+    assert [e["ref"] for e in _rows(tmp_project, "outcome", result="accepted")] == [DID]
+    [u] = _rows(tmp_project, "usage")
+    assert (u["ref"], u["model"], u["src"]) == (DID, "claude-opus-5-5", "scribe")
+    assert (u["tin"], u["tcached"], u["tout"]) == (10 + 1000 + 100 + 10 + 2000 + 100, 3000, 120)
+    assert u["tokens"] == u["tin"] + u["tout"]
+    assert not _rows(tmp_project, "triage") and not _rows(tmp_project, "clerk", name="jev-harvest")
+
+    before = [e for e in read_ledger(tmp_project) if e["ev"] != "clerk"]
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "quiet"), session="s2", capture=capture)
+    assert [e for e in read_ledger(tmp_project) if e["ev"] != "clerk"] == before
+    assert "# native runs to record" not in _payload(capture)
+
+
+def test_with_the_judge_the_first_completion_is_triaged_once(tmp_project, run_hippo, tmp_path):
+    """The run's first completion is read like a wrapper lane at exit, src=scribe, with the
+    agent's own edits as its changes and the route never shown to the clerk. A resumed agent's
+    next notification — no tool-use-id after a SendMessage — gets a new cumulative usage row,
+    and is never triage material."""
+    jev = _mock(tmp_path, {"answers": ACCEPT, "default": DEFAULT})
+    _write(tmp_project / "transcript.jsonl", _launch_window() + [_user(_note())])
+    _agent(_session(tmp_project), msgs=[_msg("m1", edit="src/fetch.py")])
+    record = [{"ev": "dispatch", "id": DID, "kind": "impl"}]
+    jev_capture = tmp_path / "jev-request.json"
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w1", record), jev, jev_capture=jev_capture)
+
+    [t] = _rows(tmp_project, "triage")
+    assert (t["ref"], t["route"], t["src"]) == (DID, "accept-candidate", "scribe")
+    assert [e["src"] for e in _rows(tmp_project, "clerk", name="jev-harvest")] == ["scribe"]
+    state = json.loads(jev_capture.read_text(encoding="utf-8"))["state"]
+    assert (state["brief"], state["report"], state["exit"]["rc"]) == (BRIEF, REPORT, 0)
+    assert state["changes"] == f"{hippo_cli.NATIVE_EDITS_HEAD}:\nsrc/fetch.py"
+
+    _agent(_session(tmp_project), msgs=[_msg("m1", edit="src/fetch.py"), _msg("m2", out=900)])
+    _write(tmp_project / "transcript.jsonl", [_user("also handle 429"),
+                                              _user(_note(tuid=None, result="429 handled too"))],
+           mode="a")
+    capture = tmp_path / "clerk.txt"
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w2"), jev, capture=capture)
+    assert len(_rows(tmp_project, "triage")) == 1
+    assert [u["tout"] for u in _rows(tmp_project, "usage")] == [50, 950]
+    assert "accept-candidate" not in _payload(capture), "the route never reaches the clerk"
+
+
+def test_a_failed_first_reading_is_not_retried_on_a_resume(tmp_project, run_hippo, tmp_path):
+    broken = _mock(tmp_path, {"default": {"noul": 0.5}}, "broken.json")  # harvest has a score
+    _write(tmp_project / "transcript.jsonl", _launch_window() + [_user(_note())])
+    _agent(_session(tmp_project), msgs=[_msg("m1")])
+    _scribe(run_hippo, tmp_project,
+            _clerk(tmp_path, "w1", [{"ev": "dispatch", "id": DID, "kind": "impl"}]), broken)
+    assert [e["ok"] for e in _rows(tmp_project, "clerk", name="jev-harvest")] == [False]
+
+    _write(tmp_project / "transcript.jsonl", [_user("go on"), _user(_note(tuid=None))], mode="a")
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w2"),
+            _mock(tmp_path, {"answers": ACCEPT, "default": DEFAULT}))
+    assert not _rows(tmp_project, "triage")
+    assert len(_rows(tmp_project, "clerk", name="jev-harvest")) == 1
+
+
+def test_a_workflow_run_is_one_row_over_all_its_agents(tmp_project, run_hippo, tmp_path):
+    """exec is the most-used model and effort across the run's agents; usage is one row per
+    model; the brief is the script and the report is the run's whole result, not the ~8k the
+    notification carries."""
+    script = "export const meta = { name: 'port-parser' }; await agent('port the parser')"
+    result = {"impl": {"commit": "abc1234", "tests": "412 passed"}, "note": "π ≈ 3.14"}
+    session = _session(tmp_project)
+    run = session / "subagents" / "workflows" / "wf_1234abcd-567"
+    for aid, msgs in (("a1", [_msg("w1"), _msg("w2")]), ("a2", [_msg("w3", model="h-4-5",
+                                                                        effort="low")])):
+        _write(run / f"agent-{aid}.jsonl", [{"type": "user", "message": {"content": "x"}}]
+               + [ln for m in msgs for ln in m])
+    (session / "workflows").mkdir(parents=True)
+    (session / "workflows" / "wf_1234abcd-567.json").write_text(json.dumps(
+        {"status": "completed", "result": json.dumps(result)}), encoding="utf-8")
+    wtuid = "toolu_01WorkflowWorkflowWorkflo"
+    _write(tmp_project / "transcript.jsonl", [
+        _user("port it with a workflow"),
+        _assistant({"type": "tool_use", "id": wtuid, "name": "Workflow",
+                    "input": {"script": script}}),
+        {"type": "user", "timestamp": _ts(), "message": {"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": wtuid, "content": "launched"}]},
+         "toolUseResult": {"status": "async_launched", "taskId": "wxyz", "runId":
+                           "wf_1234abcd-567", "workflowName": "port-parser"}},
+        _user(_note(task="wxyz", tuid=wtuid, result="{\"impl\": … (truncated)"))])
+    jev_capture = tmp_path / "jev-request.json"
+    _scribe(run_hippo, tmp_project,
+            _clerk(tmp_path, "w", [{"ev": "dispatch", "id": "ag-wf_1234abcd-567",
+                                    "kind": "impl"}]),
+            _mock(tmp_path, {"answers": ACCEPT, "default": DEFAULT}), jev_capture=jev_capture)
+
+    [d] = _rows(tmp_project, "dispatch")
+    assert (d["exec"], d["scope"]) == ("workflow/claude-opus-5-5/xhigh", "port-parser")
+    assert sorted((u["model"], u["tout"]) for u in _rows(tmp_project, "usage")) == [
+        ("claude-opus-5-5", 100), ("h-4-5", 50)]
+    state = json.loads(jev_capture.read_text(encoding="utf-8"))["state"]
+    assert state["brief"] == script
+    assert state["report"] == json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    assert [t["ref"] for t in _rows(tmp_project, "triage")] == ["ag-wf_1234abcd-567"]
+
+
+def test_a_workflow_result_that_does_not_fit_gets_no_triage(tmp_project, monkeypatch, capsys):
+    run = {"executor": "workflow", "notes": [hippo_cli.TaskNote(9, "w", None, "completed",
+                                                                 "cut", False)],
+           "brief": "script", "scope": "big", "meta": {}, "stats": {"edits": []},
+           "summary": tmp_project / "wf.json"}
+    run["summary"].write_text(json.dumps({"result": "x" * hippo_cli.JEV_STATE_BUDGET_CHARS}))
+    monkeypatch.setattr(hippo_cli, "triage", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("an unfittable run must not reach the judge")))
+    assert hippo_cli.native_triage(tmp_project / ".hippo", run, "ag-wf", "impl") is False
+    assert "over the judge's budget" in capsys.readouterr().err
+
+
+def test_a_restated_launch_keeps_main_s_verdict(tmp_project, run_hippo, tmp_path):
+    """The clerk coined its own id for the Agent launch and put main's verdict on it. The
+    restatement is dumped; the run is recorded under its own id with that kind, and the
+    verdict lands there."""
+    _write(tmp_project / "transcript.jsonl", _launch_window() + [_user(_note()),
+                                                                 _user("looks right, merge")])
+    _agent(_session(tmp_project), msgs=[_msg("m1")])
+    events = [{"ev": "outcome", "ref": "d9", "result": "accepted", "note": "merged"},
+              {"ev": "dispatch", "id": "d9", "kind": "fix", "exec": "subagent/opus/inherit",
+               "scope": "add retries to fetch"}]
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "restates", events))
+
+    [d] = _rows(tmp_project, "dispatch")
+    assert (d["id"], d["kind"]) == (DID, "fix")
+    assert [(o["ref"], o["result"]) for o in _rows(tmp_project, "outcome")] == [(DID, "accepted")]
+    assert "record it there, under its listed id" in _dumps(tmp_project)
+
+
+def test_main_s_own_log_dispatch_is_the_record(tmp_project, run_hippo, tmp_path):
+    """Main logged the run itself under its own id, the scope its description in other case
+    and spacing: nothing is listed and the run's cost lands on main's row."""
+    assert run_hippo(["log", "dispatch", "--id", "d1", "--kind", "impl", "--exec",
+                      "subagent/opus/inherit", "--scope", "Retry  LOOP"],
+                     cwd=tmp_project).returncode == 0
+    _write(tmp_project / "transcript.jsonl", _launch_window() + [_user(_note())])
+    _agent(_session(tmp_project), msgs=[_msg("m1")])
+    capture = tmp_path / "clerk.txt"
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "quiet"), capture=capture)
+
+    assert "# native runs to record" not in _payload(capture)
+    assert [d["id"] for d in _rows(tmp_project, "dispatch")] == ["d1"]
+    assert [u["ref"] for u in _rows(tmp_project, "usage")] == ["d1"]
+
+
+def test_an_unknown_native_ref_says_no_call_is_needed(tmp_project, run_hippo):
+    proc = run_hippo(["log", "outcome", "--ref", DID, "--result", "accepted"], cwd=tmp_project)
+    assert proc.returncode != 0
+    assert "lands in the ledger at the end of the turn" in proc.stderr
+    assert "no call needed" in proc.stderr
+
+
+def test_a_bug_on_the_native_path_never_costs_the_clerk(tmp_project, tmp_path, monkeypatch):
+    _write(tmp_project / "transcript.jsonl", _launch_window())
+    monkeypatch.setenv("HIPPO_CLERK_BACKEND", "mock")
+    monkeypatch.setenv("HIPPO_MOCK_OUTPUT", str(_clerk(tmp_path, "quiet")))
+    monkeypatch.setattr(hippo_cli, "native_index", lambda *a: 1 / 0)
+    hp = tmp_project / ".hippo"
+    hippo_cli.cmd_scribe(types.SimpleNamespace(
+        hp=hp, transcript=str(tmp_project / "transcript.jsonl"), session="s1"))
+    assert [e["ok"] for e in read_ledger(tmp_project) if e.get("name") == "turn-scribe"] == [True]
+    [dump] = (hp / "failures").glob("*-native-*")
+    assert "ZeroDivisionError" in dump.read_text()
+
+
+# --------------------------------------------------------------------------
+# the index, over the delivery shapes measured on real transcripts
+# --------------------------------------------------------------------------
+
+def test_the_index_reads_every_measured_delivery_shape(tmp_path):
+    """A notification arrives on a user line or a `queued_command` attachment; after a
+    SendMessage it names only the task-id; an interim one is no completion. Bookkeeping lines,
+    a tag quoted in a tool's output, a Bash task and a failed launch are not runs; a foreground
+    call is a launch and a completion at once. A fork's executor comes from its meta.json, a hippo:lane agent is indexed but never listed, and a
+    nested run carries its parent."""
+    fork, failed, lane = "toolu_01ForkForkForkForkFork2", "toolu_01FailFailFailFailFail3", \
+        "toolu_01LaneLaneLaneLaneLane4"
+    fg = "toolu_01ForeForeForeForeFore6"  # a foreground call: its report comes back inline
+    lines = [
+        _call(), _launched(),                                                        # 1, 2
+        _call(fork, desc="fork arm", subagent_type="fork"),                          # 3
+        _launched(fork, agent="afork", desc="fork arm"),                             # 4
+        _call(failed),                                                               # 5
+        {"type": "user", "message": {"role": "user", "content": [{                  # 6
+            "type": "tool_result", "tool_use_id": failed, "is_error": True,
+            "content": "Error: Cannot create agent worktree"}]},
+         "toolUseResult": "Error: Cannot create agent worktree"},
+        *_bash(),                                                                    # 7, 8
+        {"type": "queue-operation", "operation": "enqueue", "content": _note()},    # 9
+        _queued(_note(interim=True, result="waiting on a benchmark")),              # 10
+        {"type": "user", "message": {"role": "user", "content": [{                  # 11
+            "type": "tool_result", "tool_use_id": "toolu_01Grep", "content": _note()}]}},
+        _user(_note(task="b77", tuid=BASH_TUID, result="exit 0")),                   # 12
+        _user(_note(task="afork", tuid=None, status="killed", result=None)),        # 13
+        "not json at all",                                                           # 14
+        _user(_note()),                                                              # 15
+        _call(lane, desc="watch lane", subagent_type="hippo:lane"),                  # 16
+        _launched(lane, agent="alane", desc="watch lane"),                           # 17
+        _call(fg, desc="quick check"),                                               # 18
+        {"type": "user", "message": {"role": "user", "content": [{                  # 19
+            "type": "tool_result", "tool_use_id": fg, "content": "[hand-back] ok"}]},
+         "toolUseResult": {"status": "completed", "agentId": "afg", "content": [
+             {"type": "text", "text": "fine as it is"}]}},
+    ]
+    path = _write(tmp_path / "t.jsonl", lines)
+    session = tmp_path / "t"
+    _agent(session, "afork", fork=True, msgs=[_msg("f1", out=40)])
+    _agent(session, "alane", agentType="hippo:lane")
+    kid, kid_tuid = "akid0000000000000", "toolu_01KidKidKidKidKidKidKid5"
+    _agent(session, AGENT, msgs=[[_call(kid_tuid, desc="nested")], [_launched(kid_tuid, kid)],
+                                 [_user(_note(task=kid, tuid=kid_tuid, result="kid done"))]])
+    _agent(session, kid, parentAgentId=AGENT, msgs=[_msg("k1")])
+
+    runs = hippo_cli.native_index(path, 0, 19)
+    assert set(runs) == {DID, "ag-afork", "ag-alane", "ag-" + kid, "ag-afg"}
+    assert [(n.line, n.report) for n in runs["ag-afg"]["notes"]] == [(19, "fine as it is")]
+    main, fk, ln, nested = runs[DID], runs["ag-afork"], runs["ag-alane"], runs["ag-" + kid]
+    assert [(n.line, n.status, n.interim) for n in main["notes"]] == [
+        (10, "completed", True), (15, "completed", False)]
+    assert [(n.line, n.status, n.report) for n in fk["notes"]] == [(13, "killed", None)]
+    assert (fk["executor"], ln["skip"], nested["parent"]) == ("fork", True, DID)
+    assert [n.report for n in nested["notes"]] == ["kid done"]
+    assert hippo_cli.native_stats(fk)["usage"]["claude-opus-5-5"]["tout"] == 40, (
+        "a fork is not billed for main's launching message copied into its transcript")
+
+    runs = hippo_cli.native_index(path, 10, 17)
+    assert (runs[DID]["seen"], runs[DID]["first_now"], runs[DID]["line"]) == (True, True, 2)
+    runs = hippo_cli.native_index(path, 0, 12)
+    assert runs[DID]["first_now"] is False, "an interim notification is not a completion"
+    assert "ag-alane" not in hippo_cli.native_index(path, 0, 15), "nothing past `end` is read"
+
+
+def test_an_isolated_agent_s_changes_are_read_against_an_honest_base(tmp_path):
+    """HEAD never moved: the working tree is all of it. Committed and not yet in main's branch:
+    against the merge-base. Already merged: no base is honest, so no git facts at all."""
+    def git(d, *a):
+        subprocess.run(["git", "-C", str(d), *a], check=True, capture_output=True)
+
+    repo, wt = tmp_path / "repo", tmp_path / "repo" / "wt"
+    repo.mkdir()
+    (repo / ".hippo").mkdir()
+    git(repo, "init", "-q", "-b", "dev")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty",
+        "-m", "base")
+    git(repo, "worktree", "add", "-q", "-b", "agent", str(wt))
+    (wt / "new.py").write_text("x = 1\n")
+    facts = hippo_cli.worktree_changes(repo / ".hippo", wt)
+    assert facts.splitlines()[1:] == ["?? new.py"]
+
+    git(wt, "add", "new.py")
+    git(wt, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "work")
+    facts = hippo_cli.worktree_changes(repo / ".hippo", wt)
+    assert "new.py | 1 +" in facts
+
+    git(repo, "merge", "-q", "--ff-only", "agent")
+    assert hippo_cli.worktree_changes(repo / ".hippo", wt) is None
+
+
+def test_the_model_is_the_price_sheet_key():
+    assert hippo_cli.native_model("claude-opus-5-5[1m]") == "claude-opus-5-5"
+    assert hippo_cli.native_model("claude-haiku-4-5-20251001") == "claude-haiku-4-5"
+    assert "claude-opus-5-5" in hippo_cli.load_prices()["models"]
+
+
+# --------------------------------------------------------------------------
+# PRIORS
+# --------------------------------------------------------------------------
+
+NOW = datetime(2026, 9, 24, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _t(hours_ago):
+    return (NOW - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_priors_read_the_last_row_per_model_and_leave_native_runs_out_of_open_items():
+    rows = [{"t": _t(30), "ev": "dispatch", "id": DID, "kind": "impl",
+             "exec": "subagent/claude-opus-5-5/xhigh", "scope": "retry loop", "src": "scribe"},
+            {"t": _t(30), "ev": "dispatch", "id": "d7", "kind": "impl",
+             "exec": "codex/gpt-6-sol/high", "scope": "lane", "src": "wrapper"},
+            {"t": _t(29), "ev": "usage", "ref": DID, "model": "claude-opus-5-5", "tokens": 10,
+             "tin": 8, "tcached": 0, "tout": 2, "src": "scribe"},
+            {"t": _t(28), "ev": "usage", "ref": DID, "model": "claude-opus-5-5", "tokens": 1000,
+             "tin": 1000000, "tcached": 0, "tout": 0, "src": "scribe"},
+            {"t": _t(28), "ev": "usage", "ref": DID, "model": "claude-haiku-4-5", "tokens": 5,
+             "tin": 1000000, "tcached": 0, "tout": 0, "src": "scribe"},
+            {"t": _t(27), "ev": "outcome", "ref": DID, "result": "accepted", "src": "scribe"}]
+    [cell] = hippo_cli.prior_cells(rows).values()
+    assert (cell["tokens"], round(cell["usd"], 2), cell["priced"]) == (1005, 5.0, 1)
+
+    page = hippo_cli.prior_facts(rows[:2], NOW)
+    assert "- d7 (30h00m)" in page and f"- {DID}" not in page
+    assert "native runs (`ag-`) with no verdict, left out of this list: 1" in page
+
+
+def test_a_scribe_triage_after_the_verdict_still_counts():
+    """Main typed its verdict during the turn; the scribe read the report at Stop, after it —
+    main never saw that route, so it measures the judge."""
+    rows = [{"t": _t(3), "ev": "dispatch", "id": DID, "kind": "impl",
+             "exec": "subagent/claude-opus-5-5/xhigh", "scope": "retry loop", "src": "scribe"},
+            {"t": _t(2), "ev": "outcome", "ref": DID, "result": "refuted", "src": "cli"},
+            {"t": _t(1), "ev": "triage", "ref": DID, "route": "accept-candidate",
+             "src": "scribe"}]
+    section = "\n".join(hippo_cli.triage_agreement(rows))
+    assert "accept-candidate precision 0/1" in section

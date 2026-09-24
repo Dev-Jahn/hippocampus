@@ -32,7 +32,9 @@ The plugin, its slash commands, and the CLI are all named `hippo`.
   status block (survives compaction); `Stop` fires the scribe clerk detached,
   never blocking.
 - **clerks** (`clerks/*.md`) — headless prompts: `turn-scribe` digests a
-  session into worklog + ledger events, `distiller` regenerates `PRIORS.md`
+  session into worklog + ledger events (Claude Code subagents and Workflow
+  runs are recorded like codex lanes: launch, cost per model, your verdict —
+  no call needed), `distiller` regenerates `PRIORS.md`
   (the scribe runs it when the page is a week old and five new verdicts have
   landed; `hippo prior distill` runs it by hand).
 - **skills** (`skills/*`) — `hippo` (the whole CLI grammar, one screen),
@@ -90,10 +92,12 @@ With `TYPESAFE_API_KEY` in the environment, hippo asks TypeSafe's Jev — a judg
 that returns probabilities, never prose — a few typed questions at moments where it already
 holds the text: the scribe's digest (advisory hints for the clerk), the live directive set
 (`directive add`, `directive list`), every dispatch's brief before it launches and
-its report at exit (single and `--batch` alike). Answers are evidence a code policy thresholds;
-the judge never writes a verdict. There is no setting and no prompt: without the
-key, every command behaves exactly as it always has. Question specs are text in
-`clerks/jev/*.yaml`; the design is `DESIGN.md` §2 (judge), §3.6, §3.9.
+its report at exit (single and `--batch` alike), and each Claude Code subagent's or
+Workflow run's brief and report at its first completion, which the scribe finds at Stop.
+Answers are evidence a code policy thresholds; the judge never writes a verdict. There is no
+setting and no prompt: without the key, every command behaves exactly as it always has.
+Question specs are text in `clerks/jev/*.yaml`; the design is `DESIGN.md` §2 (judge), §3.5,
+§3.6, §3.9.
 
 ## CLI cheat sheet
 
