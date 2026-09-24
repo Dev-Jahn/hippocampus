@@ -2167,6 +2167,7 @@ LANE_SCOPE_CHARS = 48
 LANE_KILL_GRACE = 5.0  # seconds codex gets after a forwarded signal before its group is killed
 LANE_DRAIN = 2.0  # seconds stderr may stay open after codex exits (a child it left behind)
 LANE_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+LANE_STATUSLINE = ".statusline"  # the pointer the plugin's subagentStatusLine follows (§3.6)
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 # codex runs every command through the user's shell and prints it on the line after an `exec`
 # header as `/bin/zsh -lc '<command>' in <cwd>` — 1,657 of 1,657 in sixteen real lane logs
@@ -2213,17 +2214,22 @@ def first_sentence(text):
 
 def lanes_dir(hp):
     """.hippo/lanes/, with files a week old pruned — a new lane start is the one moment this
-    directory is written anyway, so no schedule is needed (§4). Called once per wrapper run:
-    batch lanes share it from their threads."""
+    directory is written anyway, so no schedule is needed (§4) — and the pointer the plugin's
+    subagentStatusLine follows kept current: Claude Code substitutes no ${CLAUDE_PLUGIN_ROOT}
+    in a plugin's settings.json (measured, 2.1.281), and the wrapper is the one process that
+    knows where this plugin lives. Called once per wrapper run: batch lanes share it."""
     d = hp / "lanes"
     d.mkdir(exist_ok=True)
     cutoff = time.time() - LANE_KEEP_DAYS * 86400
     for p in d.iterdir():
         try:
-            if p.stat().st_mtime < cutoff:
+            if p.name != LANE_STATUSLINE and p.stat().st_mtime < cutoff:
                 p.unlink()
         except OSError:
             pass  # a directory, or a concurrent prune got there first
+    ptr, script = d / LANE_STATUSLINE, str(SCRIPTS / "lane_status.py")
+    if _read_text(ptr) != script:
+        write_durable(ptr, script)
     return d
 
 

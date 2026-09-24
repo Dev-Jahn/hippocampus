@@ -92,6 +92,7 @@ Judge guardrails (invariant):
 
 ```
 runtime (thin):   bin/hippo (shim) + cli/hippo_cli.py + 2 hooks + scripts/{clerk_run,digest_lite,dispatch}
+                  + settings.json → scripts/lane_status.py (the lane row in Claude Code's agent panel)
 cognition (text): clerks/{turn-scribe,distiller}.md + clerks/jev/*.yaml + skills/{hippo,checkup,dispatch}
                   + agents/lane.md
 resident (small): the capsule injected at SessionStart (§6 below)
@@ -542,6 +543,31 @@ command it hands over — and it never edits that command, stops the lane or doe
 no judgment of its own reaches the record. The plain Bash form stays for the Codex host, which
 has no agent panel, and for a lane launched from inside a lane.
 
+**The row** (`settings.json` → `subagentStatusLine` → `scripts/lane_status.py`). Claude Code
+runs a plugin's subagentStatusLine about every 5s with the visible agent rows on stdin. For each
+row whose `subagents/agent-<id>.meta.json` says `hippo:lane`, the script takes the lane's
+dispatch id from that agent's transcript (the last `dispatch:<id>` or `--watch <id>` in it —
+the prompt, which comes first, is main's text and may quote other ids), reads
+`.hippo/lanes/<id>.json` walking up from the row's cwd, and prints `{"id": …, "content": "codex
+· <scope> · <elapsed> · <cmds> cmds · <last event>"}`, cut to the row's width; an ended lane
+shows its status, rc and duration instead. Every other row is left out, which keeps Claude
+Code's own rendering (measured, 2.1.281: `◯ general-purpose  <description> … 15s · ↓ 20.3k
+tokens`; documented: an omitted id keeps the default, an empty content hides the row) — a
+printed row replaces the whole default, type, description and stats alike. Stdlib only and no
+subprocess, because it runs on every tick of every session with the plugin on: 25ms median
+(29ms max) for a tick with a lane row and three others, 4ms where no lane ever started. How
+the plugin reaches its own script: Claude Code 2.1.281 neither substitutes
+`${CLAUDE_PLUGIN_ROOT}` in a plugin's settings.json nor exports it to that command (measured:
+it expanded to nothing), the documented placeholder list covers skill and agent content, hook
+and monitor commands and MCP/LSP servers only, the plugin `bin/` is on the Bash tool's PATH
+but not this command's, and the command runs in the project directory. So the command is a
+short `sh` walk up from there to `.hippo/lanes/.statusline`, a pointer holding the script's
+absolute path that every lane start rewrites — the wrapper is the one process that knows where
+the plugin lives — and a project that never launched a lane pays one `sh` per tick and no
+python. After a plugin update the pointer names a deleted cache path until the next lane
+start, and until then every row keeps its default. The plugin's value is a default: a user's
+own `subagentStatusLine` replaces it (and would have to render hippo:lane rows itself).
+
 Why it is a CLI subcommand: a plugin puts only `bin/` on PATH, and `${CLAUDE_PLUGIN_ROOT}` is empty
 in an ordinary Bash call. Leaving it in `scripts/` means every consuming project grows its own shim
 with a hard-coded cache path (measured). `scripts/dispatch.sh` remains only as a compatibility
@@ -797,6 +823,7 @@ engine (measured on 0.144.6).
 | Hooks | `hooks/hooks.json` | **the same file** — event keys (PascalCase), matcher, stdin payload fields and the SessionStart `hookSpecificOutput.additionalContext` envelope are all identical (codex ≥0.146 rejects bare text, §3.4) |
 | Plugin `bin/` | added to PATH automatically | **not added** → a skill resolves `bin/hippo` relative to its own SKILL.md; a dispatched lane gets it from the wrapper (§3.6) |
 | Transcript | Claude JSONL | codex rollout JSONL — `digest_lite.py` detects the format from the first lines and reduces both to the same line vocabulary |
+| Agent panel | `agents/lane.md` (`hippo:lane`) + `settings.json` `subagentStatusLine` (§3.6) | none — a lane launches through plain Bash, and `hippo dispatch --watch` works the same |
 
 Constraints specific to codex (0.144.6):
 

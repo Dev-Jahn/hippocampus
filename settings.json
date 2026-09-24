@@ -1,0 +1,6 @@
+{
+  "subagentStatusLine": {
+    "type": "command",
+    "command": "d=$PWD; while [ ! -f \"$d/.hippo/lanes/.statusline\" ] && [ -n \"$d\" ]; do d=${d%/*}; done; [ -f \"$d/.hippo/lanes/.statusline\" ] && exec python3 \"$(cat \"$d/.hippo/lanes/.statusline\")\"; exec cat >/dev/null"
+  }
+}
