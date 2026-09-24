@@ -111,3 +111,56 @@ def test_a_failing_backend_says_why_in_the_scribe_dump(tmp_project, run_hippo, f
         "clerk rc=1: codex: ERROR: unexpected status 401 Unauthorized: Missing bearer or basic "
         "authentication")
     assert "ERROR: Reconnecting... 5/5" in text.split("--- stderr ---", 1)[1]
+
+
+ECHOING_CODEX = """#!/bin/sh
+# codex echoes its whole prompt to stderr: here a digest line that mentions an error.
+echo "OpenAI Codex v0.156.1" >&2
+echo "user" >&2
+echo "[3] RES: E   ImportError: cannot import name foo" >&2
+echo "[4] USER: fix the error please" >&2
+%s
+"""
+
+
+def _run_stub(tmp_path, body, env=None):
+    stub = tmp_path / "stub-bin"
+    stub.mkdir(exist_ok=True)
+    codex = stub / "codex"
+    codex.write_text(body, encoding="utf-8")
+    codex.chmod(0o755)
+    (tmp_path / "p.md").write_text("prompt-part\n", encoding="utf-8")
+    (tmp_path / "i.txt").write_text("input-part\n", encoding="utf-8")
+    full_env = {
+        **{k: v for k, v in os.environ.items() if not k.startswith("HIPPO_")},
+        **(env or {}),
+        "PATH": f"{stub}:{SYSTEM_PATH}",
+        "HIPPO_CLERK_BACKEND": "codex",
+    }
+    return subprocess.run(
+        ["bash", str(SCRIPTS_DIR / "clerk_run.sh"), str(tmp_path / "p.md"), str(tmp_path / "i.txt")],
+        capture_output=True, text=True, timeout=60, env=full_env,
+    )
+
+
+def test_the_echoed_prompt_is_never_the_cause(tmp_path):
+    """A digest line that mentions an error is transcript text, not codex's words: with no error
+    line of its own, the failure names no cause rather than quoting the transcript."""
+    proc = _run_stub(tmp_path, ECHOING_CODEX % "exit 1")
+    assert proc.returncode == 1
+    assert "ImportError" not in proc.stderr and "fix the error" not in proc.stderr
+
+
+def test_a_timeout_is_named_from_the_exit_code(tmp_path):
+    proc = _run_stub(tmp_path, ECHOING_CODEX % "sleep 10",
+                     env={"HIPPO_CLERK_TIMEOUT": "1"})
+    assert proc.returncode == 124
+    assert proc.stderr.splitlines()[0] == "codex: timed out after 1s"
+    assert "ImportError" not in proc.stderr
+
+
+def test_a_broken_tmpdir_does_not_stop_the_backend(tmp_path):
+    proc = _run_stub(tmp_path, "#!/bin/sh\necho ok\n",
+                     env={"TMPDIR": str(tmp_path / "does-not-exist")})
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "ok"

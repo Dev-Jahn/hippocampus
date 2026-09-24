@@ -841,8 +841,11 @@ own first words —
 Measured on b200 (2026-09-24): the scribe failed 7 runs in a row on an expired codex login and
 nothing said so, and each dump read `clerk rc=1` over an empty stderr — `clerk_run.sh` threw the
 backend's stderr away. It now keeps it in a temp file and, on a non-zero exit, prints the last
-error lines, the cause first. One failure is noise (a timeout, a flaky network); three in a row is
-an organ that stopped working.
+error lines, the cause first — only lines shaped like the backend's own errors (`ERROR:`, a
+timestamped tracing line), because codex echoes its whole prompt, digest included, to stderr and
+an unanchored search promoted a transcript line to "the cause"; a timeout or a signal is named
+from the exit code. One failure is noise (a timeout, a flaky network); three in a row is an organ
+that stopped working.
 
 `in flight` is delegations launched and not yet judged, within 24h, **counting only what a
 launcher wrote** (`src` `wrapper`/`cli`). A lane's self-report does not land an entry — it rides
