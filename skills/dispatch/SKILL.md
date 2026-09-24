@@ -53,7 +53,10 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   `HIPPO_DIR`, and puts its own `bin/` first on the lane's PATH (a bare `hippo` works on both
   hosts): the lane's capsule carries its directives and report line, and its
   `log outcome` is a **claim** — the verdict is main's. Launch through `run_in_background`,
-  never nohup/disown (orphans). A codex argument that collides with a wrapper flag goes after `--`.
+  never nohup/disown (orphans), and never redirect its output (`> log 2>&1`): the wrapper keeps
+  codex's raw stderr in `.hippo/lanes/<id>.log` and the report in `<id>.out`, and prints one
+  short line per command or message. A killed lane still records its rc and usage. A codex
+  argument that collides with a wrapper flag goes after `--`.
 - `--depth 1` = an orchestrator lane that may spawn; its children start at 0. Lane-origin
   launches pass a dollar breaker ($500 per parent per 24h, `dispatch: {max_wave_usd: N}` in
   `.hippo/config.yaml`); main is never gated.

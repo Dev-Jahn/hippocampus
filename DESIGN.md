@@ -108,13 +108,14 @@ enforcement:      none
   cursors.json      # the scribe's per-session transcript cursors
   failures/         # dumps of clerk output that failed validation (checkup reports them)
   briefs/           # delegation briefs (COMMON.md + one file per task) — see below
+  lanes/            # per codex lane: its record, raw stderr and report (§3.6); pruned after 7 days
   config.yaml       # optional: overrides such as the clerk backend (everything works without it)
 ```
 
 In a directory with no `.hippo/`, every hook and every CLI command is a **completely silent no-op**
 (zero contamination of other projects).
 
-Every file hippo rewrites (tasks, worklog, PRIORS, cursors) is replaced whole: written to a tmp file
+Every file hippo rewrites (tasks, worklog, PRIORS, cursors, lane records) is replaced whole: written to a tmp file
 beside it, fsync'd, then renamed over it (`write_durable`). The ledger is only ever appended to.
 Measured (b200, 2026-09-23): a node failure during an in-place worklog rewrite left steno's 412KB
 worklog.md at 0 bytes on a shared filesystem that kept the truncation and lost the data.
@@ -449,7 +450,7 @@ hippo scribe --transcript P --session S   # internal: the Stop hook calls it det
 A codex exec wrapper: the point that already knows the model and effort from its own argv is
 exactly the point to collect them automatically (principle 6). It takes the `--kind`, `--scope` and
 `--task` labels, records `ev:dispatch`, prints the dispatch id on stdout's first line, and then runs
-`codex exec … < /dev/null`, forwarding every line unmodified. A `--fast` flag prepends
+`codex exec … < /dev/null`, passing its stdout through unmodified. A `--fast` flag prepends
 `-c service_tier="fast"` to the codex arguments — a per-launch latency choice carried in argv like
 the rest of codex's grammar, invisible to the exec axis. It also plants
 `HIPPO_DISPATCH=<id>`, `HIPPO_DEPTH` and `HIPPO_DIR`
@@ -461,11 +462,48 @@ launch made from inside a lane records that lane as `parent`. Since 1.10.0 the w
 pass-through rather than an exec: it stays alive to *read* (never rewrite) the stream — the
 banner's session id and model, the "tokens used" footer — and at lane exit records `ev:usage`
 from the rollout or the footer (§9.6). Those markers ride codex's *stderr* (measured, 0.144.6;
-stdout carries only the agent's own output) — so stderr is the one piped-and-forwarded stream,
-and stdout passes through untouched. 1.10.0–1.11.0 read stdout instead, saw no session id, and
+stdout carries only the agent's own output) — so stderr is the stream it reads, and stdout
+passes through untouched. 1.10.0–1.11.0 read stdout instead, saw no session id, and
 silently recorded nothing — the stub test had encoded the wrong stream; fixed in 1.11.1. It does not record an
 outcome — the acceptance judgment belongs to main (through the CLI directly) or to the scribe
 (by inference); what the lane itself records under that id is a claim, never the verdict.
+
+**The lane's own record** (1.15.0). In Claude Code a background `hippo dispatch` showed as a
+shell row labelled with its raw command, and nobody could see what the lane was doing: codex's
+raw stderr runs to megabytes (one lane: 56k lines, 2.3MB), so 18 of 18 real background launches
+redirected it (`> log 2>&1; tail`), and the shell's details view shows the last 10 lines of the
+last 8KB. The wrapper now keeps what those redirects improvised. codex's raw stderr goes whole
+to `.hippo/lanes/<id>.log` — still read on the way for the banner, the footer and triage's
+400-line tail — and stdout, passed through byte for byte, is kept as `<id>.out`: the agent's
+final message, which is the lane's report. The shell's stderr gets a compact stream instead:
+one line per new codex command (`lane <scope> · <elapsed> · exec: <command, one line, ≤100
+chars>`, recognized only in codex's own `<shell> -lc '…' in <cwd>` shape — 1,657 of 1,657 in
+sixteen real logs) and per agent message (`… · said: <first sentence, ≤120 chars>`), at most
+one line per 3s with the newest event winning, then the final line (`exited rc=0 · 14 cmds ·
+187,135 tokens · raw log <path>`) and the triage line. No compact line may read as a prompt:
+Claude Code wakes main when a background shell has not grown for 45s and its last line matches
+`Continue?`, `Overwrite?`, `Press any key|Enter`, `(y/n)` or a `Do you|Would you|Shall I|Are you
+sure|Ready to …?` question, so the three characters those need — `?`, the space after `Press`,
+the slash of `(y/n)` — are swapped for look-alikes. `.hippo/lanes/<id>.json` holds only what
+the rollout cannot give back cheaply — `id scope exec pid pgid started codex_session cmds last
+last_at log report`, then `status` (`exited|killed`), `rc`, `signal`, `triage` and, written
+last, `ended` — rewritten whole at the stream's cadence, and a new lane start prunes lane files
+older than 7 days (no schedule, §4). Batch lanes run through the same machinery: `<id>.err`
+keeps its shape as the raw log, the compact lines join the batch's stderr, and each lane gets
+its record under its dispatch id. Without `.hippo/` there is no record, and the raw log goes to
+a temp file the final line names.
+
+**The kill trap.** codex runs in a session of its own, so a signal reaches it only through the
+wrapper: SIGTERM, SIGHUP and SIGINT are forwarded to codex's process group (SIGKILL after 5s if
+it lingers, and whatever of the group outlives codex is killed with it), the lane is recorded
+`killed` with its signal and rc, `ev:usage` comes from the rollout as on any exit, triage runs
+when the judge is on, and the wrapper exits 128+signal (a batch stops launching, signals every
+running lane and exits the same way; rerunning it resumes). Before 1.15.0 a killed lane recorded
+no rc, no usage and no triage — and Claude Code does kill background shells: under critical
+memory pressure once main has been idle 30 minutes with no agent running, and with a stopped
+agent's shells. Its kill is SIGTERM to the whole process tree, then SIGKILL 1.5s later
+(2.1.281), so the order is status and rc first, then usage, then the judge — the part that may
+not fit in 1.5s is the part that may go missing.
 
 Why it is a CLI subcommand: a plugin puts only `bin/` on PATH, and `${CLAUDE_PLUGIN_ROOT}` is empty
 in an ordinary Bash call. Leaving it in `scripts/` means every consuming project grows its own shim

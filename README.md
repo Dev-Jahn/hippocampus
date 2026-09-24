@@ -28,6 +28,9 @@ The plugin, its slash commands, and the CLI are all named `hippo`.
 ## Components
 
 - **CLI** (`bin/hippo`) — `.hippo/` project data: tasks, ledger, priors.
+- **lanes** (`.hippo/lanes/`) — `hippo dispatch` keeps each codex lane's raw stderr
+  (`<id>.log`), its final message (`<id>.out`) and a small record (`<id>.json`); the shell
+  sees one short line per command or message instead of megabytes of codex output.
 - **2 hooks** (`hooks/hooks.json`) — `SessionStart` re-injects a ≤6-line
   status block (survives compaction); `Stop` fires the scribe clerk detached,
   never blocking.

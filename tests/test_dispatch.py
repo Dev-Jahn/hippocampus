@@ -96,7 +96,11 @@ def test_uninitialized_project_warns_when_dispatch_is_not_recorded(tmp_path):
         timeout=30,
     )
     assert proc.returncode == 0
-    assert proc.stderr == "dispatch: no .hippo/ — skipping the dispatch record\n"
+    warning, *_, last = proc.stderr.splitlines()
+    assert warning == "dispatch: no .hippo/ — skipping the dispatch record"
+    # No project, no lane record — but the raw stderr still goes to a file the last line names.
+    assert last.startswith("lane missing-hippo · ") and " · exited rc=0 · 0 cmds · raw log " in last
+    assert os.path.isfile(last.rsplit(" raw log ", 1)[1])
     assert proc.stdout.startswith("dispatch:d")
 
 
