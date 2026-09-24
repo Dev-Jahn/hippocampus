@@ -8,7 +8,8 @@
 # else exits 3. $HIPPO_CLERK_MODEL overrides the model on either backend; unset,
 # each backend falls back to its own default (codex: gpt-6-luna, claude: sonnet).
 # The whole call is bounded to $HIPPO_CLERK_TIMEOUT seconds
-# (default 120; exit 124 on timeout). Backend stderr is discarded.
+# (default 120; exit 124 on timeout). Backend stderr stays off stdout; on a
+# non-zero exit its last few lines (error lines first choice) go to stderr.
 set -u
 
 usage() {
@@ -101,6 +102,45 @@ with_timeout() {
 
 COMBINED=$(cat "$PROMPT_FILE" "$INPUT_FILE")
 
+# Why a backend failed, in its own words. stdout stays the model's raw response (the contract),
+# so the backend's stderr goes to a file of its own; on a non-zero exit its own error lines go
+# to stderr, the cause first, where the scribe's failure dump records them. Measured on b200:
+# with stderr discarded, 7 failed runs in a row (an expired codex login) each dumped
+# "clerk rc=1" and an empty stderr. codex prints the reason as its last error line (measured
+# with no login, 0.156.1: `ERROR: unexpected status 401 Unauthorized …`).
+#
+# Only the backend's own words count. codex echoes its whole prompt to stderr — turn-scribe.md,
+# the rosters and the transcript digest — so an unanchored search would promote transcript text
+# to "the cause" and, after three failures, into main's capsule (measured: a timeout quoted a
+# digest line as `codex: …`). A kill leaves no error of the backend's own at all, so it is
+# named from the exit code, and a line counts only when it starts the way the backends' own
+# errors do: `ERROR:`/`Error:` or a timestamped tracing line. Digest lines start with `[N]`.
+ERR_FILE=""
+trap '[ -n "$ERR_FILE" ] && rm -f "$ERR_FILE"' EXIT
+
+open_err_file() {  # a file for the backend's stderr, or none: a broken TMPDIR must not stop the call
+  ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/hippo-clerk-err.XXXXXX" 2>/dev/null) || ERR_FILE=""
+}
+
+explain_failure() {  # explain_failure <rc>
+  local rc=$1 picked
+  [ "$rc" -ne 0 ] || return 0
+  if [ "$rc" -eq 124 ]; then
+    printf '%s: timed out after %ss\n' "$BACKEND" "$TIMEOUT" >&2
+    return 0
+  fi
+  if [ "$rc" -gt 128 ]; then
+    printf '%s: killed by signal %s\n' "$BACKEND" "$((rc - 128))" >&2
+    return 0
+  fi
+  [ -n "$ERR_FILE" ] && [ -s "$ERR_FILE" ] || return 0
+  picked=$(grep -E '^(ERROR|Error)[: ]|^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z +ERROR ' "$ERR_FILE" \
+    | uniq | tail -n 5)
+  [ -n "$picked" ] || return 0
+  printf '%s: %s\n' "$BACKEND" "$(printf '%s\n' "$picked" | tail -n 1)" >&2
+  printf '%s\n' "$picked" | sed 's/^/  /' >&2
+}
+
 case "$BACKEND" in
   mock)
     if [ -z "${HIPPO_MOCK_OUTPUT:-}" ] || [ ! -r "${HIPPO_MOCK_OUTPUT:-/nonexistent}" ]; then
@@ -117,6 +157,7 @@ case "$BACKEND" in
     fi
     # --disable hooks: keep the Stop hook of the codex session this clerk starts from spawning
     # another clerk. Belt and braces with the HIPPO_CLERK guard (survives a stripped environment).
+    open_err_file
     with_timeout "$TIMEOUT" codex exec \
       -m "${MODEL:-gpt-6-luna}" \
       -c model_reasoning_effort="low" \
@@ -126,8 +167,10 @@ case "$BACKEND" in
       --skip-git-repo-check \
       --color never \
       "$COMBINED" \
-      < /dev/null 2>/dev/null
-    exit $?
+      < /dev/null 2>"${ERR_FILE:-/dev/null}"
+    rc=$?
+    explain_failure "$rc"
+    exit "$rc"
     ;;
   claude)
     if ! command -v claude >/dev/null 2>&1; then
@@ -143,14 +186,19 @@ case "$BACKEND" in
     # Default model is sonnet. Haiku was demoted after a measured A/B (2026-07-31): it invented
     # outcome:accepted for a lane whose acceptance was still pending — a semantic error that
     # passes schema validation.
+    # claude prints some failures on stdout (a bad model id, measured) — those reach the dump's
+    # stdout section as they always did; what it says on stderr is kept the same way as codex's.
+    open_err_file
     with_timeout "$TIMEOUT" claude -p \
       --model "${MODEL:-sonnet}" \
       --tools "" \
       --strict-mcp-config \
       --setting-sources "" \
       "$COMBINED" \
-      < /dev/null 2>/dev/null
-    exit $?
+      < /dev/null 2>"${ERR_FILE:-/dev/null}"
+    rc=$?
+    explain_failure "$rc"
+    exit "$rc"
     ;;
   *)
     echo "clerk_run: unknown backend: $BACKEND" >&2
