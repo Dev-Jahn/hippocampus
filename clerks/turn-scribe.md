@@ -70,7 +70,7 @@ events: only the four kinds below are allowed, with exactly these field names.
    | executor | what it is |
    |---|---|
    | `codex` | an external `codex exec` process — **never yours to record; see above** |
-   | `claude` | a headless `claude -p` process |
+   | `claude` | another Claude Code session (a peer machine, a headless run started by hand) |
    | `fork` | a subagent that inherits this session's context (effort is `inherit`) |
    | `subagent` | an anonymous subagent, no inherited context |
    | `workflow` | a subagent orchestrated by the Workflow tool |

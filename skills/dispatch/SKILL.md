@@ -1,6 +1,6 @@
 ---
 name: dispatch
-description: Operating contract for delegation lanes — hand several tasks to external executors (codex exec, claude -p) and subagents at once while main collects, verifies and merges. Use when the user says "launch in parallel", "split it up", "run a batch", or "start everything you can". Worth reading for a single delegation too, when the call pattern or worktree isolation matters.
+description: Operating contract for delegation lanes — hand several tasks to external executors (codex exec) and subagents at once while main collects, verifies and merges. Use when the user says "launch in parallel", "split it up", "run a batch", or "start everything you can". Worth reading for a single delegation too, when the call pattern or worktree isolation matters.
 ---
 
 # hippo: dispatch — delegation lanes
@@ -87,8 +87,8 @@ entries:
 - **`--dry-run` is the plan**: difficulty per brief, the suggested exec, notes. An entry with
   no `model` launches on the suggestion when `TYPESAFE_API_KEY` is set; without it, `model` is
   required. The manifest is per-batch data, never standing config.
-- Editing entries get worktrees created by main first: codex via `-C` in `args`, claude via
-  `cwd: .claude/worktrees/<id>` (claude has no `-C`).
+- Editing entries get worktrees created by main first: `-C` in `args`, or
+  `cwd: .claude/worktrees/<id>`.
 - **One batch per stage; main stays between stages.** Do not encode a DAG into one manifest.
 - **Mass-identical failures are one defect**: 130 identical check failures were one missing
   `pytest.ini`, paid as 130 repair lanes. Diagnose the cluster, repair it with one brief.

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from conftest import read_ledger
+from conftest import REPO_ROOT, read_ledger
 from test_batch import _batch, _manifest, _stub
 from test_batch_harvest import _jev, _mock
 
@@ -117,11 +117,10 @@ def test_difficulty_picks_the_tier_and_the_effort(tmp_project, tmp_path, run_hip
     assert json.loads(proc.stdout.splitlines()[-1])["tiers"] == {tier: 1}
 
 
-def test_the_ladder_is_printed_once_per_executor_from_the_price_sheet(tmp_project, tmp_path,
-                                                                      run_hippo):
+def test_the_ladder_is_printed_once_from_the_price_sheet(tmp_project, tmp_path, run_hippo):
     """Read off prices.yaml at call time — the lowest, highest and second-highest *price
-    level*, so a price refresh moves the tiers instead of a config file going stale (§4). Levels,
-    not rows: fable-5 shares fable-5-1's price and must not become `mid`."""
+    level* of the gpt rows, so a price refresh moves the tiers instead of a config file going
+    stale (§4)."""
     manifest = _manifest(tmp_project, "wave.yaml", """\
         defaults:
           kind: impl
@@ -131,16 +130,29 @@ def test_the_ladder_is_printed_once_per_executor_from_the_price_sheet(tmp_projec
             prompt: "do the thing"
           - id: other
             scope: "the other lane"
-            executor: claude
             prompt: "do the other thing"
         """)
     proc = _plan(run_hippo, tmp_project, manifest,
                  _mock(tmp_path, {"answers": EASY, "default": DEFAULT}))
     ladders = [ln for ln in proc.stdout.splitlines() if ln.startswith("ladder ")]
-    assert ladders == [
-        "ladder codex: cheap gpt-6-luna · mid gpt-6-sol · top gpt-6-astra",
-        "ladder claude: cheap claude-haiku-4-5 · mid claude-opus-5-5 · top claude-fable-5-1"]
-    assert _row(proc, "other")[6] == "claude/claude-haiku-4-5/medium"
+    assert ladders == ["ladder codex: cheap gpt-6-luna · mid gpt-6-sol · top gpt-6-astra"]
+    assert _row(proc, "other")[6] == "codex/gpt-6-luna/medium"
+
+
+def test_the_ladder_reads_price_levels_not_rows():
+    """Two generations of one model at one price are one level: "second most expensive row"
+    would make `mid` a `top` twin. The shipped gpt rows are all distinct today, so the rule is
+    pinned on a sheet of its own; the claude rows are not a ladder any more."""
+    import sys
+    cli = str(REPO_ROOT / "cli")
+    if cli not in sys.path:
+        sys.path.insert(0, cli)
+    import hippo_cli
+    sheet = {"models": {"gpt-9-big": {"input": 10.0}, "gpt-8-big": {"input": 10.0},
+                        "gpt-9-mid": {"input": 2.0}, "gpt-9-small": {"input": 0.1},
+                        "claude-x": {"input": 99.0}}}
+    assert hippo_cli.price_ladder(sheet) == {"cheap": "gpt-9-small", "mid": "gpt-9-mid",
+                                             "top": "gpt-9-big"}
 
 
 def test_the_request_asks_the_route_questions_over_the_whole_brief(tmp_project, tmp_path,

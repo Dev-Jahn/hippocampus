@@ -16,7 +16,7 @@ import subprocess
 
 import pytest
 
-from conftest import REPO_ROOT, read_ledger
+from conftest import read_ledger
 from test_batch import _batch, _journal, _manifest, _outdir, _stub
 
 # codex 0.144.6 (measured): the banner rides stderr. `FAIL` in the prompt makes this stub the
@@ -486,7 +486,8 @@ def test_changes_read_the_lane_worktree_and_are_null_outside_one(tmp_project, tm
     assert "M kernel.py" in changes and "1 file changed" in changes
 
 
-def test_changes_read_the_entry_cwd_a_claude_lane_works_in(tmp_project, tmp_path, run_hippo):
+def test_changes_read_the_entry_cwd_when_the_args_name_no_worktree(tmp_project, tmp_path,
+                                                                   run_hippo):
     lane = tmp_path / "lane"
     lane.mkdir()
     subprocess.run(["git", "-C", str(lane), "init", "-q"], check=True, capture_output=True)
@@ -494,8 +495,7 @@ def test_changes_read_the_entry_cwd_a_claude_lane_works_in(tmp_project, tmp_path
     manifest = _manifest(tmp_project, "wave.yaml", f"""\
         defaults:
           kind: impl
-          executor: claude
-          model: claude-sonnet-5
+          model: gpt-6-luna
         entries:
           - id: ok-lane
             scope: "one lane"
@@ -504,12 +504,12 @@ def test_changes_read_the_entry_cwd_a_claude_lane_works_in(tmp_project, tmp_path
         """)
     capture = tmp_path / "sent.json"
     proc = _batch(run_hippo, tmp_project, manifest,
-                  env={"PATH": _stub(tmp_path, "claude", HALF_STUB),
+                  env={"PATH": _stub(tmp_path, "codex", HALF_STUB),
                        **_jev(_mock(tmp_path, {"answers": ACCEPT, "default": DEFAULT}),
                               capture)})
     assert proc.returncode == 0, proc.stderr
     changes = json.loads(capture.read_text(encoding="utf-8"))["state"]["changes"]
-    assert "?? notes.md" in changes, "claude has no -C: the entry cwd is its worktree"
+    assert "?? notes.md" in changes, "no -C in args: the entry cwd is where the lane worked"
 
 
 def test_the_outdir_files_are_where_the_state_comes_from(tmp_project, tmp_path, run_hippo):
@@ -668,21 +668,3 @@ def test_with_the_judge_off_a_verify_lane_harvests_as_it_always_did(tmp_project,
     assert "judge off — no TYPESAFE_API_KEY" in proc.stderr
     assert _records(manifest, "findings") == []
     assert [ln for ln in proc.stdout.splitlines() if ln.startswith("  ▸")] == []
-
-
-def test_a_claude_lane_report_is_the_result_field_not_the_json_envelope(tmp_path):
-    """`claude -p --output-format json` prints one envelope; the judge reads its `result`.
-    Measured: the envelope routed two clean lanes to `escalate` on scope_creep."""
-    import sys as _sys
-    cli = str(REPO_ROOT / "cli")
-    if cli not in _sys.path:
-        _sys.path.insert(0, cli)
-    import hippo_cli
-    outdir = tmp_path
-    (outdir / "c.out").write_text(json.dumps({"result": "all done", "usage": {"x": 1}}), encoding="utf-8")
-    (outdir / "x.out").write_text(json.dumps({"result": "agent text"}), encoding="utf-8")
-    (outdir / "b.out").write_text("{not json", encoding="utf-8")
-    assert hippo_cli.lane_report({"id": "c", "executor": "claude"}, outdir) == "all done"
-    assert hippo_cli.lane_report({"id": "x", "executor": "codex"}, outdir).startswith("{")
-    assert hippo_cli.lane_report({"id": "b", "executor": "claude"}, outdir) == "{not json"
-    assert hippo_cli.lane_report({"id": "missing", "executor": "claude"}, outdir) is None

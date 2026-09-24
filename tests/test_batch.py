@@ -4,7 +4,7 @@ Contract under test: fail-closed manifest validation, the journal (launch/skip/
 exit/stopped lines) and what it decides — launch, resume, or harvest only — the
 manifest's concurrency cap, the entry cwd, per-child ledger recording
 (dispatch + usage — never ev:outcome), the fan-out breaker consulted before each
-launch, both adapters (codex banner/footer on stderr, claude single-JSON stdout),
+launch, the codex adapter (banner/footer on stderr) and the retired claude one,
 the per-child timeout, and {var} substitution. Where the spec fixes only what a
 message must name (validation, breaker), tests assert the named tokens, not the
 phrasing.
@@ -532,57 +532,36 @@ def test_breaker_warn_prints_once_per_run_not_per_child(tmp_project, tmp_path, r
 
 
 # --------------------------------------------------------------------------
-# 10. claude adapter — measured single-JSON stdout, mapped without inventing $
+# 10. the claude adapter is retired — one line says what replaced it
 # --------------------------------------------------------------------------
 
-CLAUDE_JSON = json.dumps({
-    "type": "result",
-    "total_cost_usd": 1.23,
-    "usage": {"input_tokens": 7, "cache_read_input_tokens": 200,
-              "cache_creation_input_tokens": 93, "output_tokens": 400},
-    "modelUsage": {"claude-sonnet-5": {"outputTokens": 400}},
-})
-
-
-def test_claude_adapter_argv_and_usage_mapping(tmp_project, tmp_path, run_hippo):
+def test_a_claude_entry_fails_once_with_the_retirement_line(tmp_project, tmp_path, run_hippo):
     manifest = _manifest(tmp_project, "wave10.yaml", """\
         defaults:
           kind: impl
           executor: claude
-          model: claude-x-manifest
-          effort: medium
+          model: claude-sonnet-5
         entries:
-          - id: sonnet
+          - id: one
             scope: "claude lane"
             prompt: hello
+          - id: two
+            scope: "another claude lane"
+            prompt: hello
         """)
-    rec = tmp_path / "claude_argv.bin"
-    body = (
-        "#!/bin/sh\n"
-        'for a in "$@"; do printf \'%s\\0\' "$a" >> "$ARGV_FILE"; done\n'
-        f"cat <<'EOF'\n{CLAUDE_JSON}\nEOF\n"
-    )
+    capture = tmp_path / "launched.txt"
+    stub = f'#!/bin/sh\ntouch "{capture}"\n'
+    _stub(tmp_path, "codex", stub)
     proc = _batch(run_hippo, tmp_project, manifest,
-                  env={"PATH": _stub(tmp_path, "claude", body), "ARGV_FILE": str(rec)})
-    assert proc.returncode == 0, proc.stderr
-    assert _summary(proc)["ok"] == 1
-
-    argv = rec.read_text(encoding="utf-8").split("\0")[:-1]
-    # Effort is a label only for claude: it reaches exec, never the argv. `--` seals the
-    # argv here too — a prompt opening with `-` must never be read as a flag.
-    assert argv == ["-p", "--output-format", "json", "--model", "claude-x-manifest",
-                    "--", "hello"]
-
-    rows = read_ledger(tmp_project)
-    (d,) = [e for e in rows if e.get("ev") == "dispatch"]
-    assert d["exec"] == "claude/claude-x-manifest/medium"
-    (u,) = [e for e in rows if e.get("ev") == "usage"]
-    assert u["ref"] == d["id"]
-    # tin folds all three input buckets; the model is modelUsage's single key, not
-    # the manifest's; total_cost_usd is deliberately dropped ($ derives from prices.yaml).
-    assert (u["tin"], u["tcached"], u["tout"], u["tokens"]) == (300, 200, 400, 700)
-    assert u["model"] == "claude-sonnet-5"
-    assert "total_cost_usd" not in u
+                  env={"PATH": _stub(tmp_path, "claude", stub)})
+    assert proc.returncode == 2
+    line = ("executor claude retired in 1.15.0 (claude -p lanes cost ~28k tokens of fixed "
+            "cache creation per call): delegate Claude work with the Agent tool — hippo "
+            "records it at the end of the turn")
+    assert proc.stderr.count(line) == 1, proc.stderr
+    assert not capture.exists(), "a retired executor launches nothing"
+    assert read_ledger(tmp_project) == []
+    assert not _journal_path(manifest).exists()
 
 
 # --------------------------------------------------------------------------
@@ -763,13 +742,13 @@ def test_invalid_dispatch_record_journals_record_failed_but_launches(
 
 
 # --------------------------------------------------------------------------
-# 16. cwd — the child's working directory, for both adapters and the check
+# 16. cwd — the child's working directory, for the lane and its check
 # --------------------------------------------------------------------------
 
 PWD_STUB = '#!/bin/sh\npwd -P >> "$PWD_FILE"\n'
 
 
-def test_entry_cwd_is_where_both_adapters_and_the_check_run(tmp_project, tmp_path, run_hippo):
+def test_entry_cwd_is_where_the_lane_and_the_check_run(tmp_project, tmp_path, run_hippo):
     lane = tmp_project / ".claude" / "worktrees" / "lane"
     lane.mkdir(parents=True)
     manifest = _manifest(tmp_project, "wave16.yaml", """\
@@ -778,14 +757,8 @@ def test_entry_cwd_is_where_both_adapters_and_the_check_run(tmp_project, tmp_pat
           model: gpt-6-luna
           check: "pwd -P > check-ran-here"
         entries:
-          - id: codex-lane
-            scope: "codex lane"
-            cwd: .claude/worktrees/lane
-            prompt: go
-          - id: claude-lane
-            scope: "claude lane"
-            executor: claude
-            model: claude-sonnet-5
+          - id: lane
+            scope: "worktree lane"
             cwd: .claude/worktrees/{name}
             vars: {name: lane}
             prompt: go
@@ -795,11 +768,10 @@ def test_entry_cwd_is_where_both_adapters_and_the_check_run(tmp_project, tmp_pat
         """)
     seen = tmp_path / "pwd.txt"
     path = _stub(tmp_path, "codex", PWD_STUB)
-    path = _stub(tmp_path, "claude", PWD_STUB)
     proc = _batch(run_hippo, tmp_project, manifest, env={"PATH": path, "PWD_FILE": str(seen)})
     assert proc.returncode == 0, proc.stderr
     dirs = seen.read_text(encoding="utf-8").splitlines()
-    assert sorted(dirs) == sorted([str(lane.resolve())] * 2 + [str(tmp_project.resolve())])
+    assert sorted(dirs) == sorted([str(lane.resolve()), str(tmp_project.resolve())])
     assert (lane / "check-ran-here").read_text(encoding="utf-8").strip() == str(lane.resolve())
     assert (tmp_project / "check-ran-here").exists(), "no cwd is the batch's own"
 

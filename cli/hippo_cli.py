@@ -2295,7 +2295,7 @@ def dispatch_launch_notes(hp, kind, scope, brief, rest):
     if scores is not None:
         prices = load_prices()
         note = tier_note(scores, jev_policy("route"), model, effort,
-                         price_ladder("codex", prices), prices, verb="launched on")
+                         price_ladder(prices), prices, verb="launched on")
         if note:
             print(f"dispatch: note — this brief {note}", file=sys.stderr)
     for note in brief_conflicts(hp, brief, executor_directives(hp)):
@@ -2319,12 +2319,18 @@ RETIRED_BATCH_FLAGS = ("--harvest", "--plan", "--resume", "--fresh", "--concurre
 
 # Everything a manifest entry may set, with the built-in value where one exists. kind and
 # model have no default on purpose: they are the axes PRIORS routes on, so the author chooses.
-# cwd is the child's working directory — a claude lane's worktree, since claude has no -C.
+# cwd is the child's working directory and its check's; a lane may name its worktree with
+# codex's own `-C` in args instead.
 MANIFEST_DEFAULTS = {"kind": None, "executor": "codex", "model": None, "effort": "medium",
                      "depth": 0, "task": "", "args": [], "briefs": [], "check": "",
                      "timeout": 3600, "cwd": ""}
 ENTRY_KEYS = ("id", "scope", "brief", "prompt", "vars")
-BATCH_EXECUTORS = ("codex", "claude")  # the adapters that exist — not the ledger vocabulary
+BATCH_EXECUTORS = ("codex",)  # the adapters that exist — not the ledger vocabulary
+# Named so a manifest written for the retired adapter learns what replaced it (DESIGN §4):
+# ~28k tokens of fixed cache creation per `claude -p` call, and 3 wrapper rows ever.
+RETIRED_CLAUDE = ("executor claude retired in 1.15.0 (claude -p lanes cost ~28k tokens of "
+                  "fixed cache creation per call): delegate Claude work with the Agent tool — "
+                  "hippo records it at the end of the turn")
 CHECK_TIMEOUT = 600
 # The ids double as journal keys and <id>.out/.err filenames, so a path-shaped id must not
 # validate — the slug alphabet plus the separators an author would reasonably type — and an
@@ -2410,7 +2416,7 @@ def load_manifest(mp, plan=False):
             problems.append(f"{where}: {what} file unreadable: {path} ({ex})")
             return ""
 
-    entries, seen = [], set()
+    entries, seen, retired = [], set(), False
     for i, en in enumerate(raw):
         where = f"entry {i + 1}"
         if not isinstance(en, dict):
@@ -2446,7 +2452,9 @@ def load_manifest(mp, plan=False):
         for f in ("kind", "model"):
             if f not in unset and (not isinstance(cfg[f], str) or not cfg[f].strip()):
                 problems.append(f"{where}: {f} is required (in defaults or the entry)")
-        if cfg["executor"] not in BATCH_EXECUTORS:
+        if cfg["executor"] == "claude":
+            retired = True  # one line for the whole manifest, however many entries name it
+        elif cfg["executor"] not in BATCH_EXECUTORS:
             problems.append(f"{where}: executor must be {'|'.join(BATCH_EXECUTORS)} "
                             f"(the adapters that exist): {cfg['executor']!r}")
         if "effort" not in unset and (
@@ -2508,6 +2516,8 @@ def load_manifest(mp, plan=False):
                         "effort": cfg["effort"], "depth": cfg["depth"], "task": cfg["task"],
                         "args": args, "check": check, "timeout": cfg["timeout"],
                         "prompt": prompt, "cwd": str(cwd)})
+    if retired:
+        problems.append(RETIRED_CLAUDE)
     if problems:
         die(f"dispatch --batch: {mp}: {len(problems)} problem(s)\n"
             + "\n".join(f"  - {p}" for p in problems), 2)
@@ -2515,12 +2525,8 @@ def load_manifest(mp, plan=False):
 
 
 def adapter_argv(en):
-    """The two launch shapes (prompt always last, behind `--`: a brief opening with `---`
-    frontmatter or `-m ` is otherwise argv, not prompt). effort for claude is a label only —
-    the CLI takes no effort flag; it still rides the exec field so PRIORS keeps its axis."""
-    if en["executor"] == "claude":
-        return ["claude", "-p", "--output-format", "json", "--model", en["model"],
-                *en["args"], "--", en["prompt"]]
+    """The launch shape (prompt always last, behind `--`: a brief opening with `---`
+    frontmatter or `-m ` is otherwise argv, not prompt)."""
     return ["codex", "exec", "-m", en["model"], "-c",
             f"model_reasoning_effort={en['effort']}", *en["args"], "--", en["prompt"]]
 
@@ -2549,31 +2555,6 @@ def codex_usage(err_path):
                 pass
         prev = s
     return collect_usage(session_id, model, footer_total)
-
-
-def claude_usage(out_path, manifest_model):
-    """Measured shape: `claude -p --output-format json` prints ONE json object on stdout.
-    total_cost_usd is deliberately not recorded — $ derives from prices.yaml so PRIORS
-    prices every executor with one formula. Parse failure or missing usage → None: a gap
-    is a gap, and no number is ever invented."""
-    try:
-        obj = json.loads(out_path.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(obj, dict) or not isinstance(obj.get("usage"), dict):
-        return None
-    u = obj["usage"]
-    try:
-        tcached = int(u.get("cache_read_input_tokens") or 0)
-        tin = (int(u.get("input_tokens") or 0) + tcached
-               + int(u.get("cache_creation_input_tokens") or 0))
-        tout = int(u.get("output_tokens") or 0)
-    except (TypeError, ValueError):
-        return None
-    mu = obj.get("modelUsage")
-    model = next(iter(mu)) if isinstance(mu, dict) and len(mu) == 1 else manifest_model
-    return {"tokens": tin + tout, "tin": tin, "tcached": tcached, "tout": tout,
-            "model": model}
 
 
 def journal_state(journal):
@@ -2662,8 +2643,8 @@ def strip_codex_noise(text, limit=TRIAGE_STDERR_TAIL):
 
 def lane_dir(args, cwd):
     """Where the lane worked: `-C <worktree>` when its codex args carry one (dispatch skill §5),
-    resolved the way codex resolves it — against the child's own cwd — else that cwd. A claude
-    lane has no `-C`; its worktree is the entry's `cwd`."""
+    resolved the way codex resolves it — against the child's own cwd — else that cwd: the
+    entry's `cwd` in a batch."""
     for i, a in enumerate(args or []):
         if a == "--":
             break
@@ -2852,20 +2833,9 @@ def triage_line(t):
 
 
 def lane_report(en, outdir):
-    """What the lane said, as the judge should read it. A codex lane's stdout is the agent's
-    own output; a claude lane's is the one JSON object `claude -p --output-format json` prints,
-    whose `result` is the report and whose other keys (usage, ids, model lists) are volume
-    without signal. Measured on the first two claude lanes judged: both routed `escalate` on
-    scope_creep .87–.96 with a clean tree — the envelope was being read as the report. An
-    envelope that does not parse is handed over whole, never dropped."""
-    text = _read_text(outdir / f"{en['id']}.out")
-    if text is None or en.get("executor") != "claude":
-        return text
-    try:
-        obj = json.loads(text)
-    except json.JSONDecodeError:
-        return text
-    return obj["result"] if isinstance(obj, dict) and isinstance(obj.get("result"), str) else text
+    """What the lane said: its stdout, which codex keeps for the agent's own output (the
+    banner and footer ride stderr)."""
+    return _read_text(outdir / f"{en['id']}.out")
 
 
 def triage_entry(hp, en, ex, outdir, claim, jrnl):
@@ -3179,23 +3149,22 @@ def run_harvest(mp, entries, journal, outdir, hp, fresh=()):
 PLAN_TIERS = ("cheap", "mid", "top")
 
 
-def price_ladder(executor, prices):
-    """The executor's three tiers, read off the price sheet's *distinct input prices*: the
+def price_ladder(prices):
+    """The codex lane's three tiers, read off the gpt rows' *distinct input prices*: the
     lowest price level is `cheap`, the highest is `top`, the second highest is `mid`. Levels,
-    not rows — two generations of one model sit at the same price (fable-5 and fable-5-1,
-    opus-4-8 and opus-5), and "second most expensive row" would make `mid` a `top` twin. Within
-    a level the sheet's first row wins, because the sheet lists the current model first. Read
-    at call time, so a price refresh moves the ladder — the frozen version of this is the
-    routing.yaml the NOT-list retired (§4)."""
-    prefix = "claude-" if executor == "claude" else "gpt-"
+    not rows — two generations of one model can sit at the same price (the sheet has carried
+    fable-5 and fable-5-1, opus-4-8 and opus-5), and "second most expensive row" would make
+    `mid` a `top` twin. Within a level the sheet's first row wins, because the sheet lists the
+    current model first. Read at call time, so a price refresh moves the ladder — the frozen
+    version of this is the routing.yaml the NOT-list retired (§4)."""
     by_price = {}
     for m, v in prices["models"].items():
-        if str(m).startswith(prefix):
+        if str(m).startswith("gpt-"):
             by_price.setdefault(float((v or {}).get("input", 0.0)), m)
     if not by_price:
         return {}
     levels = [by_price[p] for p in sorted(by_price)]
-    # A sheet carrying one or two levels for this executor still has three tiers: they
+    # A sheet carrying one or two gpt levels still has three tiers: they
     # collapse onto what exists rather than naming a model that does not.
     return dict(zip(PLAN_TIERS, (levels[0], levels[max(0, len(levels) - 2)], levels[-1])))
 
@@ -3408,18 +3377,15 @@ def plan_pass(mp, entries, hp, out):
     policy = jev_policy("route")
     live = executor_directives(hp) if on else []
 
-    ladders = {}
-    for ex in dict.fromkeys(en["executor"] for en in entries):
-        ladders[ex] = price_ladder(ex, prices)
-        print(f"ladder {ex}: "
-              + (" · ".join(f"{t} {ladders[ex][t]}" for t in PLAN_TIERS) if ladders[ex]
-                 else f"no {ex} model on the price sheet — no suggestion"), file=out)
+    ladder = price_ladder(prices)
+    print("ladder codex: "
+          + (" · ".join(f"{t} {ladder[t]}" for t in PLAN_TIERS) if ladder
+             else "no codex model on the price sheet — no suggestion"), file=out)
 
     rows = []
     for en in entries:
         if on:
-            rows.append(plan_entry(hp, en, cells, ladders[en["executor"]], policy, prices,
-                                   live))
+            rows.append(plan_entry(hp, en, cells, ladder, policy, prices, live))
             continue
         # The deterministic half: what the manifest already routes to, and what the ledger
         # says about it. It must not vanish with the key (§3.9).
@@ -3614,8 +3580,7 @@ def run_batch(argv):
                     timed_out = True
 
         # Cost was incurred whatever rc says; a parse gap stays a gap in the ledger too.
-        usage = (claude_usage(out_p, en["model"]) if en["executor"] == "claude"
-                 else codex_usage(err_p))
+        usage = codex_usage(err_p)
         # A usage row must join to a dispatch row: when the dispatch record failed, the
         # tokens still reach the journal below, just not the ledger.
         if usage is not None and hp is not None and bad is None:

@@ -29,8 +29,8 @@ questions:
   launch:
     type: noul
     instructions: >-
-      Was a subagent, fork, workflow, or headless claude process launched in `digest`
-      (an Agent or Task tool call, a Workflow launch, a `claude -p` command)?
+      Was a subagent, fork, workflow, or other agent launched in `digest`
+      (an Agent or Task tool call, a Workflow launch, a headless agent process)?
     criteria:
       "true": A line shows such a worker being started in this window
       "false": No worker was started — only ordinary tool calls, or a launch merely discussed

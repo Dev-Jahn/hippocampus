@@ -239,7 +239,8 @@ optional `src` (`scribe|cli|wrapper|executor`).
   dispatches, 30 restated a wrapper launch under a fresh id and 6 reused the wrapper's id exactly,
   inflating the PRIORS denominator ~1.4x — a prompt cannot enforce what its inputs do not contain.
 - The **executor** is the agent that did the work (`codex`, `claude`, `fork`, `subagent`,
-  `workflow`), not how it was launched: a codex run started in the background is still `codex`,
+  `workflow` — `claude` being another Claude Code session: a peer machine, a headless run started
+  by hand), not how it was launched: a codex run started in the background is still `codex`,
   and splitting it by launch mechanism scatters the sample the priors depend on. Work with no
   agent — a command main simply ran — is not a delegation and gets no dispatch event. `effort` is
   `low|medium|high|xhigh|max|ultra|inherit`; `inherit` is for an executor that takes its setting from
@@ -418,8 +419,9 @@ hippo scribe --transcript P --session S   # internal: the Stop hook calls it det
    one yields either a duplicate — every confirmed pair measured was scribe-vs-launcher, 27–167s
    apart — or a record of a launch that bypassed the wrapper, which is a gap better seen as a gap
    than filled with an inferred row that then dilutes the priors. What only the scribe can see, and
-   must keep recording, is what the wrapper cannot cover: `fork`, `subagent`, `workflow`, `claude`
-   (measured: one `fork` arm of a design duo existed in no other record).
+   must keep recording, is what the wrapper cannot cover: `fork`, `subagent`, `workflow`, and
+   `claude` for another Claude Code session (measured: one `fork` arm of a design duo existed in
+   no other record).
 
    This is not the enforcement principle 3 refuses. The clerk is a component hippo spawns with its
    tools disabled and whose every event it already parses and may reject; it is not a party whose
@@ -521,14 +523,12 @@ fan-out, concurrency, id capture, parent stamping, usage collection, breaker che
 resume — and leaves the model what needs a model: selection (writing the manifest) and judgment
 (verdicts). The manifest is **per-batch data, authored fresh like a brief, never standing
 config** — the routing.yaml retired to §4 would have frozen a judgment; a manifest records one
-batch's already-made routing and expires with the batch. Each entry launches through one of two
-adapters, `codex exec` or `claude -p --output-format json`, both stamped with
-`HIPPO_DISPATCH`/`HIPPO_DEPTH` and recorded as `ev:dispatch` + `ev:usage` exactly like a single
-dispatch — the §3.2 schema is unchanged. Codex usage rides the same stderr banner and footer this
-section already reads; claude's single stdout JSON object supplies the token fields (input +
-cache read + cache creation as tin, cache read as tcached, output as tout), and its
-`total_cost_usd` is deliberately **not** recorded — $ derives from `prices.yaml`, so PRIORS
-prices every executor through one formula instead of trusting each executor's own bill.
+batch's already-made routing and expires with the batch. Each entry launches through `codex
+exec`, stamped with `HIPPO_DISPATCH`/`HIPPO_DEPTH` and recorded as `ev:dispatch` + `ev:usage`
+exactly like a single dispatch — the §3.2 schema is unchanged, and usage rides the same stderr
+banner and footer this section already reads. The manifest keeps its `executor` key with
+`codex` the one valid value; the `claude -p` adapter beside it was retired in 1.15.0 (§4), and a
+manifest that still names it fails with one line saying what replaced it.
 
 A journal beside the manifest records every launch and exit, and since 1.14.0 the journal — not
 a flag — decides what a run does. **No journal**: every entry launches. **Unfinished entries**:
@@ -541,11 +541,10 @@ cannot read the cause must not be the reason a lane is dropped. **Every entry do
 launches. Every run then ends with the harvest (below); to start over, delete the journal. A
 relaunch mints a **new** dispatch id, because two launches are two facts and the ledger never
 rewrites one. `concurrency` is a manifest key. An entry's `cwd` (default: the batch's own, and
-resolved and checked at validation) is the child's working directory for both adapters and for
-its check; a claude lane's worktree is `cwd: .claude/worktrees/<name>`, since claude takes no
-`-C`, while a codex lane may carry `-C` in `args` as before — triage reads whichever directory
-the lane worked in. The flags that used to choose all of this measured zero calls across 28
-projects and were retired (§4): a feature that needs a flag is a feature main does not use.
+resolved and checked at validation) is the child's working directory and its check's; a lane
+may carry `-C` in `args` instead — triage reads whichever directory the lane worked in. The
+flags that used to choose all of this measured zero calls across 28 projects and were retired
+(§4): a feature that needs a flag is a feature main does not use.
 An entry's optional
 `check` command runs after the child exits and its rc lands in the journal — **evidence, never a
 verdict**: batch writes no `ev:outcome`, because a passing check is not acceptance and the
@@ -622,12 +621,13 @@ no ledger can know before a launch is how hard *this* brief is, which main has b
 the priors page. So the judge is asked five literal questions about each entry's brief — scope,
 novelty, how completely the goal is specified, whether a machine could confirm completion, and
 which kind of work it is — and code does everything after that: the tier the difficulty demands,
-the model that tier resolves to on `prices.yaml` (the lowest *price level* is `cheap`, the
-highest is `top`, the second highest is `mid` — levels, not rows, because two generations of
-one model share a price and would otherwise make `mid` a twin of `top`; within a level the
-sheet's first row wins; read at call time so a price refresh moves the ladder), the effort, and
-then at most one step of adjustment from the ledger's own cells — a tier this kind keeps failing
-at goes up one, and the cheapest tier whose record clears the bar takes the work. A probe on real
+the model that tier resolves to on the gpt rows of `prices.yaml` (the lowest *price level* is
+`cheap`, the highest is `top`, the second highest is `mid` — levels, not rows, because two
+generations of one model can share a price and would otherwise make `mid` a twin of `top`;
+within a level the sheet's first row wins; read at call time so a price refresh moves the
+ladder), the effort, and then at most one step of adjustment from the ledger's own cells — a
+tier this kind keeps failing at goes up one, and the cheapest tier whose record clears the bar
+takes the work. A probe on real
 briefs (three algorithm briefs from a consuming project against one cross-cutting design brief,
 20 questions, 0.7s) separated them cleanly: scope 0.9 vs 3.0, design judgment 0.0 vs 2.8, spec
 gaps 0.1–0.3 vs 2.0, a named check 0.7–0.8 vs 0.1. The output is a table, the notes an entry
@@ -811,6 +811,7 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 | batch mode flags (`--harvest`, `--plan`, `--resume`, `--fresh`, `--concurrency`, `--causes`) | Retired 1.14.0. Measured across 28 projects (2026-09-23): zero calls to `--harvest`, `--resume`, `--fresh`, `--concurrency` and `--causes`, six to `--plan` in one project, against 11 `--batch` calls in two — while the flag-free single form carried 1,470 of 1,945 dispatch rows. A feature that needs a flag is a feature main does not use: the journal now decides launch / resume / harvest, the harvest ends every run, `--dry-run` is the plan, and concurrency is the manifest key (§3.6) |
 | directive lifetimes (`turn\|phase\|durable`) | Retired 1.14.0 (§3.2). Measured across 28 projects: 63 of 75 live `phase` directives were past 14 days and the aging nudge produced no withdrawals, 34 of 72 withdrawn went within 3 days, and 54 of 55 `turn` directives expired by the clock. One lifetime — until withdrawn — plus an age shown on every line (§6) |
 | generic bulk ledger ingest (`log --file`, a bulk endpoint) | It would enlarge the mutation grammar toward the retired ingest family above — facts enter through one door. The accepted shape is the journal-scoped `log outcome --from-batch` (§3.6), which narrows what a row may say instead of widening it |
+| `claude -p` dispatch lanes | Retired 1.15.0: ~28k tokens of fixed cache creation per call; 3 wrapper rows ever; native Agent/fork/Workflow do the same work and hippo records them (§3.5.3c). The clerk's own `claude -p` backend (§3.5.4) stays |
 
 ## 5. After the MVP (recorded only; not being built now)
 
