@@ -712,6 +712,16 @@ def test_the_index_reads_every_measured_delivery_shape(tmp_path):
     assert "ag-alane" not in hippo_cli.native_index(path, 0, 15), "nothing past `end` is read"
 
 
+def test_a_mark_keeps_the_last_time_a_line_carries_itself(tmp_path):
+    """A file-history snapshot names a timestamp only inside its snapshot: a window that ends
+    on one keeps the time of the last line before it."""
+    path = _write(tmp_path / "t.jsonl", [
+        _at(0, _user("go")),
+        {"type": "file-history-snapshot", "messageId": "m", "isSnapshotUpdate": False,
+         "snapshot": {"messageId": "m", "trackedFileBackups": {}, "timestamp": _ts(0)}}])
+    assert hippo_cli.native_scan(path, marks=(1, 2))[2] == {1: T0, 2: T0}
+
+
 def test_an_isolated_agent_s_changes_are_read_against_an_honest_base(tmp_path):
     """HEAD never moved: the working tree is all of it. Committed and not yet in main's branch:
     against the merge-base. Already merged: no base is honest, so no git facts at all."""

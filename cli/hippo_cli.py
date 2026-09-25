@@ -4591,7 +4591,7 @@ def task_notes(text, line, t=None):
 def native_scan(path, end=None, main=True, marks=()):
     """One streaming pass over a Claude Code transcript — main's, or an agent's for the runs
     it launched itself → (launches, notes, times), `times` holding for each line number in
-    `marks` the last timestamp at or before it (a quarter of the lines carry none).
+    `marks` the last line's own timestamp at or before it (a quarter of the lines carry none).
 
     `launches` maps an agentId (Agent/Task) or a runId (Workflow) to the call and its launch
     result, for every call the host confirmed: measured on Claude Code 2.1.281, a background
@@ -4613,7 +4613,9 @@ def native_scan(path, end=None, main=True, marks=()):
         for i, raw in enumerate(f, 1):
             if end is not None and i > end:
                 break
-            if '"timestamp"' in raw:
+            # A file-history snapshot names a timestamp but has none of its own, only its
+            # snapshot's: the one such line kind here (397 of 397 on this machine).
+            if '"timestamp"' in raw and ('"file-history-snapshot"' not in raw or _line_time(raw)):
                 stamped = raw
             if i in marks:
                 times[i] = _line_time(stamped)
