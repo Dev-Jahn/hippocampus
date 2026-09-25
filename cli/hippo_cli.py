@@ -1310,6 +1310,16 @@ def cmd_status(args):
             print(f"  {t['id']}  [{t.get('status', '?')}]  {t.get('title', '')}")
 
 
+def task_value(field, value):
+    """A task field as tasks.yaml stores the CLI's value for it: deps a list of the
+    comma-separated names, notes a one-item list (empty for no text), the rest as given."""
+    if field == "deps":
+        return [d.strip() for d in (value or "").split(",") if d.strip()]
+    if field == "notes":
+        return [value] if value else []
+    return value
+
+
 def cmd_task_add(args):
     data = tasks_load(args.hp)
     if find_task(data, args.id):
@@ -1318,10 +1328,8 @@ def cmd_task_add(args):
         "id": args.id,
         "title": args.title,
         "status": args.status,
-        "notes": [args.notes] if args.notes else [],
-        "deps": [d.strip() for d in args.deps.split(",") if d.strip()]
-        if args.deps
-        else [],
+        "notes": task_value("notes", args.notes),
+        "deps": task_value("deps", args.deps),
         "updated": now_iso(),
     }
     if t["status"] not in TASK_STATUSES:
@@ -1341,12 +1349,7 @@ def cmd_task_set(args):
         die("field must be one of title|status|notes|deps")
     if field == "status" and value not in TASK_STATUSES:
         die(f"status must be one of {'|'.join(TASK_STATUSES)}: {value}")
-    if field == "deps":
-        t["deps"] = [d.strip() for d in value.split(",") if d.strip()]
-    elif field == "notes":
-        t["notes"] = [value] if value else []
-    else:
-        t[field] = value
+    t[field] = task_value(field, value)
     t["updated"] = now_iso()
     tasks_save(args.hp, data)
     print(f"{args.id}.{field} = {value}")
@@ -5660,12 +5663,13 @@ def hippo_args(argv):
 
 
 def worker_call(parser, args):
-    """One hippo command → the write it asks for, as the state would show it once landed, or
-    None. The set is the writes that are main's (§9.2: a worker may not say that a task is done
-    or its work accepted, and may not rule): `task add|set|done|drop`, `directive add|withdraw`
-    and `log outcome`, plus `log raw` of a directive or an outcome. The rest — a dispatch, a
-    review, a usage row — is an observation a worker may make, and a read changes nothing. The
-    command is read by hippo's own parser, so it means exactly what it meant to the CLI."""
+    """One hippo command → the write it asks for, as the state would show it once landed —
+    its thing and every value it sets — or None. The set is the writes that are main's (§9.2: a
+    worker may not say that a task is done or its work accepted, and may not rule): `task
+    add|set|done|drop`, `directive add|withdraw` and `log outcome` of one verdict, plus `log raw`
+    of a directive or an outcome. The rest — a dispatch, a review, a usage row — is an
+    observation a worker may make, and a read changes nothing. The command is read by hippo's
+    own parser, so it means exactly what it meant to the CLI."""
     if not args or args[0] not in ("task", "directive", "log"):
         return None
     try:
@@ -5675,21 +5679,29 @@ def worker_call(parser, args):
         return None
     fn = getattr(a, "fn", None)
     if fn in (cmd_task_add, cmd_task_set, cmd_task_done, cmd_task_drop):
-        status = {cmd_task_add: getattr(a, "status", None), cmd_task_done: "done",
-                  cmd_task_drop: "dropped"}.get(fn)
-        if fn is cmd_task_set and a.field == "status":
-            status = a.value
+        # Every value the call left on the task, as tasks.yaml stores it: a `set` of notes
+        # matched on the task alone would claim main's close in the same window.
+        if fn is cmd_task_add:
+            want = {"title": a.title, "status": a.status,
+                    "notes": task_value("notes", a.notes), "deps": task_value("deps", a.deps)}
+        elif fn is cmd_task_set:
+            want = {a.field: task_value(a.field, a.value)}
+        else:
+            want = {"status": "done" if fn is cmd_task_done else "dropped"}
         verb = fn.__name__.removeprefix("cmd_task_")
-        return {"task": a.id, "want": {"status": status} if status else {},
+        return {"task": a.id, "want": want,
                 "op": f"task {verb} {a.id}" + (f" {a.field}" if fn is cmd_task_set else "")}
     if fn is cmd_directive_withdraw:
         row = {"ev": "directive", "id": a.id, "state": "withdrawn"}
     elif fn is cmd_log and a.ev == "directive":
-        row = {"ev": "directive", "id": a.id or directive_id(a.text or ""), "state": a.state}
+        row = {"ev": "directive", "id": a.id or directive_id(a.text or ""), "state": a.state,
+               "text": a.text or None}
     elif fn is cmd_log and a.ev == "outcome":
-        # --from-batch names its verdicts in a journal, not on the line: every one it wrote.
-        row = {"ev": "outcome"} if a.from_batch else {"ev": "outcome", "ref": a.ref,
-                                                        "result": a.result}
+        if a.from_batch:
+            # Its verdicts are named in a journal whose path is relative to a shell the scribe
+            # never sees, so nothing on the line says which rows it wrote (§3.5.3d).
+            return None
+        row = {"ev": "outcome", "ref": a.ref, "result": a.result}
     elif fn is cmd_log_raw:
         try:
             e = json.loads(a.json)
@@ -5697,13 +5709,13 @@ def worker_call(parser, args):
             return None
         if not isinstance(e, dict) or e.get("ev") not in ("directive", "outcome"):
             return None
-        row = {k: e[k] for k in ("ev", "id", "state", "ref", "result") if k in e}
+        row = {k: e[k] for k in ("ev", "id", "state", "text", "ref", "result") if k in e}
     else:
         return None
     row = {k: v for k, v in row.items() if v is not None}
     # With no id or ref the CLI refuses the write (a worker has no HIPPO_DISPATCH to default a
     # ref from); a row that named neither would match any row in the call's window.
-    if len(row) > 1 and not row.get("id" if row["ev"] == "directive" else "ref"):
+    if not row.get("id" if row["ev"] == "directive" else "ref"):
         return None
     return {"row": row}
 
@@ -5768,11 +5780,11 @@ def _stamp(t):
 def worker_landed(call, lo, hi, tasks, rows, task_of):
     """Where one worker call's write shows in this project's state → [(key, t, op)], `t` the
     state's own stamp. The state is the proof, of the call's success and of its project at once:
-    a task whose `updated` stamp and status, or a `src=cli` ledger row whose kind, id and value,
-    match the call and fall between the call and its result. A call against another project —
-    a scratch copy, a worktree outside the repo, a remote — or one that failed left nothing
-    here to match, whatever its cwd, its `cd`s, HIPPO_DIR or its output said; one against this
-    project from inside a worktree of it did."""
+    a task whose `updated` stamp falls between the call and its result and whose fields hold the
+    values the call set, or a `src=cli` ledger row there whose kind, id and values do. A call
+    against another project — a scratch copy, a worktree outside the repo, a remote — or one
+    that failed left nothing here to match, whatever its cwd, its `cd`s, HIPPO_DIR or its output
+    said; one against this project from inside a worktree of it did."""
     def within(t):
         return t is not None and lo <= t <= hi
 

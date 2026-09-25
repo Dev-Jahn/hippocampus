@@ -659,15 +659,23 @@ subagent's own (PreCompact, below).
    rule): `task add|set|done|drop`, `directive add|withdraw` and `log outcome`, `log raw` of
    either kind included; a dispatch, a review or a read is an observation a worker may make.
    A call counts only where **this project's state shows it landed** — a task whose `updated`
-   stamp and status match it, or a `src=cli` ledger row whose kind, id and value do, stamped
-   between the call (to the second, as the CLI stamps) and its result, or the notification that
-   a call sent to the background ended. The state proves the call's success and its project at
-   once. Resolving the project from the cwd and the command's `cd`s cannot follow a `cd` into a
-   variable set elsewhere, `HIPPO_DIR` or a script, and reading success from the output misses
-   output a command discarded (`2>&1 | tail -2` after a `directive add` can keep its notes and
-   drop its record); a call against a scratch copy, a worktree outside the repo or another
-   project, or one that failed, leaves nothing here to match, and one from a worktree of this
-   repo does.
+   stamp falls between the call (to the second, as the CLI stamps) and its result, or the
+   notification that a call sent to the background ended, and whose fields hold every value the
+   call set (a `done`'s or `drop`'s status, the field a `set` wrote as tasks.yaml stores it, an
+   added task's title, status, notes and deps), or a `src=cli` ledger row stamped there whose
+   kind, id and values do (a directive's state and text, a verdict's ref and result). The state
+   proves the call's success and its project at once. Resolving the project from the cwd and
+   the command's `cd`s cannot follow a `cd` into a variable set elsewhere, `HIPPO_DIR` or a
+   script, and reading success from the output misses output a command discarded (`2>&1 | tail
+   -2` after a `directive add` can keep its notes and drop its record); a call against a scratch
+   copy, a worktree outside the repo or another project, or one that failed, leaves nothing here
+   to match, and one from a worktree of this repo does. The values are part of the match
+   because the thing alone is not: a `task set <id> notes` matched on its task claimed main's
+   close of that task in the same window, and a background call's window runs as long as the
+   command does. `log outcome --from-batch` is not counted: its verdicts are named in a journal
+   whose path is relative to a shell the scribe never sees, so nothing on the line says which
+   rows it wrote, and matched on its kind alone it claimed any verdict main wrote in the window
+   (both shapes probed in review, 2026-09-26). None of the worker writes measured below was one.
    The record is `worker-writes.json` — `{"task:<id>" | "directive:<id>" | "outcome:<dispatch
    id>": {t, run, op}}`, `t` the state's own stamp, the latest write per key winning — which
    §6's `worker:` line reads. A write shows until main writes to the same thing after `t`: a
@@ -687,13 +695,15 @@ subagent's own (PreCompact, below).
    session (7dd428b0, 52 windows) it parsed 46 worker writes — 33 directive, 12 task, 1
    outcome — every one against a scratch project, and recorded none; open-webui's (847fa716, 67
    windows) had none. The step took 0.023s a window at the median and 0.085s at most across the
-   three, reading up to 38 transcripts (24MB) in one window.
+   three, reading up to 38 transcripts (24MB) in one window. Re-run once the match took every
+   value a call set, the three replays found the same.
    Live (2.1.282, sonnet, mock clerk): a background Agent's `task done` and a Workflow agent's
    `directive add`, each asked by main's brief, were recorded under their runs; main, resumed,
    read the line, confirmed both with writes of its own, and the next scribe emptied the file.
    Not seen: a write made from a script, through `xargs` or `bash -c`, or through an alias from
-   the user's shell profile. A write main makes to the same thing inside a worker call's own
-   window, with the same value, reads as the worker's — it costs a line.
+   the user's shell profile. A write main makes inside a worker call's own window to the same
+   thing with the same values — the same status on the task, the same verdict on the dispatch —
+   reads as the worker's; it costs a line.
 4. Resolve the backend: `config.yaml > $HIPPO_CLERK_BACKEND > automatic (codex/gpt-6-luna/low when
    codex exists, otherwise claude -p sonnet at low effort) > mock` (for tests). That pair is hippo's
    one cheap tier (the lane agent, §3.6, is its sonnet-low half); hippo runs no haiku (the A/B note

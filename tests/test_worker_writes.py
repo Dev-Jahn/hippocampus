@@ -167,29 +167,30 @@ def test_a_command_is_read_the_way_the_shell_and_the_cli_read_it():
         return [c for argv in hippo_cli._commands(hippo_cli._shell_words(cmd) or [], {}, {})
                 if (c := hippo_cli.worker_call(parser, hippo_cli.hippo_args(argv)))]
 
-    def task(tid, status, op):
-        return {"task": tid, "want": {"status": status} if status else {}, "op": op}
+    def task(tid, op, **want):
+        return {"task": tid, "want": want, "op": op}
 
     def row(**kw):
         return {"row": kw}
 
     cases = {
         'for id in fix/x feat/y; do H=hippo; $H task drop "${id%%/*}/${id#*/}"; done':
-            [task("fix/x", "dropped", "task drop fix/x"), task("feat/y", "dropped",
-                                                              "task drop feat/y")],
+            [task("fix/x", "task drop fix/x", status="dropped"),
+             task("feat/y", "task drop feat/y", status="dropped")],
         'h() { hippo directive "$@"; }; h withdraw gpu-pin':
             [row(ev="directive", id="gpu-pin", state="withdrawn")],
         "hippo task set feat/a status active && hippo task set feat/a notes 'n'":
-            [task("feat/a", "active", "task set feat/a status"),
-             task("feat/a", None, "task set feat/a notes")],
+            [task("feat/a", "task set feat/a status", status="active"),
+             task("feat/a", "task set feat/a notes", notes=["n"])],
         'uv run --script cli/hippo_cli.py task add feat/n --title "T"':
-            [task("feat/n", "pending", "task add feat/n")],
+            [task("feat/n", "task add feat/n", title="T", status="pending", notes=[], deps=[])],
         "env -u HIPPO_DIR /opt/p/bin/hippo directive add --text 'use GPUs 0 and 1 only'":
             [row(ev="directive", id=hippo_cli.directive_id("use GPUs 0 and 1 only"),
-                 state="active")],
+                 state="active", text="use GPUs 0 and 1 only")],
         """hippo log raw '{"ev": "outcome", "ref": "d1", "result": "accepted"}'""":
             [row(ev="outcome", ref="d1", result="accepted")],
-        "hippo log outcome --from-batch j.jsonl < verdicts.jsonl": [row(ev="outcome")],
+        # its verdicts are named in a journal, not on the line: nothing to match them by
+        "hippo log outcome --from-batch j.jsonl < verdicts.jsonl": [],
         'cat <<<"x"; hippo directive add --id x --state withdrawn':
             [row(ev="directive", id="x", state="withdrawn")],
         "cat > b.md <<'EOF'\nhippo task done feat/z\nEOF\nhippo task list": [],
@@ -200,3 +201,32 @@ def test_a_command_is_read_the_way_the_shell_and_the_cli_read_it():
     }
     for cmd, want in cases.items():
         assert calls(cmd) == want, cmd
+
+
+def test_a_call_is_matched_on_every_value_it_wrote():
+    """A call claims only a write that shows what it set: main's own close of a task, or its own
+    verdict or directive, in the call's window is never the worker's for sharing the thing."""
+    parser = hippo_cli.build_parser()
+    lo = BASE
+    hi = lo + timedelta(minutes=30)  # a call sent to the background: its window runs long
+    tasks = {"feat/x": {"id": "feat/x", "title": "x", "status": "done", "notes": [],
+                        "updated": _stamp(600)},  # main closed it, nothing else
+             "feat/n": {"id": "feat/n", "title": "N", "status": "pending", "notes": ["why"],
+                        "deps": ["feat/x"], "updated": _stamp(60)}}
+    rows = [{"t": _stamp(600), "ev": "outcome", "ref": "d9", "result": "accepted", "src": "cli"},
+            {"t": _stamp(600), "ev": "directive", "id": "gpu", "state": "active",
+             "text": "GPUs 0 and 1", "src": "cli"}]
+
+    def landed(cmd):
+        return [k for argv in hippo_cli._commands(hippo_cli._shell_words(cmd), {}, {})
+                if (c := hippo_cli.worker_call(parser, hippo_cli.hippo_args(argv)))
+                for k, _, _ in hippo_cli.worker_landed(c, lo, hi, tasks, rows, {})]
+
+    assert landed("hippo task set feat/x notes 'wip'") == []
+    assert landed("hippo task set feat/x title y; hippo task add feat/x --title x") == []
+    assert landed("hippo log outcome --from-batch j.jsonl < v.jsonl") == []
+    assert landed("hippo directive add --id gpu --text 'GPU 2 only'") == []
+    assert landed("hippo task set feat/x status done; hippo directive add --id gpu "
+                  "--text 'GPUs 0 and 1'") == ["task:feat/x", "directive:gpu"]
+    assert landed("hippo task add feat/n --title N --notes why --deps 'feat/x, '") == [
+        "task:feat/n"]
