@@ -448,24 +448,39 @@ subagent's own (PreCompact, below).
   on disk, from `HIPPO_TRANSCRIPT`: main cannot compact while a foreground call of its own runs,
   so a compaction while main's transcript holds an Agent/Task call with no result yet, whose
   agent (`<session>/subagents/agent-<id>.meta.json` names the call's `toolUseId`; one with
-  `requestShape: background` is left out) has not answered in its own transcript, is that
+  `requestShape: background` is left out) has not answered in its own transcript either, is that
   agent's — PreCompact then says nothing, and SessionStart(compact) hands the agent its
   SubagentStart slice (a fork too: the capsule it carried from main is what its compaction
-  summarized away; `hippo:lane` nothing, as at its start). Main's side alone is not enough.
-  The host writes each transcript on a 100ms flush, so main compacting mid-turn shows its own
-  last call unanswered — the rule "the file ends in an unanswered call" silenced all three of
-  main's compactions in one run — and when main compacts just after a foreground agent
-  returned, the call it shows unanswered is that Agent call (5 of 6 measured). The agent's
-  answer settles it, read 0.25s on: the host's code queues it before main gets the result, yet
-  a read tens of ms after main's PreCompact fired still missed it, while an agent that is
-  compacting cannot answer in between. Measured live with the check's first cut, which read the
-  agent at once (2.1.282, 2026-09-25): a subagent's 3 compactions got no request and the slice
-  each time (no summary carried the section), and all 6 of main's PreCompacts right after an
-  agent returned asked (its 5 completed summaries carried the section). Replayed with the final
-  check on every compaction recorded in the four sessions measured — 29 PreCompact, 19
-  SessionStart(compact) — it gave the right text each time. Still
-  open: a background agent's own compaction (its call is answered at launch, and main runs
-  beside it) and one resumed by SendMessage get main's text, as before.
+  summarized away; `hippo:lane` nothing, as at its start). Both sides are read 0.25s on, past the
+  host's 100ms flush. The host writes each transcript on that flush, so main compacting mid-turn
+  shows its own last call unanswered — the rule "the file ends in an unanswered call" silenced
+  all three of main's compactions in one run — and when main compacts just after a foreground
+  agent returned, the call it shows unanswered is that Agent call (10 of 11 at the hook's start).
+  Main's side, read again, settles a call that came back without an answer in the agent's own
+  transcript: an agent stopped at its `maxTurns` ends in a tool result, and one the host moves to
+  the background (`CLAUDE_AUTO_BACKGROUND_TASKS`, 120s into the call) keeps working while main,
+  answered `async_launched`, goes on — its meta.json still says foreground. Read on the agent's
+  side alone, main's compaction right after either, its result not yet on disk, was taken for the
+  agent's and lost its request (both replayed from recorded runs). The agent's answer is the
+  other signal: the host's code queues it before main gets the result, yet a read tens of ms
+  after main's PreCompact fired still missed it, while an agent that is compacting cannot answer
+  in between. Measured on the recorded runs (2.1.282, 2026-09-25: 50 PreCompact in 11 sessions,
+  each one's owner read from the request that followed it in the debug log and from where its
+  boundary landed): in main's 11 auto compactions right after a foreground agent returned, main's
+  result was stamped 24–33ms before the hook started and on disk at its start once, and in the 4
+  probed — after an agent capped at maxTurns 1 — it was on disk by +50ms each time; in the
+  agents' own 16, main's result came 13–113s after the hook. The two signals together name the
+  right side in all 50: wherever main's second read decides, its result was on disk by then.
+  Measured live with the check's first cut, which read the agent at once: a subagent's 3
+  compactions got no request and the slice each time (no summary carried the section), and all 6
+  of main's PreCompacts right after an agent returned asked (its 5 completed summaries carried
+  the section). Still open: main's write lag is bounded directly only by those 4 probes, and a
+  result the host writes on a resume lags more (a killed call's "interrupted" result was not on
+  disk 247ms after its stamp) — one that misses the second read, for an agent whose transcript
+  does not end in its answer, reads as the agent's; no recorded run compacted after a call moved
+  to the background; and a background agent's own compaction (its call is answered at launch, and
+  main runs beside it), one moved to the background while it compacts, and one resumed by
+  SendMessage get main's text, as before.
 - **Stop**: `hooks/stop.sh` — parse `transcript_path`, `session_id` and `cwd` from the stdin JSON;
   silent exit 0 with no `.hippo/`; otherwise `setsid hippo scribe … >/dev/null 2>&1 &` and then
   **exit 0 immediately** (<100ms). Under `HIPPO_DISPATCH` it exits at once instead: the executor

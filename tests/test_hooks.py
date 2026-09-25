@@ -405,8 +405,9 @@ def test_a_subagent_s_own_compaction_is_not_main_s(tmp_project, repo_root, run_h
 def test_main_s_own_compactions_keep_the_request(tmp_project, repo_root):
     """Main compacts before its last tool result reaches the file (a 100ms flush, measured), so
     the file can end in any unanswered call of main's own — a Read, or a foreground Agent call
-    whose agent already answered (5 of 6 such, measured on 2.1.282). Neither is a subagent compacting,
-    and neither is a background launch in that same window or a call a new prompt abandoned."""
+    whose agent already answered (10 of 11 such, measured on 2.1.282). Neither is a subagent
+    compacting, and neither is a background launch in that same window or a call a new prompt
+    abandoned."""
     earlier = {"a0": ("toolu_old", "foreground", "general-purpose", ANSWERED)}
     cases = {
         "a Read": ([_rec("user", "go"), _call("toolu_1", "Read")], earlier),
@@ -424,6 +425,31 @@ def test_main_s_own_compactions_keep_the_request(tmp_project, repo_root):
         assert proc.returncode == 0, proc.stderr
         assert "`## hippo deltas`" in proc.stdout, case
         assert _session_start(tmp_project, repo_root).startswith("[hippo] tasks"), case
+
+
+def test_a_call_main_got_back_in_the_flush_is_main_s_whatever_its_agent_shows(tmp_path,
+                                                                               monkeypatch):
+    """A foreground call can return to main while its agent's own transcript does not end in an
+    answer (measured, 2.1.282): an agent stopped at its maxTurns ends in a tool result, and one
+    the host moved to the background is still working — main got `async_launched`, the
+    meta.json still says foreground. Main compacting right after still shows the call
+    unanswered at the hook's start; its result lands within the flush, so main is read again
+    after the wait and the compaction is main's. Had it not landed, it would be the agent's."""
+    sys.path.insert(0, str(REPO_ROOT / "cli"))
+    import hippo_cli
+
+    capped = WORKING
+    backgrounded = [_rec("user", "brief"), _call("toolu_b1", "Bash")]
+    launched = {"toolUseResult": {"status": "async_launched", "agentId": "a1"}}
+    for case, recs, result in (("capped", capped, _answer("toolu_1")),
+                               ("backgrounded", backgrounded, {**_answer("toolu_1"), **launched})):
+        _session(tmp_path, [_rec("user", "go"), _call("toolu_1")],
+                 {"a1": ("toolu_1", "foreground", "general-purpose", recs)})
+        monkeypatch.setattr(hippo_cli.time, "sleep", lambda s: None)
+        assert hippo_cli.awaited_agent(str(tmp_path / "t.jsonl"))["toolUseId"] == "toolu_1", case
+        monkeypatch.setattr(hippo_cli.time, "sleep",
+                            lambda s: _lines(tmp_path / "t.jsonl", [result], "a"))
+        assert hippo_cli.awaited_agent(str(tmp_path / "t.jsonl")) is None, case
 
 
 def test_the_agent_is_read_after_the_host_s_flush(tmp_path, monkeypatch):

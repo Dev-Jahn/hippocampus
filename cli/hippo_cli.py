@@ -4866,21 +4866,41 @@ def awaited_agent(transcript):
     compaction then is the agent's — and the host fires it with main's session and transcript
     and no agent_id (measured, 2.1.282), so this is how the compaction hooks tell it apart.
 
-    Main's side: the Agent/Task calls in its transcript with no tool_result yet, a new prompt
-    dropping any left unanswered before it. That alone is not enough: the host writes each
-    transcript on a 100ms flush, so main compacting just after a foreground agent answered still
-    shows that call unanswered (measured). The agent's side settles it — its own transcript,
-    working until its last message is one with no tool call — read once that flush has passed:
-    the agent's answer is queued before main even gets it (the host's code), yet a read tens of
-    ms after main's PreCompact fired still missed it (measured), and an agent that is compacting
-    cannot answer in the meantime. A background call is answered at launch, so its agent's own
-    compaction is not caught: it still gets main's text."""
+    Main's side: the Agent/Task calls in its transcript with no tool_result yet
+    (`_unanswered_calls`). The host writes each transcript on a 100ms flush, so main compacting
+    just after a foreground call returned still shows that call unanswered (10 of 11 at the
+    hook's start, measured); main's transcript is read again once that flush has passed, and a
+    call answered by then was main's, however its agent's own transcript ends — an agent
+    stopped at its maxTurns ends in a tool result, and one the host moved to the background
+    (main answered `async_launched`, its meta.json still foreground) is still working. The
+    agent's side is the other signal, read at the same time: its own transcript, working until
+    its last message is one with no tool call — the agent's answer is queued before main even
+    gets it (the host's code), and an agent that is compacting cannot answer in the meantime.
+    A background call is answered at launch, so its agent's own compaction is not caught: it
+    still gets main's text."""
     if not transcript:
         return None
     transcript = Path(transcript)
     sub = transcript.with_suffix("") / "subagents"
     if not sub.is_dir():
         return None  # no agent ever launched, or not a Claude Code transcript
+    pending = _unanswered_calls(transcript)
+    foreground = []
+    for p in sub.glob("agent-*.meta.json") if pending else ():
+        meta = _read_json(p)
+        if meta.get("toolUseId") in pending and meta.get("requestShape") != "background":
+            foreground.append((p.with_name(p.name.replace(".meta.json", ".jsonl")), meta))
+    if not foreground:
+        return None
+    time.sleep(TRANSCRIPT_FLUSH_WAIT)
+    pending = _unanswered_calls(transcript)
+    return next((meta for path, meta in foreground
+                 if meta["toolUseId"] in pending and not _agent_answered(path)), None)
+
+
+def _unanswered_calls(transcript):
+    """The Agent/Task calls in main's transcript with no tool_result yet, a new prompt dropping
+    any left unanswered before it."""
     pending = set()
     # Until a call is pending only a line that can launch one matters; the rest is not parsed.
     for rec in _records(transcript, lambda raw: bool(pending) or (
@@ -4892,14 +4912,7 @@ def awaited_agent(transcript):
         else:
             answered = {b.get("tool_use_id") for b in blocks if b.get("type") == "tool_result"}
             pending = pending - answered if answered else set()
-    foreground = []
-    for p in sub.glob("agent-*.meta.json") if pending else ():
-        meta = _read_json(p)
-        if meta.get("toolUseId") in pending and meta.get("requestShape") != "background":
-            foreground.append((p.with_name(p.name.replace(".meta.json", ".jsonl")), meta))
-    if foreground:
-        time.sleep(TRANSCRIPT_FLUSH_WAIT)
-    return next((meta for path, meta in foreground if not _agent_answered(path)), None)
+    return pending
 
 
 def _records(path, keep, main=True):
