@@ -1289,7 +1289,9 @@ def cmd_status(args):
     hp = args.hp
     if args.inject:
         # The hook names its moment in HIPPO_INJECT — internal, never a flag (§3.4): SessionStart
-        # passes its source, SubagentStart `subagent`, PreCompact `precompact`.
+        # passes its source, SubagentStart `subagent`, PreCompact `precompact`. SessionStart
+        # passes `worktree-compact` for a compaction whose cwd reached this project only through
+        # a worktree's .git file: an isolation:"worktree" agent's, or a main session's run there.
         moment = os.environ.get("HIPPO_INJECT", "")
         transcript = os.environ.get("HIPPO_TRANSCRIPT")
         # An agent's own compaction reaches both compaction hooks as main's (§3.4): it is asked
@@ -1297,10 +1299,12 @@ def cmd_status(args):
         # the capsule it carried from main is what its compaction summarized away.
         agent = (compaction_agent(transcript, os.environ.get("HIPPO_PROMPT"),
                                   os.environ.get("HIPPO_TRIGGER"))
-                 if moment in ("precompact", "compact") else None)
+                 if moment in ("precompact", "compact", "worktree-compact") else None)
         if agent is not None:
             lines = ([] if moment == "precompact" or agent.get("agentType") == "hippo:lane"
                      else subagent_lines(hp))
+        elif moment == "worktree-compact":
+            lines = []  # main in a worktree: no capsule after a compaction, as at its startup
         else:
             lines = (subagent_lines(hp) if moment == "subagent"
                      else precompact_lines(hp) if moment == "precompact"

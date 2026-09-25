@@ -426,9 +426,9 @@ def _pre_compact_at(project, repo_root, prompt="p1", **extra):
     return _pre_compact(project, repo_root, prompt_id=prompt, **extra)
 
 
-def _session_start(project, repo_root, source="compact", prompt="p1"):
+def _session_start(project, repo_root, source="compact", prompt="p1", cwd=None):
     payload = {"session_id": "s", "transcript_path": str(project / "t.jsonl"),
-               "cwd": str(project), "hook_event_name": "SessionStart", "source": source,
+               "cwd": str(cwd or project), "hook_event_name": "SessionStart", "source": source,
                "prompt_id": prompt}
     proc = _run_hook(repo_root / "hooks" / "session_start.sh", payload, cwd=project)
     assert proc.returncode == 0, proc.stderr
@@ -479,6 +479,28 @@ def test_an_agent_s_own_compaction_is_not_main_s(tmp_project, repo_root, run_hip
         _session(tmp_project, IDLE, {"agent-a1": (atype, WORKING)})
         assert _session_start(tmp_project, repo_root).startswith(first), atype
         assert _pre_compact_at(tmp_project, repo_root).stdout == "", atype
+
+
+def test_a_worktree_agent_s_own_compaction_gets_its_slice(tmp_project, repo_root, run_hippo):
+    """An isolation:"worktree" agent compacts in <project>/.claude/worktrees/agent-<id>, and both
+    compaction hooks carry that cwd (measured live, 2.1.282). SessionStart(compact) walks past
+    the worktree's .git file, as SubagentStart does, and hands the agent its slice. A main
+    session run inside a worktree has no capsule at startup and gets none after its own
+    compaction either; PreCompact keeps the conservative walk and is silent for both."""
+    _directives(tmp_project, run_hippo)
+    wt = _worktree(tmp_project, "agent-a1")
+    _session(tmp_project, IDLE, {"agent-a1": ("general-purpose", WORKING)})
+    assert _session_start(tmp_project, repo_root, cwd=wt).splitlines() == SLICE
+    assert _pre_compact_at(tmp_project, repo_root, cwd=str(wt)).stdout == ""
+    main_s = {"mid-turn beside its own agent": (
+                  [*LAUNCHED, _call("toolu_b", "Read"), _answer("toolu_b")],
+                  {"agent-a1": ("general-purpose", WORKING)}),
+              "no agent ever launched": (IDLE, None)}
+    for case, (main, agents) in main_s.items():
+        _session(tmp_project, main, agents)
+        assert _session_start(tmp_project, repo_root, cwd=wt) == "", case
+        assert _pre_compact_at(tmp_project, repo_root, cwd=str(wt)).stdout == "", case
+        assert _session_start(tmp_project, repo_root, "startup", cwd=wt) == "", case
 
 
 def test_main_s_own_compactions_keep_the_request(tmp_project, repo_root):

@@ -14,6 +14,10 @@ set -u
 # marks the event the way it marks SubagentStart and SubagentStop.
 [ -n "$(json_get agent_id)" ] && exit 0
 
+# No `through` here, unlike SessionStart(compact): an isolation:"worktree" agent compacts in its
+# worktree, and the walk's stop at that .git file is right either way — an agent's own
+# compaction is asked for nothing (above), and a main session run inside a worktree has no
+# capsule there, so no deltas either.
 cwd="$(json_get cwd)"
 project_root "$cwd" >/dev/null || exit 0
 
