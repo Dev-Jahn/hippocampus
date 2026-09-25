@@ -712,26 +712,27 @@ subagent's own (PreCompact, below).
    hippo turn, which squash-merged three tasks), flagged all three (0.96, 0.91, 0.97).
 
    Measured (2026-09-25): a replay of every Stop in 6 sessions over 5 projects on this Mac —
-   592 windows, 93.5% of the judgments from one mlx-vlm session, each window's rosters rebuilt
-   as they stood then — asked 5,635 task judgments in 715 requests, median 658 ms each. Of the
-   22 flags that fell outside the window where main closed the item, independent adjudication
-   labelled 15 right and 7 wrong; 6 of the wrong ones were task flags, all one shape — one stage
-   merged, the task goes on. That is 6 in 5,635, 0.106% false task flags per judgment, against a
-   0.1% bar (some 2,000 judgments a day meet 5–15 real closures; past the bar most flags would
-   be wrong). 65 of 69 task closures were flagged at or before main closed them and 16 at least
-   one window early, but only 5 of those 16 had a session start in between, where the line
-   shows (4 right, 1 wrong): the line earns its place on the task main does not close in the
-   turn that finished it, and a wrong one costs a line and a note. The bars jitter — an identical
-   state re-asked moved by up to 0.03, and 8 rechecks sat in [0.68, 0.72] — so a flag at the bar
-   may come and go between runs, and they are not retuned on this data. The shipped step, run
-   live over the replay's 20-window pilot (the 18 windows with a task open, 28 requests, one
-   window through the whole `hippo scribe`, gate included), raised the same 7 task flags plus one
-   in that band: a recheck the replay read at 0.68 read 0.70, and 0.66 when asked once more —
-   main closed that task in that very window. Its 109 stage-1 answers moved from the replay's by
-   0.01 on average and 0.10 at most, none across `recheck_at` — the replay's state also carried
-   the live directives, the one input that differs. Asking about those was the replay's other
-   half — per live directive, did a user line drop, reverse or complete it — and it caught 3 of
-   15 withdrawals, so it was not built.
+   592 windows, 96.3% of the task judgments from one mlx-vlm session, each window's rosters
+   rebuilt as they stood then — asked 5,635 task judgments in 715 requests, median 672 ms each.
+   Of the 22 flags that fell outside the window where main closed the item, independent
+   adjudication labelled 15 right and 7 wrong; 6 of the wrong ones were task flags, all one
+   shape — one stage merged, the task goes on. That is 6 in 5,635, 0.106% false task flags per
+   judgment: at some 2,000 judgments a day (20 open tasks, ~100 Stops) about 2 wrong flags
+   against 5–15 real closures. Wrong flags would outnumber right ones only from 0.25–0.75%.
+   65 of 69 task closures were flagged at or before main closed them and 16 at least one window
+   early, but only 5 of those 16 had a session start in between, where the line shows (4 right,
+   1 wrong): the line earns its place on the task main does not close in the turn that finished
+   it, and a wrong one costs a line and a note. The bars jitter — an identical state re-asked
+   moved a stage-1 answer by up to 0.09 and a recheck by up to 0.03, and 4 task rechecks sat in
+   [0.68, 0.72] — so a flag at the bar may come and go between runs, and they are not retuned on
+   this data. The shipped step, run live over the replay's 20-window pilot (the 18 windows with a
+   task open, 28 requests, one window through the whole `hippo scribe`, gate included), raised the
+   same 7 task flags plus one in that band: a recheck the replay read at 0.68 read 0.70, and 0.66
+   when asked once more — main closed that task in that very window. Its 109 stage-1 answers moved
+   from the replay's by 0.01 on average and 0.10 at most, none across `recheck_at` — the replay's
+   state also carried the live directives, the one input that differs. Asking about those was the
+   replay's other half — per live directive, did a user line drop, reverse or complete it — and it
+   caught 3 of 15 withdrawals, so it was not built.
 
 ### 3.6 The dispatch wrapper (`hippo dispatch`)
 

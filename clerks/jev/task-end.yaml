@@ -30,9 +30,10 @@ questions:
 policy:
   # The two-stage shape and both bars are directive.yaml's, where a whole-set probe ranked
   # unrelated pairs at 0.66-0.74. Measured on a replay of 592 windows (DESIGN §3.5.9): 6 wrong
-  # task flags in 5,635 stage-1 judgments (0.106%, against a 0.1% bar — about 2,000 judgments a
-  # day for 5-15 real closures, so above it most flags would be wrong). The bars jitter: an
-  # identical state re-asked moved by up to 0.03, and 8 rechecks sat in [0.68, 0.72] — so they
-  # are not retuned on that data.
+  # task flags in 5,635 stage-1 judgments (0.106%) — at about 2,000 judgments a day, ~2 wrong
+  # flags against 5-15 real closures; wrong would outnumber right only from 0.25-0.75%. The
+  # bars jitter: an identical state re-asked moved a stage-1 answer by up to 0.09 and a recheck
+  # by up to 0.03, and 4 task rechecks sat in [0.68, 0.72] — so they are not retuned on that
+  # data.
   recheck_at: 0.5
   flag_at: 0.7

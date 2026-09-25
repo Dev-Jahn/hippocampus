@@ -622,6 +622,23 @@ def dump_failure(hp, kind, text):
     return p
 
 
+def load_json_object(hp, name, kind):
+    """A JSON object hippo generated under .hippo/: an unreadable one is dumped as a `kind`
+    failure and read as empty — its writer writes it whole again."""
+    p = hp / name
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError) as ex:
+        dump_failure(hp, kind, f"{type(ex).__name__}: {ex}\n")
+        return {}
+    if not isinstance(data, dict):
+        dump_failure(hp, kind, f"{name} is not an object: {data!r}\n")
+        return {}
+    return data
+
+
 def extract_json(text):
     """Lenient JSON object extraction: tolerates surrounding noise and code fences."""
     dec = json.JSONDecoder()
@@ -975,20 +992,8 @@ def task_flags(hp):
     """task id → {t, p}: the open tasks a window's digest read as finished or abandoned, `t`
     being when the scribe read the task (§3.5.9). Only the scribe writes it, under its lock;
     what shows is derived from it and tasks.yaml at every read (`task_flag_shows`). An
-    unreadable file is dumped and read as empty, as cursors.json is — the next judged window
-    writes it whole again."""
-    p = hp / TASK_FLAGS
-    if not p.exists():
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError) as ex:
-        dump_failure(hp, "task-flags", f"{type(ex).__name__}: {ex}\n")
-        return {}
-    if not isinstance(data, dict):
-        dump_failure(hp, "task-flags", f"{TASK_FLAGS} is not an object: {data!r}\n")
-        return {}
-    return data
+    unreadable file is dumped and read as empty — the next judged window writes it whole again."""
+    return load_json_object(hp, TASK_FLAGS, "task-flags")
 
 
 def task_flag_shows(task, flag):
@@ -2178,18 +2183,7 @@ def worklog_append(hp, text):
 
 def load_cursors(hp):
     """A failed read beats losing every cursor — dump the original and start empty."""
-    p = hp / "cursors.json"
-    if not p.exists():
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError) as ex:
-        dump_failure(hp, "cursors", f"{type(ex).__name__}: {ex}\n")
-        return {}
-    if not isinstance(data, dict):
-        dump_failure(hp, "cursors", f"cursors.json is not an object: {data!r}\n")
-        return {}
-    return data
+    return load_json_object(hp, "cursors.json", "cursors")
 
 
 def save_cursors(hp, cursors):
