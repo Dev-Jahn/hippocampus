@@ -80,7 +80,8 @@ ALLOWED = {
     "usage": ("ref", "tokens", "model", "tin", "tcached", "tout"),
     # p: the compact probabilities the route was computed from — done, blocked, ask, creep,
     # evidence, and risk (a 0-3 score). A question the reply did not answer is absent.
-    "triage": ("ref", "route", "verify", "cause", "p"),
+    # trimmed: the fields of the state that were shortened to fit the judge (§3.6).
+    "triage": ("ref", "route", "verify", "cause", "p", "trimmed"),
 }
 # Fields only the writer stamps. Rejected if a caller (clerk output, log raw, environment)
 # supplies them: the scribe reads an untrusted transcript, so it must not be able to forge
@@ -120,6 +121,7 @@ ENUMS = {
     ("triage", "cause"): {"capability", "spec", "environment", "transient"},
 }
 TRIAGE_P_KEYS = ("done", "blocked", "ask", "creep", "evidence", "risk")
+TRIAGE_TRIMMED = ("stderr_tail", "brief", "changes", "report")  # what fit_triage_state may cut
 # A directive id is a handle the scribe and the user both have to type from memory, so it is
 # kebab ASCII or nothing. An id derived from non-ASCII text collapses to the empty string, and
 # an id that is empty (or spelled differently every time) cannot supersede anything.
@@ -170,6 +172,9 @@ def validate_event(e):
                 k not in TRIAGE_P_KEYS or isinstance(v, bool) or not isinstance(v, (int, float))
                 for k, v in p.items()):
             return f"ev=triage: p must be a flat map of numbers over {', '.join(TRIAGE_P_KEYS)}"
+        cut = e.get("trimmed", [])
+        if not isinstance(cut, list) or any(k not in TRIAGE_TRIMMED for k in cut):
+            return f"ev=triage: trimmed must be a list of {', '.join(TRIAGE_TRIMMED)}"
     if ev == "dispatch":
         ex = str(e["exec"])
         if not EXEC_RE.match(ex) or EXEC_PLACEHOLDERS & set(ex.split("/")):
@@ -3177,6 +3182,10 @@ TRIAGE_GIT_LINES = 80
 TRIAGE_GIT_TIMEOUT = 30
 # Trim order and caps for an over-budget state, applied only as far as the budget needs.
 TRIAGE_TRIM = (("stderr_tail", 1000), ("brief", 6000), ("changes", 3000))
+# A structured report (a Workflow's JSON result) is fitted by cutting every string in it to one
+# length. Below about a sentence per item it no longer says what the result said, so a report
+# that needs a shorter cut is left whole and the judge refuses it as over budget.
+TRIAGE_LEAF_MIN = 120
 CLUSTER_EXCERPT_LINES = 40
 CLUSTER_ERROR_RE = re.compile(r"(?i)(error|traceback|failed|exception|no such|not found)")
 # codex's stderr opens with a launch banner and closes with the "tokens used" footer. Neither
@@ -3274,12 +3283,27 @@ def git_changes(d):
                      + diff.splitlines()[:TRIAGE_GIT_LINES])
 
 
+def cap_leaves(v, cap):
+    """`v` with every string in it longer than `cap` cut to its first `cap` characters and an
+    ellipsis; keys, items and every other value as they were."""
+    if isinstance(v, str):
+        return v if len(v) <= cap else v[:cap] + "…"
+    if isinstance(v, list):
+        return [cap_leaves(x, cap) for x in v]
+    if isinstance(v, dict):
+        return {k: cap_leaves(x, cap) for k, x in v.items()}
+    return v
+
+
 def fit_triage_state(state):
     """Fit a triage state to JEV_STATE_BUDGET_CHARS, trimming in one fixed order and only as
-    far as the budget needs → the list of what was trimmed. `report` goes last and is cut from
-    the HEAD, because a lane's summary of itself is at the end. Nothing is shortened silently:
-    what was cut is named in the triage record, and an oversize state that no trim rescues
-    reaches `judge` intact and comes back as the over-budget failure it is (§3.9)."""
+    far as the budget needs → the list of what was trimmed. `report` goes last. A text report
+    is cut from the HEAD, because a lane's summary of itself is at the end. A structured one —
+    a Workflow's JSON result — keeps its shape: every key and item stays, and every string in
+    it is cut to the longest length that fits, keeping the head of each, where a finding or a
+    field states its point. Nothing is shortened silently: what was cut is named in the triage
+    record, and an oversize state that no trim rescues reaches `judge` and comes back as the
+    over-budget failure it is (§3.9)."""
     def size():
         return len(json.dumps(state, ensure_ascii=False))
 
@@ -3291,11 +3315,29 @@ def fit_triage_state(state):
         if isinstance(v, str) and len(v) > cap:
             state[key] = v[:cap]
             trimmed.append(key)
-    if size() <= JEV_STATE_BUDGET_CHARS or not state.get("report"):
+    report = state.get("report")
+    if size() <= JEV_STATE_BUDGET_CHARS or not report:
         return trimmed
+    if isinstance(report, str):
+        trimmed.append("report")
+        while state["report"] and size() > JEV_STATE_BUDGET_CHARS:
+            state["report"] = state["report"][size() - JEV_STATE_BUDGET_CHARS + 512:]
+        return trimmed
+    # The longest cut that fits, by bisection; no string is longer than the whole report.
+    low, high = TRIAGE_LEAF_MIN, len(json.dumps(report, ensure_ascii=False))
+    state["report"] = cap_leaves(report, low)
+    if size() > JEV_STATE_BUDGET_CHARS:
+        state["report"] = report
+        return trimmed
+    while low < high:
+        mid = (low + high + 1) // 2
+        state["report"] = cap_leaves(report, mid)
+        if size() <= JEV_STATE_BUDGET_CHARS:
+            low = mid
+        else:
+            high = mid - 1
+    state["report"] = cap_leaves(report, low)
     trimmed.append("report")
-    while state["report"] and size() > JEV_STATE_BUDGET_CHARS:
-        state["report"] = state["report"][size() - JEV_STATE_BUDGET_CHARS + 512:]
     return trimmed
 
 
@@ -3409,6 +3451,8 @@ def triage(hp, state, ex, ref, src="wrapper"):
          "p": {k: v for k, v in p.items() if isinstance(v, float)}}
     if triage_cause(out) in CAUSES:
         e["cause"] = triage_cause(out)
+    if trimmed:
+        e["trimmed"] = trimmed
     with BATCH_LOCK:
         bad = validate_event(e) or check_ref(hp, e)
         if bad:
@@ -4445,15 +4489,20 @@ NATIVE_TRIAGE_MAX = 8
 NATIVE_EDIT_TOOLS = ("Edit", "Write", "NotebookEdit", "MultiEdit")
 NATIVE_EDITS_HEAD = ("files this agent edited with its edit tools; shell edits of files it "
                      "never read are not visible")
-# A notification's header opens with these, in this order. <tool-use-id> is absent after a
-# SendMessage to the agent (measured, Claude Code 2.1.237); the task-id still names it.
+# A notification's header opens with these, in this order. <tool-use-id> names the call the
+# agent is answering: the launch, or a SendMessage to it (Claude Code 2.1.280; absent there
+# on 2.1.237), and none when it resumed on its own background work; the task-id always names
+# the agent.
 TASK_NOTE_RE = re.compile(r"<task-notification>\s*<task-id>([^<]*)</task-id>"
                           r"(?:\s*<tool-use-id>([^<]*)</tool-use-id>)?")
 TASK_STATUS_RE = re.compile(r"<status>([^<]*)</status>")
 # An agent that ends its turn with its own background work still running notifies with this
 # note and notifies again when it is done (measured, 43 on this machine): an interim result.
 TASK_INTERIM_RE = re.compile(r"<note>[^<]*background work of its own still running")
-TaskNote = collections.namedtuple("TaskNote", "line task tuid status report interim")
+TaskNote = collections.namedtuple("TaskNote", "line task tuid status report interim t")
+# The host kills every Monitor at its `timeout_ms`: 5 minutes unless set, 30 at most (the
+# tool's own description, Claude Code 2.1.280).
+MONITOR_TIMEOUT_MS = (300_000, 1_800_000)
 
 
 def _message_texts(content):
@@ -4492,10 +4541,20 @@ def _scope_key(text):
     return one_line(text).casefold()
 
 
-def task_notes(text, line):
+def _line_time(raw):
+    """The top-level timestamp of one transcript line, or None."""
+    try:
+        rec = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return _iso_time(rec.get("timestamp")) if isinstance(rec, dict) else None
+
+
+def task_notes(text, line, t=None):
     """The <task-notification> blocks one message carries → [TaskNote]. Status and the interim
     note are read in the header, before `<result>`; the report is everything up to the
-    block's last `</result>`, so a report that quotes a tag keeps its text."""
+    block's last `</result>`, so a report that quotes a tag keeps its text. A block with no
+    status — a Monitor's event — is no notification of an end."""
     heads = list(TASK_NOTE_RE.finditer(text))
     out = []
     for k, m in enumerate(heads):
@@ -4508,13 +4567,14 @@ def task_notes(text, line):
         report = block[start + len("<result>"): stop].strip() if 0 <= start < stop else ""
         out.append(TaskNote(line, m.group(1).strip(), (m.group(2) or "").strip() or None,
                             status.group(1).strip(), report or None,
-                            bool(TASK_INTERIM_RE.search(head))))
+                            bool(TASK_INTERIM_RE.search(head)), t))
     return out
 
 
-def native_scan(path, end=None, main=True):
+def native_scan(path, end=None, main=True, marks=()):
     """One streaming pass over a Claude Code transcript — main's, or an agent's for the runs
-    it launched itself → (launches, notes).
+    it launched itself → (launches, notes, times), `times` holding for each line number in
+    `marks` the last timestamp at or before it (a quarter of the lines carry none).
 
     `launches` maps an agentId (Agent/Task) or a runId (Workflow) to the call and its launch
     result, for every call the host confirmed: measured on Claude Code 2.1.281, a background
@@ -4527,15 +4587,19 @@ def native_scan(path, end=None, main=True):
     background tasks notify in the same shape under ids no launch has. A line that does not
     parse is skipped, never raised: the prefilter is a substring test, so a quoted tag costs
     one json.loads."""
-    launches, notes, pending = {}, [], {}
+    launches, notes, pending, times, stamped = {}, [], {}, {}, None
     try:
         f = path.open("r", encoding="utf-8", errors="replace")
     except OSError:
-        return launches, notes
+        return launches, notes, times
     with f:
         for i, raw in enumerate(f, 1):
             if end is not None and i > end:
                 break
+            if '"timestamp"' in raw:
+                stamped = raw
+            if i in marks:
+                times[i] = _line_time(stamped)
             call = '"tool_use"' in raw and any(f'"{t}"' in raw for t in LAUNCH_TOOLS)
             result = bool(pending) and any(t in raw for t in pending)
             note = "<task-notification>" in raw
@@ -4569,22 +4633,29 @@ def native_scan(path, end=None, main=True):
                     key, status = tur.get("runId" if wf else "agentId"), tur.get("status")
                     if status not in ("async_launched", "completed") or not isinstance(key, str):
                         continue
+                    t = _iso_time(rec.get("timestamp"))
                     launches[key] = {"tool": use["name"], "tuid": use["id"], "input": use["input"],
-                                     "result": tur, "line": i, "t": _iso_time(rec.get("timestamp"))}
+                                     "result": tur, "line": i, "t": t}
                     if status == "completed" and not wf:
                         report = _flat_text(tur.get("content")) or _flat_text(b.get("content"))
-                        notes.append(TaskNote(i, key, use["id"], status, report, False))
+                        notes.append(TaskNote(i, key, use["id"], status, report, False, t))
             if note:
-                texts = []
-                if kind == "user":
-                    texts = _message_texts(content)
-                elif kind == "attachment":
-                    att = rec.get("attachment")
-                    if isinstance(att, dict) and att.get("type") == "queued_command":
-                        texts = _message_texts(att.get("prompt"))
-                for text in texts:
-                    notes += task_notes(text, i)
-    return launches, notes
+                for text in _note_texts(rec):
+                    notes += task_notes(text, i, _iso_time(rec.get("timestamp")))
+    return launches, notes, times
+
+
+def _note_texts(rec):
+    """The texts a transcript line can deliver a <task-notification> in: a user message, or a
+    `queued_command` attachment."""
+    msg = rec.get("message")
+    if rec.get("type") == "user" and isinstance(msg, dict):
+        return _message_texts(msg.get("content"))
+    att = rec.get("attachment")
+    if rec.get("type") == "attachment" and isinstance(att, dict) \
+            and att.get("type") == "queued_command":
+        return _message_texts(att.get("prompt"))
+    return []
 
 
 def native_run(launch, key, session, parent=None):
@@ -4593,8 +4664,8 @@ def native_run(launch, key, session, parent=None):
     brief is the call's prompt, or a Workflow's script."""
     inp, tur, sub = launch["input"], launch["result"], session / "subagents"
     run = {"id": NATIVE_PREFIX + key, "key": key, "line": launch["line"], "t": launch["t"],
-           "parent": parent["id"] if parent else None, "notes": [], "ref": None, "meta": {},
-           "resolved": None, "skip": False}
+           "tuid": launch["tuid"], "parent": parent["id"] if parent else None, "notes": [],
+           "ref": None, "meta": {}, "resolved": None, "skip": False}
     if launch["tool"] == "Workflow":
         brief, sp = inp.get("script"), tur.get("scriptPath")
         if not isinstance(brief, str) and isinstance(sp, str) and sp:
@@ -4615,16 +4686,17 @@ def native_run(launch, key, session, parent=None):
 def native_index(transcript, since, end):
     """DESIGN §3.5.3c: every native run main's transcript launched up to `end` → {id: run},
     each flagged with what the window (since, end] did to it — `seen` (launched or notified
-    in it), `done_now` (a notification in it) and `first_now` (its first completion in it; an
-    interim notification is not one). The whole transcript is read, because a completion in
-    this window may belong to a launch long before the cursor.
+    in it), `done_now` (a notification in it) and `first_now` (its answer to its brief became
+    complete in it, `native_answer`; `answer` holds that answer's notifications). The whole
+    transcript is read, because a completion in this window may belong to a launch long before
+    the cursor.
 
     Nested runs — an agent's own Agent calls — live in that agent's transcript, and its
     subagents/ entry's meta.json names the parent (`parentAgentId`); they are indexed through
     their parent, carry `parent = ag-<parentAgentId>`, and take the parent's window: a parent
     notifies as done only once no child of its own is still running. A Workflow's own agents
     are not runs — the run is one."""
-    launches, notes = native_scan(transcript, end)
+    launches, notes, times = native_scan(transcript, end, marks=(since, end))
     session = transcript.with_suffix("")
     runs, by_note = {}, {}
     for key, launch in launches.items():
@@ -4637,28 +4709,121 @@ def native_index(transcript, since, end):
         if run is not None:
             run["notes"].append(n)
     for run in runs.values():
-        first = next((n for n in run["notes"] if not n.interim), None)
         run["seen"] = run["line"] > since or any(n.line > since for n in run["notes"])
         run["done_now"] = any(n.line > since for n in run["notes"])
-        run["first_now"] = first is not None and first.line > since
+        run["answer"] = native_answer(run, end, times.get(end))
+        run["first_now"] = (run["answer"] is not None
+                            and native_answer(run, since, times.get(since)) is None)
     sub = session / "subagents"
     parents = ({_read_json(p).get("parentAgentId") for p in sub.glob("agent-*.meta.json")}
                if runs and sub.is_dir() else set())
     queue = [r for r in runs.values() if r["key"] in parents]
     while queue:
         parent = queue.pop()
-        kids, kid_notes = native_scan(parent["files"], main=False)
+        kids, kid_notes, _ = native_scan(parent["files"], main=False)
         for key, launch in kids.items():
             if launch["tool"] == "Workflow" or NATIVE_PREFIX + key in runs:
                 continue
             run = native_run(launch, key, session, parent)
             run["notes"] = [n for n in kid_notes if n.task == key or n.tuid == launch["tuid"]]
+            run["answer"] = native_answer(run, None, times.get(end))
             run.update(seen=parent["seen"], done_now=parent["done_now"],
-                       first_now=parent["first_now"] and any(not n.interim for n in run["notes"]))
+                       first_now=parent["first_now"] and run["answer"] is not None)
             runs[run["id"]] = run
             if key in parents:
                 queue.append(run)
     return runs
+
+
+def native_answer(run, upto, at):
+    """The notifications that answer the run's brief, once that answer is complete as of line
+    `upto` of the transcript that holds them (None: all of it) and time `at` → [TaskNote], or
+    None while it is not.
+
+    The answer is the run's notifications up to the first after its first that names a call
+    other than its launch: that one answers a SendMessage to the agent, and a resumed agent's
+    later report is not its answer to the brief. The answer is complete at its first final
+    notification, which alone is read. When every one is interim — the agent stopped with
+    background work of its own still running — it is complete once the agent has answered a
+    SendMessage (main moved on from the answer), or once it has sat idle since the last one
+    with all that work ended (`native_settled`); the host's final notification cannot be
+    waited for. Measured (mlx-vlm, 2026-09-23): in 3 of 3 such runs the work left was a
+    `tail -f` Monitor that expired 5-11 minutes after the agent's last report; the host queued
+    the expiry in main's transcript and never delivered it to the idle agent, so none resumed
+    and no final notification came in the two days the session ran on — while each interim
+    report was the agent's whole report."""
+    notes = [n for n in run["notes"] if upto is None or n.line <= upto]
+    cut = next((k for k, n in enumerate(notes) if k and n.tuid not in (None, run["tuid"])),
+               len(notes))
+    chain = notes[:cut]
+    final = next((n for n in chain if not n.interim), None)
+    if final is not None:
+        return [final]
+    if not chain or cut < len(notes):
+        return chain or None
+    done = native_settled(run, chain[-1].t)
+    return chain if done is not None and at is not None and done <= at else None
+
+
+def native_settled(run, since):
+    """When the agent, idle since `since`, was done — read from its own transcript: the time
+    by which every piece of background work it had started ended, with no user or assistant
+    line after `since` before then (it was not resumed, by a message or by that work). None
+    when that never happened, when `since` is unknown, or when the transcript cannot be read.
+    A task ends with its own notification (one with a status) or the agent's TaskStop; a
+    Monitor at its deadline at the latest, since the host kills each at its `timeout_ms`.
+    Anything else — a background Bash command, an agent or a workflow of its own — has no
+    deadline: it runs until it says it ended. A fixed moment, so a window that finds the run
+    settled is never contradicted by a later one."""
+    memo = run.setdefault("settled", {})
+    if since is None or since in memo:
+        return memo.get(since)
+    memo[since] = None
+    try:
+        f = run["files"].open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    pending, work, ended, resumed = {}, {}, {}, None
+    with f:
+        for raw in f:
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                continue
+            t = _iso_time(rec.get("timestamp")) if isinstance(rec, dict) else None
+            if t is None:
+                continue
+            kind, msg, tur = rec.get("type"), rec.get("message"), rec.get("toolUseResult")
+            if kind in ("user", "assistant") and t > since and resumed is None:
+                resumed = t
+            content = msg.get("content") if isinstance(msg, dict) else None
+            for b in content if isinstance(content, list) else []:
+                if not isinstance(b, dict):
+                    continue
+                inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+                if kind == "assistant" and b.get("type") == "tool_use":
+                    pending[b.get("id")] = (b.get("name"), inp)
+                    if b.get("name") == "TaskStop" and isinstance(inp.get("task_id"), str):
+                        ended.setdefault(inp["task_id"], t)
+                if not (kind == "user" and b.get("type") == "tool_result" and t <= since
+                        and b.get("tool_use_id") in pending and isinstance(tur, dict)):
+                    continue
+                name, call = pending.pop(b["tool_use_id"])
+                tid = tur.get("backgroundTaskId") or tur.get("taskId") or (
+                    tur.get("agentId") if tur.get("status") == "async_launched" else None)
+                if isinstance(tid, str):
+                    ms = min(_num(call.get("timeout_ms")) or MONITOR_TIMEOUT_MS[0],
+                             MONITOR_TIMEOUT_MS[1])
+                    work[tid] = t + timedelta(milliseconds=ms) if name == "Monitor" else None
+            for text in _note_texts(rec):
+                for n in task_notes(text, 0):
+                    ended.setdefault(n.task, t)
+    # Each task's end: its own notice or its deadline, whichever came first; None: still running.
+    ends = [min(filter(None, (ended.get(tid), deadline)), default=None)
+            for tid, deadline in work.items()]
+    done = None if None in ends else max([since, *ends])
+    memo[since] = done if done is not None and (resumed is None or done < resumed) else None
+    return memo[since]
 
 
 def native_refs(rows, runs):
@@ -4898,16 +5063,16 @@ def native_take(hp, e, native, alias):
 
 def native_workflow_result(run):
     """A Workflow run's whole result — the run file holds it; the notification's copy is cut
-    at ~8k. Its JSON is re-serialized compactly: the same content, without the escapes that
-    bloat non-ASCII text sixfold. That is the only filtering; a result that still does not fit
-    the judge gets no triage (a gap), never a shortened one."""
+    at ~8k. A JSON result goes to the judge as the structure it is, not as a string of JSON
+    whose every quote and non-ASCII character is escaped, so one that does not fit is trimmed
+    by its structure, never cut through the middle (`fit_triage_state`)."""
     res = _read_json(run["summary"]).get("result")
     if isinstance(res, str):
         try:
             res = json.loads(res)
         except ValueError:
             return res.strip() or None
-    return None if res is None else json.dumps(res, ensure_ascii=False, separators=(",", ":"))
+    return res
 
 
 def worktree_changes(hp, wt):
@@ -4959,40 +5124,40 @@ def native_changes(hp, run):
 
 
 def native_triage(hp, run, ref, kind):
-    """A run's first completion, read the way the wrapper reads a lane at exit (§3.6) → True
+    """A run's answer to its brief, read the way the wrapper reads a lane at exit (§3.6) → True
     when the judge was asked. brief = the call's prompt (a Workflow's script), report = the
-    notification's <result> (a Workflow's whole result), rc 0 only when it completed, and the
-    changes from the run's own transcript or worktree."""
-    first = next(n for n in run["notes"] if not n.interim)
-    ex = {"rc": 0 if first.status == "completed" else 1, "check_rc": None}
-    wf = run["executor"] == "workflow"
-    report = native_workflow_result(run) if wf else first.report
+    answer's <result> — its final notification's, or its interim ones' in order when no final
+    one came (`native_answer`) — or a Workflow's whole result; rc 0 only when it completed,
+    and the changes from the run's own transcript or worktree. A state over the judge's
+    budget is fitted like any lane's (`fit_triage_state`)."""
+    answer = run["answer"]
+    ex = {"rc": 0 if answer[-1].status == "completed" else 1, "check_rc": None}
+    if run["executor"] == "workflow":
+        report = native_workflow_result(run)
+    else:
+        report = "\n\n".join(n.report for n in answer if n.report) or None
     if not run["brief"] or (ex["rc"] == 0 and not report):
         print(f"native: {ref} has no brief or no report to read — no triage", file=sys.stderr)
         return False
     state = triage_state(run["scope"], kind, run["brief"], ex, None, report, None, None, None)
     state["changes"] = native_changes(hp, run)
-    size = len(json.dumps(state, ensure_ascii=False))
-    if wf and size > JEV_STATE_BUDGET_CHARS:
-        print(f"native: {ref} is {size} chars, over the judge's budget — no triage",
-              file=sys.stderr)
-        return False
     triage(hp, state, ex, ref, src="scribe")
     return True
 
 
 def native_settle(hp, native):
     """Step 3c's second half, after the clerk: what each recorded run cost, and — with the
-    judge on — what its first completion says.
+    judge on — what its answer to its brief says.
 
     Usage is written for every run with a row that notified in this window, or that has
     notified and still has no usage row (its row landed in a later window than its
     completion). The rows are cumulative per model; one equal to the last row for (ref, model)
     is not written again, so re-reading a window writes nothing twice, and a resumed agent
-    gets a new row at its next completion. Triage reads only a run's first completion, only in
-    the window where it arrives, at most once per dispatch and NATIVE_TRIAGE_MAX calls per
-    window: a later notification — a resumed agent's — is never triage material, even when
-    the first reading failed (the gap is the record)."""
+    gets a new row at its next completion. Triage reads only a run's answer to its brief
+    (`native_answer`), only in the window where that answer became complete, at most once per
+    dispatch and NATIVE_TRIAGE_MAX calls per window: a later notification — a resumed
+    agent's, or a final one after an answer made of interim ones — is never triage material,
+    even when the first reading failed (the gap is the record)."""
     rows = read_ledger(hp)
     runs = native["runs"]
     native_refs(rows, runs)

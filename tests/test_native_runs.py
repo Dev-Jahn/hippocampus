@@ -4,7 +4,7 @@
 Contract under test: in every mode, each run main's Claude Code transcript launched is listed
 for the clerk until it has a row; the clerk gives the kind and nothing else of its lands; code
 fills exec from the agent's own transcript, scope, task and parent, writes cumulative usage per
-model at completions, and — judge on only — triages a run's first completion once. A clerk
+model at completions, and — judge on only — triages a run's answer to its brief once. A clerk
 dispatch that restates a run is dumped without costing main's verdict, main's own `log
 dispatch` for a run is its record, and a bug on this path never costs the window its clerk.
 
@@ -318,20 +318,145 @@ def test_a_workflow_run_is_one_row_over_all_its_agents(tmp_project, run_hippo, t
         ("claude-opus-5-5", 100), ("h-4-5", 50)]
     state = json.loads(jev_capture.read_text(encoding="utf-8"))["state"]
     assert state["brief"] == script
-    assert state["report"] == json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-    assert [t["ref"] for t in _rows(tmp_project, "triage")] == ["ag-wf_1234abcd-567"]
+    assert state["report"] == result, "a JSON result reaches the judge as the structure it is"
+    [t] = _rows(tmp_project, "triage")
+    assert t["ref"] == "ag-wf_1234abcd-567" and "trimmed" not in t
 
 
-def test_a_workflow_result_that_does_not_fit_gets_no_triage(tmp_project, monkeypatch, capsys):
-    run = {"executor": "workflow", "notes": [hippo_cli.TaskNote(9, "w", None, "completed",
-                                                                 "cut", False)],
+def test_a_workflow_result_over_budget_is_trimmed_by_its_structure(tmp_project, monkeypatch,
+                                                                   tmp_path):
+    """Measured: 2 of 23 Workflow results were over the judge's budget (226,811 and 129,195
+    chars). Every key and item stays, every long string keeps its head, the state fits, and the
+    triage row names what was cut. A report no cut down to TRIAGE_LEAF_MIN rescues stays whole
+    and the judge refuses it."""
+    findings = [{"claim": f"finding {i}: " + "evidence " * 60, "confidence": "measured"}
+                for i in range(300)]
+    result = {"designs": findings, "verdict": "Recommend the minimal design. " + "why " * 9000}
+    run = {"executor": "workflow", "answer": [hippo_cli.TaskNote(9, "w", None, "completed",
+                                                                  "cut", False, None)],
            "brief": "script", "scope": "big", "meta": {}, "stats": {"edits": []},
            "summary": tmp_project / "wf.json"}
-    run["summary"].write_text(json.dumps({"result": "x" * hippo_cli.JEV_STATE_BUDGET_CHARS}))
-    monkeypatch.setattr(hippo_cli, "triage", lambda *a, **k: (_ for _ in ()).throw(
-        AssertionError("an unfittable run must not reach the judge")))
-    assert hippo_cli.native_triage(tmp_project / ".hippo", run, "ag-wf", "impl") is False
-    assert "over the judge's budget" in capsys.readouterr().err
+    run["summary"].write_text(json.dumps({"result": json.dumps(result)}), encoding="utf-8")
+    jev_capture = tmp_path / "jev-request.json"
+    monkeypatch.setenv("HIPPO_JEV_BACKEND", "mock")
+    monkeypatch.setenv("HIPPO_JEV_MOCK_OUTPUT",
+                       str(_mock(tmp_path, {"answers": ACCEPT, "default": DEFAULT})))
+    monkeypatch.setenv("HIPPO_JEV_MOCK_CAPTURE", str(jev_capture))
+    (tmp_project / ".hippo" / "ledger.jsonl").write_text(json.dumps(
+        {"t": _ts(), "ev": "dispatch", "id": "ag-wf", "kind": "impl",
+         "exec": "workflow/claude-opus-5-5/high", "scope": "big"}) + "\n", encoding="utf-8")
+
+    assert hippo_cli.native_triage(tmp_project / ".hippo", run, "ag-wf", "impl") is True
+    state = json.loads(jev_capture.read_text(encoding="utf-8"))["state"]
+    assert len(json.dumps(state, ensure_ascii=False)) <= hippo_cli.JEV_STATE_BUDGET_CHARS
+    report = state["report"]
+    assert list(report) == ["designs", "verdict"] and len(report["designs"]) == 300
+    assert report["designs"][299]["confidence"] == "measured"
+    assert report["designs"][299]["claim"].startswith("finding 299: evidence")
+    assert report["verdict"].startswith("Recommend the minimal design.")
+    assert report["verdict"].endswith("…") and len(report["verdict"]) < len(result["verdict"])
+    [t] = _rows(tmp_project, "triage")
+    assert (t["route"], t["trimmed"]) == ("accept-candidate", ["report"])
+
+    items = {"items": [str(i) * 5 for i in range(30000)]}  # no string is long: nothing to cut
+    state = {"brief": "b", "report": items}
+    assert hippo_cli.fit_triage_state(state) == [] and state["report"] is items
+
+
+T0 = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=2)
+WATCH_TUID = "toolu_01WatchWatchWatchWatchWa"
+
+
+def _at(minutes, line):
+    """`line` stamped `minutes` after T0 — the interim rule reads time, so these tests set it."""
+    stamp = (T0 + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return {**line, "timestamp": stamp}
+
+
+def _watcher(agent, report_at, resumes=(), tool="Monitor", task="m1"):
+    """An agent that armed a 20-minute watcher (or started a background command) at minute 1
+    and reported at `report_at`; `resumes` are the lines it wrote when it was woken again."""
+    inp = ({"command": "tail -f run.log | grep --line-buffered DONE", "timeout_ms": 1_200_000}
+           if tool == "Monitor" else {"command": "sleep 3600", "run_in_background": True})
+    tur = {"taskId": task} if tool == "Monitor" else {"backgroundTaskId": task}
+    return [_at(0, {"type": "user", "message": {"role": "user", "content": BRIEF}}),
+            _at(1, _assistant({"type": "tool_use", "id": WATCH_TUID, "name": tool,
+                               "input": inp})),
+            _at(1, {"type": "user", "toolUseResult": tur, "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": WATCH_TUID, "content": "armed"}]}}),
+            _at(report_at - 0.1, _assistant({"type": "text", "text": REPORT})),
+            *resumes]
+
+
+def test_an_interim_only_run_is_read_once_its_work_has_ended(tmp_project, run_hippo, tmp_path):
+    """Measured (mlx-vlm): an agent reported, stopped with a `tail -f` Monitor still armed,
+    and the host never delivered the Monitor's expiry to it — no final notification came.
+    Its interim reports are its answer, read once the watcher's deadline has passed with the
+    agent still idle: not before, and a final notification arriving later is not read again,
+    even though that one reading failed."""
+    jev = _mock(tmp_path, {"answers": ACCEPT, "default": DEFAULT})
+    broken = _mock(tmp_path, {"default": {"noul": 0.5}}, "broken.json")  # harvest has a score
+    jev_capture = tmp_path / "jev-request.json"
+    _write(_session(tmp_project) / "subagents" / f"agent-{AGENT}.jsonl", _watcher(AGENT, 15))
+    _write(tmp_project / "transcript.jsonl", [
+        _at(0, _user("run the e2e in a subagent")), _call(), _at(0, _launched()),
+        _at(15, _user(_note(interim=True, result=REPORT))),
+        _at(16, _user(_note(interim=True, tuid=None, result="The watcher timed out; the "
+                                                             "report above stands.")))])
+    _scribe(run_hippo, tmp_project,
+            _clerk(tmp_path, "w1", [{"ev": "dispatch", "id": DID, "kind": "impl"}]), jev)
+    assert _rows(tmp_project, "dispatch", id=DID) and not _rows(tmp_project, "triage"), (
+        "the watcher's deadline (minute 21) has not passed: the agent may still report")
+
+    _write(tmp_project / "transcript.jsonl", [_at(30, _user("anything else?"))], mode="a")
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w2"), broken, jev_capture=jev_capture)
+    state = json.loads(jev_capture.read_text(encoding="utf-8"))["state"]
+    assert state["report"] == f"{REPORT}\n\nThe watcher timed out; the report above stands."
+    assert [e["ok"] for e in _rows(tmp_project, "clerk", name="jev-harvest")] == [False]
+
+    late = _note(tuid=None, result="Late final report.")
+    _write(_session(tmp_project) / "subagents" / f"agent-{AGENT}.jsonl", _watcher(AGENT, 15, [
+        _at(39, _user(late)), _at(39.5, _assistant({"type": "text", "text": "Late final."}))]))
+    _write(tmp_project / "transcript.jsonl", [_at(40, _user(late))], mode="a")
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w3"), jev)
+    assert not _rows(tmp_project, "triage")
+    assert len(_rows(tmp_project, "clerk", name="jev-harvest")) == 1
+
+
+def test_an_answer_waits_for_work_without_a_deadline_and_ends_at_a_sendmessage(tmp_path):
+    """A background command has no deadline: the interim report is not read however long the
+    agent sits idle, and the final notification it resumed to send is its answer. A report
+    that answers a SendMessage is not the answer to the brief — main moved on from the
+    interim one, which becomes the answer in that window."""
+    bash, sent = "abash000000000000", "asent000000000000"
+    bash_tuid, sent_tuid, msg_tuid = ("toolu_01BashRunBashRunBashRun", "toolu_01SentSentSentSent",
+                                      "toolu_01SendMessageSendMessa")
+    done = ("<task-notification>\n<task-id>b9</task-id>\n<status>completed</status>\n"
+            "<summary>Background command finished</summary>\n</task-notification>")
+    session = tmp_path / "t"
+    _write(session / "subagents" / f"agent-{bash}.jsonl", _watcher(bash, 5, [
+        _at(200, _user(done)), _at(201, _assistant({"type": "text", "text": "All done."}))],
+        tool="Bash", task="b9"))
+    _write(session / "subagents" / f"agent-{sent}.jsonl", _watcher(sent, 5, [
+        _at(6, _user("also check the 429 path")),
+        _at(7, _assistant({"type": "text", "text": "429 checked."}))]))
+    lines = [_call(bash_tuid, desc="bench"), _at(0, _launched(bash_tuid, bash, "bench")),  # 1, 2
+             _call(sent_tuid, desc="e2e"), _at(0, _launched(sent_tuid, sent, "e2e")),     # 3, 4
+             _at(5, _user(_note(bash, bash_tuid, interim=True, result="started"))),        # 5
+             _at(5, _user(_note(sent, sent_tuid, interim=True))),                          # 6
+             _at(7, _user(_note(sent, msg_tuid, interim=True, result="429 checked."))),   # 7
+             _at(190, _user("still there?")),                                              # 8
+             _at(202, _user(_note(bash, None, result="bench: 3.1x faster")))]             # 9
+    path = _write(tmp_path / "t.jsonl", lines)
+
+    runs = hippo_cli.native_index(path, 6, 8)
+    assert runs["ag-" + bash]["answer"] is None, "a command with no deadline may still end"
+    assert [n.line for n in runs["ag-" + sent]["answer"]] == [6]
+    assert runs["ag-" + sent]["first_now"] is True
+    assert hippo_cli.native_index(path, 0, 6)["ag-" + sent]["answer"] is None
+    runs = hippo_cli.native_index(path, 8, 9)
+    assert [n.report for n in runs["ag-" + bash]["answer"]] == ["bench: 3.1x faster"]
+    assert (runs["ag-" + bash]["first_now"], runs["ag-" + sent]["first_now"]) == (True, False)
 
 
 def test_a_restated_launch_keeps_main_s_verdict(tmp_project, run_hippo, tmp_path):
