@@ -323,12 +323,24 @@ def test_pre_compact_is_capped_and_counts_what_it_cut(tmp_project, repo_root, ru
     assert f"({40 - shown} more not shown" in proc.stdout
 
 
-def test_pre_compact_is_silent_inside_a_subagent_and_outside_a_project(
+def test_pre_compact_is_silent_for_a_marked_subagent_and_outside_a_project(
     tmp_project, repo_root, uninitialized_dir
 ):
     for proc in (_pre_compact(tmp_project, repo_root, agent_id="a1b2c3"),
                  _pre_compact(uninitialized_dir, repo_root)):
         assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
+
+
+def test_pre_compact_speaks_while_main_s_transcript_ends_in_a_tool_call(tmp_project, repo_root):
+    """Main compacts mid-turn before its last tool result reaches the transcript, so the file
+    ends in main's own tool call — the same tail it shows while main waits on a subagent that
+    compacts (measured, 2.1.282, §3.4). A rule on that tail silenced main's own compactions."""
+    call = {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "big.txt"}}]}}
+    (tmp_project / "t.jsonl").write_text(json.dumps(call) + "\n", encoding="utf-8")
+    proc = _pre_compact(tmp_project, repo_root)
+    assert proc.returncode == 0, proc.stderr
+    assert "`## hippo deltas`" in proc.stdout
 
 
 def test_the_capsule_after_a_compaction_points_at_the_deltas(tmp_project, repo_root):

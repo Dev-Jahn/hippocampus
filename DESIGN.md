@@ -385,9 +385,10 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
   worktree's `.git` file (§3.3): an `isolation: "worktree"` agent starts in
   `<project>/.claude/worktrees/agent-<id>` (measured, 2.1.281), and those are the agents that
   edit files — the conservative stop left exactly them without "never push". The reason: SessionStart
-  never fires for a native subagent (neither subagent transcript in the session measured below
-  carries one), so until this hook a user's standing rule reached a Claude Code worker only if
-  main retyped it into the brief — the gap the audience axis (§9.4) closed for lanes. The slice
+  never fires when a native subagent starts (neither subagent transcript in the session measured
+  below carries one; it does fire after the subagent's own compaction, PreCompact below), so
+  until this hook a user's standing rule reached a Claude Code worker only if main retyped it
+  into the brief — the gap the audience axis (§9.4) closed for lanes. The slice
   is directives only: no `report:` line (a native worker runs without `HIPPO_DISPATCH`, so its
   `log outcome` would land as src=cli — main's verdict on its own work — while the scribe
   records the run and main's verdict itself, §3.5.3c), no depth line
@@ -403,10 +404,10 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
   subagent quoted back exactly the executor slice, and a fork quoted main's capsule — its own
   context, with nothing injected.
 - **PreCompact** (Claude Code): `hooks/pre_compact.sh` → silent exit 0 with no `.hippo/`, and
-  inside a subagent (an `agent_id` on stdin — a guard: main's PreCompact carries none, measured;
-  a subagent's own compaction was not); otherwise plain text with exit 0, which the host
-  appends to the compaction instructions: end the summary with `## hippo deltas`, one line per
-  change the conversation made that hippo's lists do not show yet, each the exact command that
+  for an `agent_id` on stdin (the host's subagent marker, which it does not send on this event
+  yet — below); otherwise plain text with exit 0, which the host appends to the compaction
+  instructions: end the summary with `## hippo deltas`, one line per change the conversation
+  made that hippo's lists do not show yet, each the exact command that
   records it (`hippo task done <id> --note '…'`, `hippo task set <id> notes '…'`, `hippo directive
   withdraw <id>` only if the user said so, `hippo directive add --id <id> --text '…'` when the
   user changed one, `edit <file>: '<old>' → '<new>'` for a memory or doc line now false), or
@@ -427,7 +428,20 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
   context, which is what lets the capsule point at it. PreCompact can fire with no compaction
   following ("no assistant messages in summarize set, bailing"), which costs nothing — the text
   only asks. A manual `/compact` writes the text into the transcript main reads next (an auto
-  one does not), hence main's audience only (§9.4).
+  one does not), hence main's audience only (§9.4). A subagent's own compaction is not told
+  apart (2.1.282, 2026-09-25: a foreground general-purpose subagent paging a file past a small
+  auto-compaction window, `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000` +
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=25`): it fires PreCompact, SessionStart(compact) and
+  PostCompact with main's `session_id` and `transcript_path` and no `agent_id` or `agent_type`
+  (the bundled code builds this input without the agent's context), and its SessionStart and
+  PostCompact hooks saw the same `CLAUDE_*` env names as main's. So all three of that subagent's
+  summaries ended in `## hippo deltas` (`none` — it had only read), and SessionStart(compact)
+  put main's capsule, `compact:` line included, into the subagent's own transcript. Main's
+  transcript is no signal either: main compacts mid-turn before its last tool result reaches the
+  file, so the file ends in main's own tool call just as it does while main waits on a subagent
+  — a rule on that tail silenced all three of main's compactions in the same run. What is left
+  open: a subagent whose summary proposes a real command could run it, and it would land as
+  main's (src=cli).
 - **Stop**: `hooks/stop.sh` — parse `transcript_path`, `session_id` and `cwd` from the stdin JSON;
   silent exit 0 with no `.hippo/`; otherwise `setsid hippo scribe … >/dev/null 2>&1 &` and then
   **exit 0 immediately** (<100ms). Under `HIPPO_DISPATCH` it exits at once instead: the executor
@@ -1123,9 +1137,11 @@ After a compaction (SessionStart source=compact) main's capsule closes on one mo
 are proposals; skip any that are wrong`` — because the summary lands in main's context before the
 capsule does (measured), and PreCompact asked it for those commands (§3.4). "Has", not "ends
 with": the host appends its own paragraphs after the summary. The condition is there for Codex,
-which fires SessionStart(compact) but gets no PreCompact. A native subagent gets
+which fires SessionStart(compact) but gets no PreCompact. A native subagent starts with
 none of this block: SubagentStart hands it the `[hippo] directives N live — the user's standing
-rules for this project` header and its executor-audience directive lines, nothing else (§3.4).
+rules for this project` header and its executor-audience directive lines, nothing else — until
+its own compaction, whose SessionStart(compact) the host does not mark as a subagent's, so this
+whole capsule lands in the subagent (measured, §3.4).
 
 The `cli:` line is main's only (a lane has its `report:` line instead): the command grammar,
 because the capsule is what re-arrives after a compaction and that is exactly when the grammar
