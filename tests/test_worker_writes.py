@@ -13,8 +13,8 @@ import pytest
 import yaml
 
 from conftest import REPO_ROOT, read_ledger
-from test_native_runs import (WF, WF_TASK, _assistant, _clerk, _note, _queued, _scribe, _user,
-                              _wf_file, _wf_launch, _write)
+from test_native_runs import (AGENT, WF, WF_TASK, _assistant, _call, _clerk, _launched, _note,
+                              _queued, _scribe, _user, _wf_file, _wf_launch, _write)
 
 sys.path.insert(0, str(REPO_ROOT / "cli"))
 import hippo_cli  # noqa: E402
@@ -188,6 +188,26 @@ def test_a_run_over_a_day_old_is_read_in_the_window_it_ends(tmp_project, run_hip
     _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w2"))
     assert json.loads((hp / "worker-writes.json").read_text()) == {
         "task:feat/x": {"t": _stamp(1), "run": "ag-" + WF, "op": "task done feat/x"}}
+
+
+def test_a_hippo_lane_relay_is_never_read(tmp_project, run_hippo, tmp_path):
+    """A relay runs `hippo dispatch` and `--watch`, no write counted here, and 3c skips it —
+    beside main and inside a Workflow alike: a write its shell made anyway is not claimed."""
+    (tmp_project / ".hippo" / "tasks.yaml").write_text(yaml.safe_dump({"tasks": [
+        {"id": "feat/x", "title": "x", "status": "done", "notes": [], "updated": _stamp(1)},
+    ]}), encoding="utf-8")
+    brief = {"type": "user", "timestamp": _at(0, 500), "message": {"role": "user",
+                                                                   "content": "relay"}}
+    sub = tmp_project / "transcript" / "subagents"
+    for path in (sub / f"agent-{AGENT}.jsonl", sub / "workflows" / WF / "agent-a2.jsonl"):
+        _write(path, [brief, *_bash("toolu_1", 0, "hippo dispatch --watch d1; "
+                                                  "hippo task done feat/x")])
+        path.with_suffix(".meta.json").write_text(json.dumps({"agentType": "hippo:lane"}),
+                                                  encoding="utf-8")
+    _write(tmp_project / "transcript.jsonl", [
+        _user("relay the lanes"), _call(subagent_type="hippo:lane"), _launched(), *_wf_launch()])
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w"))
+    assert not (tmp_project / ".hippo" / "worker-writes.json").exists()
 
 
 def test_a_command_is_read_the_way_the_shell_and_the_cli_read_it():

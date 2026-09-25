@@ -755,9 +755,12 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
    place that could, and §4 keeps those out. The scribe reads it afterwards, from the runs 3c
    indexed: for each run the window touched or ended (a TaskStop, or a run file saying `killed`
    or `failed`, ends one with no notification, 3c; past 24h that window is the last to read it)
-   and each still running (launched within 24h), the run's own transcript(s) — an agent's, a nested agent's, every agent of a Workflow
-   (`subagents/workflows/<runId>/agent-*.jsonl`) — and never main's, so main's own calls never
-   count; nothing before the first user line (a fork's opens with main's launching message).
+   and each still running (launched within 24h), the run's own transcript(s) — an agent's, a
+   nested agent's, every agent of a Workflow (`subagents/workflows/<runId>/agent-*.jsonl`) but a
+   `hippo:lane` relay, which is not read beside main either (3c skips it both ways; it runs
+   `hippo dispatch` and `--watch`, neither a write counted here) — and never main's, so main's
+   own calls never count; nothing before the first user line (a fork's opens with main's
+   launching message).
    Each Bash command is walked the way step 9's replay walked main's own calls: quotes, operators,
    redirections and heredoc bodies (a brief that quotes a command is text), `H=hippo` and
    `${v%%pat}` expanded, a `for … in …; do … done` run per item, `h() { hippo … "$@"; }` taken as

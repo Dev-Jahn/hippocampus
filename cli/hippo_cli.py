@@ -6069,13 +6069,15 @@ def worker_writes(hp, native):
     recorded for main's capsule (`worker_line`) — never undone, never blocked.
 
     Read from each run's own transcript(s) — an agent's, or every agent of a Workflow — for the
-    runs this window touched or ended (`done_now`: a TaskStop or a killed run file ends one with
-    no notification) and those still running: a write can land any time until a run ends, and
-    one that ended in an earlier window was read then. Main's transcript is not read,
-    so main's own calls never count. A write is recorded only where this project's state shows
-    it (`worker_landed`), under the thing it wrote to, the latest write winning; the file keeps
-    what still shows (`worker_write_shows`) and is replaced whole under the scribe's lock, like
-    task-flags.json. Nothing here needs the judge."""
+    runs this window touched or ended (`done_now`: a TaskStop, or a run file saying killed or
+    failed, ends one with no notification) and those still running: a write can land any time
+    until a run ends, and one that ended in an earlier window was read then. A hippo:lane relay
+    is not read, beside main or inside a Workflow (`native_run`): it runs `hippo dispatch` and
+    `--watch`, neither a write counted here. Main's transcript is not read, so main's own calls
+    never count. A write is recorded only where this project's state shows it (`worker_landed`),
+    under the thing it wrote to, the latest write winning; the file keeps what still shows
+    (`worker_write_shows`) and is replaced whole under the scribe's lock, like task-flags.json.
+    Nothing here needs the judge."""
     parser, now, found = build_parser(), datetime.now(timezone.utc), {}
     tasks = {t["id"]: t for t in tasks_load(hp)["tasks"] if isinstance(t.get("id"), str)}
     rows = read_ledger(hp)
@@ -6083,7 +6085,7 @@ def worker_writes(hp, native):
     for run in native["runs"].values():
         running = run["answer"] is None and (
             run["t"] is None or now - run["t"] <= timedelta(hours=NATIVE_LIST_H))
-        if not (run["seen"] or run["done_now"] or running):
+        if run["skip"] or not (run["seen"] or run["done_now"] or running):
             continue
         for path in native_files(run):
             for call, lo, hi in worker_calls(path, parser):
