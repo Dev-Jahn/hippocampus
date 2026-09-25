@@ -268,6 +268,10 @@ optional `src` (`scribe|cli|wrapper|executor`).
   `low|medium|high|xhigh|max|ultra|inherit`; `inherit` is for an executor that takes its setting from
   the session that spawned it. **Neither vocabulary is validated on main's writes** — see §3.5.6b
   for why, and for where they are.
+- `dispatch.kind: unclassified` has one writer, the scribe's code: a native run that ended with
+  no row after the clerk had it listed (§3.5.3c). It is no tag — the column it makes in PRIORS
+  says the kind was never read — and it keeps the run's cost and any verdict, which losing the
+  row would not.
 - `review.base` is the reviewed commit (`^[0-9a-f]{7,40}$`) — **this is the whole of SHA pinning**
   (principle 3). Without a known sha, do not record the review event at all.
 - Validation: `hippo log` checks the required fields per ev, fail-closed. An unknown `ev` is rejected.
@@ -536,27 +540,64 @@ subagent's own (PreCompact, below).
    own Agent calls live in its transcript, and its `subagents/agent-<id>.meta.json` names the
    `parentAgentId`: nested runs are indexed through their parent and carry
    `parent: ag-<parentAgentId>`. A Workflow's own agents are not runs — the run is one — and
-   a `hippo:lane` agent, which only babysits a codex lane the wrapper records, is skipped.
+   a `hippo:lane` agent, which only babysits a codex lane the wrapper records, is skipped:
+   beside main as a run, and inside a Workflow as one of its agents — the run's usage, exec and
+   changes leave it out (measured live: a relay's 17,304 of a run's 41,740 tokens, and its `low`
+   effort tied the run's `high` for exec), and a Workflow that ended with nothing else gets no
+   row. **Ends**: a run ends at a notification — or, where none comes, at main's TaskStop
+   naming its task id, and a Workflow at its run file saying `killed` or `failed`: the host
+   writes `<session>/workflows/<runId>.json` at a launch's end with its `taskId`, `status` and
+   end time, and a stopped or failed Workflow never notifies (measured, mlx-vlm: 4 runs stopped
+   by TaskStop, all `killed`, none notified, one after 2.59M tokens no usage row carried). A run
+   file naming another task is an earlier launch's — a resume keeps the runId.
    **Rows**: a run's id is `ag-<agentId>` (`ag-<runId>` for a Workflow), which main sees at
    launch. The kind is the one slot a reading of the brief has to fill, and the clerk reads
    the turn anyway: the payload lists each run with no row yet, launched within 24h, as
    `ag-<id> · <executor> · <description> · brief: <first 300 chars>`,
-   the clerk answers `{"ev":"dispatch","id":"ag-…","kind":…}`, and code keeps only the kind —
-   one of the dispatch skill's tags, else the event is dumped and the run stays listed — and
-   fills the rest from what the run left behind: `exec` = `fork` (meta `isFork`), `workflow` or
-   `subagent` / the agent's own `message.model` with the context tag and snapshot date
-   stripped, which is the prices.yaml key (a Workflow run's most-used across its agents; the
-   host's `resolvedModel` while no line exists yet) / the `effort` its assistant lines record
-   (`inherit` when none does — haiku's don't); `scope` = the call's description or the
-   workflow's name; `task` = the one tasks.yaml id the brief names as a whole token; `parent`
-   as above. Main's own `log dispatch` for a run is its record — a `src=cli` dispatch within the
-   same 24h whose scope equals the description (case and spacing aside), or whose id is the
-   run's own — and that match is exact on purpose, which is its limit: a scope main paraphrased
-   is not recognized and the run gets a second row, where a similarity guess would cost runs
-   their rows (6b measured those). Main does paraphrase: all 4 of its `log dispatch` rows for
-   Agent runs in this repo's ledger did ("Jev judge layer + scribe gate (wave 1)" for "Jev wave
-   1: client + scribe gate"), which is why the skills now say no call is needed. **Usage**
-   (code): at every notification, and for a run whose row landed after its completion, the
+   the clerk answers `{"ev":"dispatch","id":"ag-…","kind":…}` for every line, in every window,
+   whether or not the digest is about that run (its prompt says so in those words), and code
+   keeps only the kind — one of the dispatch skill's tags, else the event is dumped and the run
+   stays listed — and fills the rest from what the run left behind: `exec` = `fork` (meta
+   `isFork`), `workflow` or `subagent` / the agent's own `message.model` with the context tag
+   and snapshot date stripped, which is the prices.yaml key (a Workflow run's most-used across
+   its agents; while no line exists, what the host resolved — an Agent launch's
+   `resolvedModel`, a Workflow run file's `defaultModel`) / the `effort` its assistant lines
+   record (`inherit` when none does — haiku's don't); `scope` = the call's description or the
+   workflow's name; `task` = the one tasks.yaml id the brief — or a Workflow's `args`, the
+   value its script reads — names as a whole token; `parent` as above. A Workflow's row waits
+   for the run's end, quietly, and the run stays listed until then: its exec is its agents'
+   majority, and a row written at the first Stop read whatever lines existed a second after
+   the launch — measured live, `workflow/claude-sonnet-5/low` where the whole run read `…/high`,
+   and, before any agent's first reply, no model at all, which dumped a failure for a run that
+   was only starting. A listed run that has **ended** with no row after the clerk — it skipped
+   the line, its kind was refused, or no clerk answered the window — gets its row from code,
+   under the kind `unclassified`, so every run that ends within its listing has exactly one
+   row. Measured (2026-09-25): the cheap clerk recorded a listed run only when the window's
+   digest was about it; hippo's first 1.15 windows listed 4 finished Workflow runs, the clerk
+   answered `events: []`, and they aged out of the list with 284M tokens recorded nowhere —
+   open-webui lost 6 Workflow and 5 Agent runs the same way. Code has no honest reading of a
+   brief, and a guessed tag would sit in a real PRIORS column: `unclassified` is a column that
+   says the kind was never read, while the cost and any verdict are kept. An outcome naming
+   such a run in the same output gets the row first and lands on it. Main's own `log dispatch`
+   for a run is its record — a `src=cli` dispatch whose id is the run's bare runId or agentId,
+   the one the launch printed (measured, mlx-vlm: 15 of 17 Workflow runs had one beside the
+   scribe's `ag-wf_…` twin, main's verdicts on one row and the cost on the other, so no
+   Workflow's cost reached PRIORS), or within the same 24h whose scope equals the description
+   (case and spacing aside) — and the scope match is exact on purpose, which is its limit: a
+   scope main paraphrased is not recognized and the run gets a second row, where a similarity
+   guess would cost runs their rows (6b measured those). Main does paraphrase: all 4 of its
+   `log dispatch` rows for Agent runs in this repo's ledger did ("Jev judge layer + scribe
+   gate (wave 1)" for "Jev wave 1: client + scribe gate"), which is why the skills now say no
+   call is needed. When main's row is a run's record, a clerk outcome naming the run's own
+   `ag-` id lands on that row: the skills teach main that id, so main judges the run by it, and
+   an outcome checked against the ledger alone would be dumped in exactly the twin case this
+   closes (replayed: main's bare `wf_…` row, "ag-wf_… is accepted" in the turn, and the
+   verdict reached only failures/). `hippo log outcome --ref ag-…` for a run with no row yet
+   says so, and that the verdict is read off the turn — only for a ref that can be a run id
+   (`ag-a…`, `ag-wf_…`): a Workflow launch prints its Task ID first, and a ref built from that
+   is told it names no run rather than "no call needed", which would drop the verdict; a ref
+   whose bare id main logged itself is pointed at that row. **Usage** (code): at every end — a
+   notification, or a stop with none — and for a run whose row landed after its end, the
    run's own transcript(s) are summed per model — one API message once, though it spans
    several lines as it streams (49 of 59 messages in one agent); nothing before the first user
    line, because a fork's transcript opens with main's own launching message copied in, main's
@@ -567,9 +608,10 @@ subagent's own (PreCompact, below).
    **Triage** (judge on only): a run's answer to its brief is read exactly as a wrapper lane at
    exit (§3.6), `src=scribe`, once per dispatch, at most 8 calls a window, and only in the
    window where that answer became complete — a resumed agent's later report is never triage
-   material, even when the first reading failed. The answer is the run's notifications up to
-   the first after its first that names a call other than its launch — that one answers a
-   SendMessage. It is complete at its first final notification, and every one up to it is
+   material, even when the first reading failed, and a run stopped with no notification has no
+   answer to read. The answer is the run's notifications up to the first after its first that
+   names a call other than its launch — that one answers a SendMessage. It is complete at its
+   first final notification, and every one up to it is
    read, in order: an interim report before it can be the whole report, the final one after it
    only a line saying its watcher expired. An interim one — the agent stopped with background
    work of its own still running, and says so — completes it only where the host's final one
@@ -605,13 +647,20 @@ subagent's own (PreCompact, below).
    quote is escaped, and fitted by its structure like any over-budget report, §3.6: measured,
    2 of 23 results were over the budget, 226,811 and 129,195 characters of research and
    design output; with every finding and field kept, 305 of 657 strings cut to 215
-   characters and 4 of 174 to 3,833, both fit); rc 0 only on `completed`; changes = the
-   files the agent edited with its edit tools plus its `edited_text_file` attachments, headed
-   as what they are (a shell edit of a file it never read is not visible), or git facts from
-   its worktree when it ran isolated and a base is honest (a HEAD that never moved: the
-   working tree; one that moved and has not reached main's branch: its merge-base with main's
-   HEAD; else the list) — never main's tree, which also holds main's work. The route never
-   reaches the clerk.
+   characters and 4 of 174 to 3,833, both fit); rc 0 only on `completed`; changes are read
+   agent by agent (an Agent run's one agent, each of a Workflow's but its hippo:lane agents):
+   git facts from the agent's worktree when it ran isolated and a base is honest (a HEAD that
+   never moved: the working tree; one that moved and has not reached main's branch: its
+   merge-base with main's HEAD), a Workflow agent's `worktreePath` being in its own meta.json
+   under `subagents/workflows/<runId>/`; else the files it edited with its edit tools plus its
+   `edited_text_file` attachments, those in the project only, headed as what they are (a
+   shell edit of a file never read is not visible) — never main's tree, which also holds
+   main's work. Measured on wf_cf850115-50b: 5 of the 12 paths its agents edited were scratch
+   files under the session's scratchpad, its fix agent's commit in its worktree — three files,
+   no edit-tool call — was in no list, and the heading called the lot "files this agent
+   edited"; read against the real root, its list is the 7 project files and wf_a1d55d12-410's
+   44 paths are 9 (both worktrees since removed, so the lists stand in for git). The route
+   never reaches the clerk.
    Nothing here raises out of the scribe: a bug is dumped to `failures/*-native-*` and the clerk
    runs as always. Replayed Stop by Stop over four real sessions on this Mac (2026-09-24, mock
    clerk and judge, scratch ledgers): 55 runs — 26 subagents, 3 forks, 3 nested forks, 23
@@ -625,6 +674,17 @@ subagent's own (PreCompact, below).
    of the same Workflow runs as `workflow/subagent/inherit` and `workflow/unknown/inherit`;
    code read `workflow/claude-opus-5-5/xhigh` for both. The index costs 0.05s over a 24MB
    transcript, and 0.10s over 39MB, 0.03s of it reading the agents whose answer is interim.
+   Replayed from the Stop where 1.15 went live in each of three projects (2026-09-26, main's
+   own rows injected at their times, runs launched from 24h before it; the mock clerk answering
+   only the runs a window launched or notified, which is what the cheap clerk was seen doing),
+   the release against this fix: hippo 9 → 12 of 13 runs with a row (the 13th still running),
+   the 4 that had aged out now `unclassified`, recorded tokens 251M → 536M; open-webui 0 → 13
+   of 13 (production had 2), 309M tokens; mlx-vlm 15 twins → 0, ended runs with usage 16 → 17
+   of 17 (the killed one's 2.59M), main's 15 verdicts on the row that carries the cost 0 → 15,
+   Workflow cells in PRIORS with tokens 0 → 9 of 14. With a clerk that answers nothing, every
+   ended run still gets its row. And the real sonnet clerk, on hippo's window where main
+   merged two Workflow runs' work to `dev` and closed their task, recorded both verdicts in 1
+   of 5 runs with the release's prompt and roster, and in 5 of 5 with this one's.
    **Codex is unchanged**: a `spawn_agent`'s brief is encrypted in the rollout
    (`gAAAAB…`), so the clerk keeps recording those children from the digest.
 4. Resolve the backend: `config.yaml > $HIPPO_CLERK_BACKEND > automatic (codex/gpt-6-luna/low when
@@ -637,8 +697,14 @@ subagent's own (PreCompact, below).
    native runs to record, when any (3c) + the digest. Both rosters exist for one reason: an id
    the clerk coins for a subject that already has one forks it instead of updating it, and the
    digest cannot be relied on to contain the existing id. The dispatch roster is also the set an
-   outcome may legally `ref`, with the listed native ids the same output records. Expected
-   output = strict JSON:
+   outcome may legally `ref`, with the listed native ids the same output records. It is the last
+   12 dispatches plus every row of this session's native runs launched within 24h that has no
+   verdict yet, each of those with its task and a run's worktrees (`· task …`, `· worktrees
+   wf_<run>-N`): main judges a native run by what the digest shows of it — its branch, its
+   task, its description — rarely by its id. Measured (2026-09-25): 0 of 21 `ag-wf_` rows ever
+   got a verdict, so no Workflow's cost reached PRIORS, though main had merged the work of every
+   finished one in hippo; and 17 rows landing in one mlx-vlm window left 5 of them off the last
+   12. The prompt says the same in rule 2 (the A/B in 3c). Expected output = strict JSON:
    `{"worklog": "…", "events": [ …ledger events without t… ]}`.
 6. Validation, **per event**: check each event by the same rules as `hippo log` (per-ev key
    whitelist — unknown keys rejected; `t` and `src` are always stamped by the writer; exec shape

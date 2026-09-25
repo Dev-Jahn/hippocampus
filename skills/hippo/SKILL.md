@@ -52,9 +52,9 @@ hippo dispatch --watch <dispatch-id> [--for SECONDS]
 - Codex lanes → `dispatch` (`--batch` for many, `--watch <id>` to wait); see `/hippo:dispatch`.
 - A subagent or Workflow run (in Codex, a `spawn_agent` child): no call — hippo records the
   launch and your verdict from the transcript at the end of the turn (in Claude Code its cost
-  too, as `ag-<agentId>`, a Workflow's as `ag-<runId>`: its Run ID `wf_…`, not its Task ID).
-  Name exactly one task id in its brief or script to link it (two or more link none); say
-  `ag-wf_…` in a Workflow's verdict.
+  too, as `ag-<agentId>`, a Workflow's as `ag-<runId>` once it ends: its Run ID `wf_…`, not its
+  Task ID). Name exactly one task id in its brief or script to link it (two or more link none);
+  say `ag-wf_…` in a Workflow's verdict.
 - Lost your place → `status`.
 
 ## What runs by itself

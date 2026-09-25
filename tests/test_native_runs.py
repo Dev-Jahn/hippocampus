@@ -281,35 +281,50 @@ def test_a_failed_first_reading_is_not_retried_on_a_resume(tmp_project, run_hipp
     assert len(_rows(tmp_project, "clerk", name="jev-harvest")) == 1
 
 
+WF, WF_TASK, WF_TUID = "wf_1234abcd-567", "wxyz", "toolu_01WorkflowWorkflowWorkflo"
+WF_ID = "ag-" + WF
+SCRIPT = "export const meta = { name: 'port-parser' }; await agent('port the parser')"
+
+
+def _wf_agent(project, aid, msgs, run=WF, **meta):
+    """One agent of a Workflow run: its transcript and, when given, its meta.json."""
+    d = _session(project) / "subagents" / "workflows" / run
+    _write(d / f"agent-{aid}.jsonl", [{"type": "user", "message": {"content": "x"}}]
+           + [ln for m in msgs for ln in m])
+    if meta:
+        (d / f"agent-{aid}.meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+
+def _wf_file(project, run=WF, **fields):
+    """The run file the host writes at a launch's end."""
+    d = _session(project) / "workflows"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{run}.json").write_text(json.dumps(fields), encoding="utf-8")
+
+
+def _wf_launch(run=WF, task=WF_TASK, tuid=WF_TUID, name="port-parser", **inp):
+    return [_assistant({"type": "tool_use", "id": tuid, "name": "Workflow",
+                        "input": {"script": SCRIPT, **inp}}),
+            {"type": "user", "timestamp": _ts(), "message": {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": tuid, "content": "launched"}]},
+             "toolUseResult": {"status": "async_launched", "taskId": task, "runId": run,
+                               "workflowName": name}}]
+
+
 def test_a_workflow_run_is_one_row_over_all_its_agents(tmp_project, run_hippo, tmp_path):
     """exec is the most-used model and effort across the run's agents; usage is one row per
     model; the brief is the script and the report is the run's whole result, not the ~8k the
     notification carries."""
-    script = "export const meta = { name: 'port-parser' }; await agent('port the parser')"
     result = {"impl": {"commit": "abc1234", "tests": "412 passed"}, "note": "π ≈ 3.14"}
-    session = _session(tmp_project)
-    run = session / "subagents" / "workflows" / "wf_1234abcd-567"
-    for aid, msgs in (("a1", [_msg("w1"), _msg("w2")]), ("a2", [_msg("w3", model="h-4-5",
-                                                                        effort="low")])):
-        _write(run / f"agent-{aid}.jsonl", [{"type": "user", "message": {"content": "x"}}]
-               + [ln for m in msgs for ln in m])
-    (session / "workflows").mkdir(parents=True)
-    (session / "workflows" / "wf_1234abcd-567.json").write_text(json.dumps(
-        {"status": "completed", "result": json.dumps(result)}), encoding="utf-8")
-    wtuid = "toolu_01WorkflowWorkflowWorkflo"
+    _wf_agent(tmp_project, "a1", [_msg("w1"), _msg("w2")])
+    _wf_agent(tmp_project, "a2", [_msg("w3", model="h-4-5", effort="low")])
+    _wf_file(tmp_project, status="completed", taskId=WF_TASK, result=json.dumps(result))
     _write(tmp_project / "transcript.jsonl", [
-        _user("port it with a workflow"),
-        _assistant({"type": "tool_use", "id": wtuid, "name": "Workflow",
-                    "input": {"script": script}}),
-        {"type": "user", "timestamp": _ts(), "message": {"role": "user", "content": [{
-            "type": "tool_result", "tool_use_id": wtuid, "content": "launched"}]},
-         "toolUseResult": {"status": "async_launched", "taskId": "wxyz", "runId":
-                           "wf_1234abcd-567", "workflowName": "port-parser"}},
-        _user(_note(task="wxyz", tuid=wtuid, result="{\"impl\": … (truncated)"))])
+        _user("port it with a workflow"), *_wf_launch(),
+        _user(_note(task=WF_TASK, tuid=WF_TUID, result="{\"impl\": … (truncated)"))])
     jev_capture = tmp_path / "jev-request.json"
     _scribe(run_hippo, tmp_project,
-            _clerk(tmp_path, "w", [{"ev": "dispatch", "id": "ag-wf_1234abcd-567",
-                                    "kind": "impl"}]),
+            _clerk(tmp_path, "w", [{"ev": "dispatch", "id": WF_ID, "kind": "impl"}]),
             _mock(tmp_path, {"answers": ACCEPT, "default": DEFAULT}), jev_capture=jev_capture)
 
     [d] = _rows(tmp_project, "dispatch")
@@ -317,10 +332,162 @@ def test_a_workflow_run_is_one_row_over_all_its_agents(tmp_project, run_hippo, t
     assert sorted((u["model"], u["tout"]) for u in _rows(tmp_project, "usage")) == [
         ("claude-opus-5-5", 100), ("h-4-5", 50)]
     state = json.loads(jev_capture.read_text(encoding="utf-8"))["state"]
-    assert state["brief"] == script
+    assert state["brief"] == SCRIPT
     assert state["report"] == result, "a JSON result reaches the judge as the structure it is"
     [t] = _rows(tmp_project, "triage")
-    assert t["ref"] == "ag-wf_1234abcd-567" and "trimmed" not in t
+    assert t["ref"] == WF_ID and "trimmed" not in t
+
+
+def test_a_workflow_row_waits_for_its_end_and_reads_the_whole_run(tmp_project, run_hippo,
+                                                                  tmp_path):
+    """Measured live: a Workflow recorded at the first Stop, a second after its launch, read
+    `…/low` from the lines that existed then — a hippo:lane relay's — where the whole run read
+    `…/high`, and before any agent's reply it dumped "no model readable" for a run that was
+    only starting. The row waits for the run's end, quietly, and the clerk's kind is asked for
+    again then; a hippo:lane agent's tokens and effort are not the run's (the lane's wrapper
+    records the lane); and the task id may ride in the Workflow's `args`."""
+    tasks = {"tasks": [{"id": "feat/parser", "title": "t", "status": "active"}]}
+    (tmp_project / ".hippo" / "tasks.yaml").write_text(yaml.safe_dump(tasks))
+    lane = [_msg("l1", model="claude-sonnet-5", effort="low", out=9000)]
+    _wf_agent(tmp_project, "alane", lane, agentType="hippo:lane")
+    _write(tmp_project / "transcript.jsonl", [
+        _user("port it"), *_wf_launch(args={"task": "feat/parser"}),
+        _assistant({"type": "text", "text": "Launched."})])
+    kind = [{"ev": "dispatch", "id": WF_ID, "kind": "impl"}]
+    capture = tmp_path / "clerk.txt"
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w1", kind), capture=capture)
+    assert f"- {WF_ID} · workflow · port-parser" in _payload(capture)
+    assert not _rows(tmp_project, "dispatch") and not _dumps(tmp_project)
+
+    _wf_agent(tmp_project, "a1", [_msg("h1", effort="high"), _msg("h2", effort="high")],
+              agentType="workflow-subagent")
+    _wf_file(tmp_project, status="completed", taskId=WF_TASK, result="ported")
+    _write(tmp_project / "transcript.jsonl",
+           [_user(_note(task=WF_TASK, tuid=WF_TUID, result="ported"))], mode="a")
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w2", kind), capture=capture)
+
+    [d] = _rows(tmp_project, "dispatch")
+    assert (d["id"], d["kind"], d["exec"], d["task"]) == (
+        WF_ID, "impl", "workflow/claude-opus-5-5/high", "feat/parser")
+    assert [(u["model"], u["tout"]) for u in _rows(tmp_project, "usage")] == [
+        ("claude-opus-5-5", 100)], "the lane relay's tokens are not the run's"
+    assert not _dumps(tmp_project)
+
+
+def test_a_workflow_of_hippo_lane_agents_only_gets_no_row(tmp_project, run_hippo, tmp_path):
+    """Every lane it relays has its wrapper row: the run itself would count the work twice."""
+    _wf_agent(tmp_project, "alane", [_msg("l1", effort="low")], agentType="hippo:lane")
+    _wf_file(tmp_project, status="completed", taskId=WF_TASK, result="lane lines")
+    _write(tmp_project / "transcript.jsonl",
+           [_user("fan out lanes"), *_wf_launch(), _user(_note(task=WF_TASK, tuid=WF_TUID))])
+    capture = tmp_path / "clerk.txt"
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w"), capture=capture)
+    assert "# native runs to record" not in _payload(capture)
+    assert not _rows(tmp_project, "dispatch") and not _rows(tmp_project, "usage")
+
+
+def test_a_run_the_clerk_skips_gets_its_row_when_it_ends(tmp_project, run_hippo, tmp_path):
+    """Measured: the cheap clerk recorded a listed run only when the window's digest was about
+    it, and 10 finished runs aged out of the list unrecorded. A listed run that has ended with
+    no row after the clerk gets one from code, kind `unclassified` — and main's verdict in the
+    same output lands on it rather than in a dump."""
+    _write(tmp_project / "transcript.jsonl", _launch_window())
+    _agent(_session(tmp_project), msgs=[_msg("m1")])
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "skips"))
+    assert not _rows(tmp_project, "dispatch"), "a run still working waits for the clerk"
+
+    _write(tmp_project / "transcript.jsonl", [_user(_note()), _user("merged")], mode="a")
+    verdict = [{"ev": "outcome", "ref": DID, "result": "accepted", "note": "merged"}]
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "verdict only", verdict))
+
+    [d] = _rows(tmp_project, "dispatch")
+    assert (d["id"], d["kind"], d["exec"]) == (DID, "unclassified",
+                                               "subagent/claude-opus-5-5/xhigh")
+    assert [o["ref"] for o in _rows(tmp_project, "outcome")] == [DID]
+    assert [u["ref"] for u in _rows(tmp_project, "usage")] == [DID]
+    assert not _dumps(tmp_project)
+
+
+def test_a_stopped_workflow_ends_without_a_notification(tmp_project, run_hippo, tmp_path):
+    """Measured (mlx-vlm): a Workflow stopped by TaskStop never notifies; its run file says
+    `killed`, and one such run's 2.59M tokens reached no usage row. It ends at that file — or
+    at main's TaskStop naming its task, the file not written yet — gets its row and its
+    cumulative usage, and no triage: there is no answer to read. A run file naming an earlier
+    launch's task does not end a resumed run."""
+    jev = _mock(tmp_path, {"answers": ACCEPT, "default": DEFAULT})
+    _wf_agent(tmp_project, "a1", [_msg("k1")])
+    _wf_file(tmp_project, status="killed", taskId=WF_TASK, result=None)
+    b, b_task, b_tuid = "wf_bbbbbbbb-bbb", "wbbbb", "toolu_01BBBBBBBBBBBBBBBBBBBBBBBB"
+    _wf_agent(tmp_project, "b1", [_msg("s1", out=70)], run=b)
+    c, c_task, c_tuid = "wf_cccccccc-ccc", "wcccc", "toolu_01CCCCCCCCCCCCCCCCCCCCCCCC"
+    _wf_agent(tmp_project, "c1", [_msg("r1")], run=c)
+    _wf_file(tmp_project, run=c, status="killed", taskId="wolder", result=None)
+    stop = _assistant({"type": "tool_use", "id": "toolu_01StopStopStopStopStopSt",
+                       "name": "TaskStop", "input": {"task_id": b_task}})
+    _write(tmp_project / "transcript.jsonl", [
+        _user("run three"), *_wf_launch(), *_wf_launch(run=b, task=b_task, tuid=b_tuid),
+        *_wf_launch(run=c, task=c_task, tuid=c_tuid), stop])
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w"), jev)
+
+    assert sorted((d["id"], d["kind"]) for d in _rows(tmp_project, "dispatch")) == [
+        (WF_ID, "unclassified"), ("ag-" + b, "unclassified")]
+    assert sorted((u["ref"], u["tout"]) for u in _rows(tmp_project, "usage")) == [
+        (WF_ID, 50), ("ag-" + b, 70)]
+    assert not _rows(tmp_project, "triage")
+
+
+def test_main_s_bare_run_id_row_is_the_record(tmp_project, run_hippo, tmp_path):
+    """Main logged the Workflow at launch under the Run ID the tool printed, its scope in its
+    own words (measured, mlx-vlm: 15 of 17 runs had such a row beside the scribe's `ag-` twin,
+    main's verdict on one and the cost on the other). That row is the run's record: nothing is
+    listed, the cost lands on it, and a verdict main typed under the `ag-` id the skills teach
+    lands on it too, so PRIORS joins that verdict to that cost."""
+    assert run_hippo(["log", "dispatch", "--id", WF, "--kind", "impl", "--exec",
+                      "workflow/opus/xhigh", "--scope", "parser port"],
+                     cwd=tmp_project).returncode == 0
+    _wf_agent(tmp_project, "a1", [_msg("w1")])
+    _wf_file(tmp_project, status="completed", taskId=WF_TASK, result="ported")
+    _write(tmp_project / "transcript.jsonl",
+           [_user("port it"), *_wf_launch(), _user(_note(task=WF_TASK, tuid=WF_TUID)),
+            _assistant({"type": "text", "text": f"{WF_ID} is accepted; merged."})])
+    capture = tmp_path / "clerk.txt"
+    verdict = {"ev": "outcome", "ref": WF_ID, "result": "accepted", "note": "merged"}
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w", [verdict]), capture=capture)
+
+    assert "# native runs to record" not in _payload(capture)
+    assert [d["id"] for d in _rows(tmp_project, "dispatch")] == [WF]
+    assert [u["ref"] for u in _rows(tmp_project, "usage")] == [WF]
+    assert [(o["ref"], o["src"]) for o in _rows(tmp_project, "outcome")] == [(WF, "scribe")]
+    assert not _dumps(tmp_project)
+    [cell] = hippo_cli.prior_cells(read_ledger(tmp_project)).values()
+    assert cell["judged"] == 1 and cell["tokens"] == 1160
+
+
+def test_the_roster_names_open_runs_by_what_a_digest_shows(tmp_project, run_hippo, tmp_path):
+    """Measured: 0 of 21 `ag-wf_` rows ever got a verdict, while main merged the runs' work by
+    branch names. Every unjudged row of this session's recent runs reaches the clerk's roster —
+    past the last 12 dispatches — with its task and a Workflow's worktrees, and an outcome
+    naming it joins its cost."""
+    _wf_agent(tmp_project, "a1", [_msg("w1")], agentType="workflow-subagent",
+              worktreePath=str(tmp_project / ".claude" / "worktrees" / f"{WF}-1"))
+    _wf_file(tmp_project, status="completed", taskId=WF_TASK, result="ported")
+    _write(tmp_project / "transcript.jsonl",
+           [_user("port it"), *_wf_launch(), _user(_note(task=WF_TASK, tuid=WF_TUID))])
+    _scribe(run_hippo, tmp_project,
+            _clerk(tmp_path, "w1", [{"ev": "dispatch", "id": WF_ID, "kind": "impl"}]))
+    for i in range(hippo_cli.DISPATCH_ROSTER_N):
+        assert run_hippo(["log", "dispatch", "--id", f"d{i}", "--kind", "impl", "--exec",
+                          "codex/gpt-6-sol/high", "--scope", "x"], cwd=tmp_project).returncode == 0
+
+    _write(tmp_project / "transcript.jsonl", [_user("merged the parser branch")], mode="a")
+    capture = tmp_path / "clerk.txt"
+    verdict = [{"ev": "outcome", "ref": WF_ID, "result": "accepted", "note": "merged"}]
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w2", verdict), capture=capture)
+    assert (f"- {WF_ID} (impl): port-parser · worktrees {WF}-1  [no outcome yet]"
+            in _payload(capture))
+    [cell] = [c for (k, ex), c in hippo_cli.prior_cells(read_ledger(tmp_project)).items()
+              if ex.startswith("workflow/")]
+    assert cell["judged"] == 1 and cell["tokens"] == 1160
 
 
 def test_a_workflow_result_over_budget_is_trimmed_by_its_structure(tmp_project, monkeypatch,
@@ -334,7 +501,7 @@ def test_a_workflow_result_over_budget_is_trimmed_by_its_structure(tmp_project, 
     result = {"designs": findings, "verdict": "Recommend the minimal design. " + "why " * 9000}
     run = {"executor": "workflow", "answer": [hippo_cli.TaskNote(9, "w", None, "completed",
                                                                   "cut", False, None)],
-           "brief": "script", "scope": "big", "meta": {}, "stats": {"edits": []},
+           "brief": "script", "scope": "big", "agents": [], "stats": {"edits": {}},
            "summary": tmp_project / "wf.json"}
     run["summary"].write_text(json.dumps({"result": json.dumps(result)}), encoding="utf-8")
     jev_capture = tmp_path / "jev-request.json"
@@ -625,11 +792,22 @@ def test_main_s_own_log_dispatch_is_the_record(tmp_project, run_hippo, tmp_path)
     assert [u["ref"] for u in _rows(tmp_project, "usage")] == ["d1"]
 
 
-def test_an_unknown_native_ref_says_no_call_is_needed(tmp_project, run_hippo):
-    proc = run_hippo(["log", "outcome", "--ref", DID, "--result", "accepted"], cwd=tmp_project)
-    assert proc.returncode != 0
-    assert "lands in the ledger at the end of the turn" in proc.stderr
-    assert "no call needed" in proc.stderr
+def test_a_native_ref_not_in_the_ledger_says_what_to_do(tmp_project, run_hippo):
+    """A run id with no row yet needs no call. A ref built from a Workflow's Task ID (printed
+    first at launch) is no run id, and must not be told "no call needed" — that drops the
+    verdict. A run main logged itself under its bare id points at that row."""
+    def refused(ref):
+        proc = run_hippo(["log", "outcome", "--ref", ref, "--result", "accepted"],
+                         cwd=tmp_project)
+        assert proc.returncode != 0
+        return proc.stderr
+
+    assert "no call needed" in refused(DID)
+    task_id = refused("ag-wc5gduida")
+    assert "is not a run id" in task_id and "no call needed" not in task_id
+    assert run_hippo(["log", "dispatch", "--id", "wf_1234abcd-567", "--kind", "impl", "--exec",
+                      "workflow/opus/high", "--scope", "port it"], cwd=tmp_project).returncode == 0
+    assert "--ref wf_1234abcd-567" in refused("ag-wf_1234abcd-567")
 
 
 def test_a_bug_on_the_native_path_never_costs_the_clerk(tmp_project, tmp_path, monkeypatch):
@@ -746,6 +924,39 @@ def test_an_isolated_agent_s_changes_are_read_against_an_honest_base(tmp_path):
 
     git(repo, "merge", "-q", "--ff-only", "agent")
     assert hippo_cli.worktree_changes(repo / ".hippo", wt) is None
+
+
+def test_a_workflow_s_changes_are_read_agent_by_agent(tmp_path):
+    """Measured on wf_cf850115-50b: 5 of the 12 paths its agents edited were scratch files, and
+    its fix agent's commit in its own worktree — no edit-tool call — was in no list. An
+    isolated agent is read by git in its worktree (its meta.json names it); an agent with none
+    adds the project files it edited, never a scratch file; a hippo:lane agent adds nothing."""
+    def git(d, *a):
+        subprocess.run(["git", "-C", str(d), *a], check=True, capture_output=True)
+
+    repo = tmp_path / "repo"
+    (repo / ".hippo").mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "dev")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty",
+        "-m", "base")
+    wt = repo / ".claude" / "worktrees" / f"{WF}-1"
+    git(repo, "worktree", "add", "-q", "-b", f"worktree-{WF}-1", str(wt))
+    (wt / "shell_made.py").write_text("x = 1\n")
+    runs = repo / "t" / "subagents" / "workflows" / WF
+    agents = {"a1": ([_msg("i1")], {"worktreePath": str(wt)}),
+              "a2": ([_msg("v1", edit=str(repo / "src" / "x.py")),
+                      _msg("v2", edit=str(tmp_path / "scratch" / "probe.py"))], {}),
+              "a3": ([_msg("l1", edit=str(repo / "lane.py"))], {"agentType": "hippo:lane"})}
+    for aid, (msgs, meta) in agents.items():
+        _write(runs / f"agent-{aid}.jsonl", [{"type": "user", "message": {"content": "x"}}]
+               + [ln for m in msgs for ln in m])
+        (runs / f"agent-{aid}.meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    path = _write(repo / "t.jsonl", _wf_launch())
+
+    changes = hippo_cli.native_changes(repo / ".hippo", hippo_cli.native_index(path, 0, 2)[WF_ID])
+    facts, listed = changes.split(f"\n\n{hippo_cli.NATIVE_RUN_EDITS_HEAD}:\n")
+    assert facts.startswith(f"git in the agent's worktree {wt}") and "?? shell_made.py" in facts
+    assert listed.splitlines() == [str(repo / "src" / "x.py")]
 
 
 def test_the_model_is_the_price_sheet_key():

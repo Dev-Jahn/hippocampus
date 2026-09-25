@@ -1398,11 +1398,22 @@ def check_ref(hp, e):
     if ref in known:
         return None
     if isinstance(ref, str) and ref.startswith(NATIVE_PREFIX):
+        bare = ref[len(NATIVE_PREFIX):]
+        if bare in known:  # main logged the run itself at launch: that row is its record
+            return (f"ev={e['ev']}: ref={ref!r} is not in the ledger — this run's record is the "
+                    f"row you wrote at launch: --ref {bare}")
+        if not ref.startswith(NATIVE_ID_PREFIXES):
+            # A Workflow launch prints its Task ID first: a ref built from it names no run, and
+            # "no call needed" would drop the verdict main is typing.
+            return (f"ev={e['ev']}: ref={ref!r} is not a run id — a subagent's is "
+                    "ag-<agentId> (ag-a…), a Workflow's ag-<runId> (ag-wf_…: the launch's Run "
+                    "ID, not its Task ID)")
         # main saw the id at launch and reached for the CLI: the row lands when the turn ends
         # (§3.5.3c), and so does the verdict main just typed — the clerk reads it off the turn.
         return (f"ev={e['ev']}: ref={ref!r} is not recorded yet — a native run (Agent, fork, "
-                "Workflow) lands in the ledger at the end of the turn, and hippo records your "
-                "verdict from the conversation then: no call needed")
+                "Workflow) lands in the ledger at the end of a turn — a Workflow's at the end "
+                "of the turn it finishes in — and hippo records your verdict from the "
+                "conversation then: no call needed")
     return (
         f"ev={e['ev']}: ref={ref!r} is not a known {target} id"
         f"{REF_HINT.get(e['ev'], '')}. Find it with `hippo log tail --ev {target}`"
@@ -4497,7 +4508,7 @@ def directive_roster(hp):
 DISPATCH_ROSTER_N = 12
 
 
-def dispatch_roster(hp):
+def dispatch_roster(hp, native=None):
     """The recent dispatches handed to the scribe with the digest.
 
     The clerk is told not to record a launch the wrapper already recorded, and until now its only
@@ -4508,13 +4519,34 @@ def dispatch_roster(hp):
 
     Same remedy as directive_roster: hand over the short list instead of asking it to go looking.
     It doubles as the set of ids an outcome may legally ref, which the digest also could not
-    guarantee."""
+    guarantee.
+
+    Beside the last DISPATCH_ROSTER_N, every row of this session's native runs (`native`)
+    launched within NATIVE_LIST_H that has no verdict yet, each with its task and a Workflow's
+    worktrees — what a digest shows of a run when main judges it. Measured (2026-09-25): 0 of
+    21 `ag-wf_` rows ever got an outcome, so no Workflow's cost reached PRIORS; main merged
+    the work of all three finished runs in hippo, by branch names (`wip/jev-staleness`), and
+    the 17 rows that landed in one mlx-vlm window left 5 of them off the last 12."""
     rows = read_ledger(hp)
     judged = judged_refs(rows)
     claims = executor_claims(rows)
-    disp = [e for e in rows if e.get("ev") == "dispatch"][-DISPATCH_ROSTER_N:]
+    disp = [e for e in rows if e.get("ev") == "dispatch"]
+    cut = datetime.now(timezone.utc) - timedelta(hours=NATIVE_LIST_H)
+    runs = {r["ref"]: r for r in (native or {}).get("runs", {}).values()
+            if r["ref"] and r["ref"] not in judged and (r["t"] is None or r["t"] >= cut)}
+    recent = {id(e) for e in disp[-DISPATCH_ROSTER_N:]}
+    disp = [e for e in disp if id(e) in recent or e.get("id") in runs]
     if not disp:
         return "(none yet)"
+
+    def about(e):
+        run = runs.get(e.get("id"))
+        if run is None:
+            return ""
+        trees = [Path(m["worktreePath"]).name for _, m in run["agents"]
+                 if isinstance(m.get("worktreePath"), str)]
+        return ((f" · task {e['task']}" if e.get("task") else "")
+                + (f" · worktrees {', '.join(trees)}" if trees else ""))
 
     def marker(did):
         # A claimed dispatch is still awaiting the verdict — and naming the claim keeps the
@@ -4527,7 +4559,7 @@ def dispatch_roster(hp):
 
     return "\n".join(
         f"- {e.get('id')} ({e.get('kind', '?')}): {one_line(e.get('scope', ''), 80)}"
-        + marker(e.get("id"))
+        + about(e) + marker(e.get("id"))
         for e in disp
     )
 
@@ -4543,17 +4575,29 @@ def dispatch_roster(hp):
 # anyway. Nothing here asks the judge except the triage, so it all works without a key.
 
 NATIVE_PREFIX = "ag-"
+# A run id main can see: `ag-` + an agentId (`a` + hex) or + a Workflow's runId (`wf_…`). A
+# Workflow launch prints its Task ID (`w…`) first; a ref built from that names no run.
+NATIVE_ID_PREFIXES = (NATIVE_PREFIX + "a", NATIVE_PREFIX + "wf_")
 NATIVE_TOOLS = ("Agent", "Task")  # Task is the Agent tool's older name
 LAUNCH_TOOLS = (*NATIVE_TOOLS, "Workflow")
+SCAN_TOOLS = (*LAUNCH_TOOLS, "TaskStop")  # main stopping a run: its end when none notifies
 # Track B's plugin agent only babysits a codex lane, which the wrapper already records.
 NATIVE_SKIP = ("hippo:lane",)
 NATIVE_LIST_H = 24  # a run older than this is no longer listed for the clerk
 NATIVE_BRIEF_CHARS = 300
+# The kind code writes for a run that ended with no row after the clerk had it listed (§3.5.3c):
+# code has no honest reading of a brief, and a guessed tag would dilute a real column.
+NATIVE_UNREAD_KIND = "unclassified"
+# A Workflow's run file says how a launch that never notifies ended (§3.5.3c).
+NATIVE_ABORTS = ("killed", "failed")
 # Judge calls per window: it bounds the detached scribe's extra work (~1s a call, §3.9).
 NATIVE_TRIAGE_MAX = 8
 NATIVE_EDIT_TOOLS = ("Edit", "Write", "NotebookEdit", "MultiEdit")
-NATIVE_EDITS_HEAD = ("files this agent edited with its edit tools; shell edits of files it "
-                     "never read are not visible")
+NATIVE_EDITS_HEAD = ("files this agent edited in the project with its edit tools; shell edits "
+                     "of files it never read are not visible")
+NATIVE_RUN_EDITS_HEAD = ("files the run's agents edited in the project with their edit tools — "
+                         "an agent whose worktree git read is shown by that instead; shell edits "
+                         "of files an agent never read are not visible")
 # A notification's header opens with these, in this order. <tool-use-id> names the call the
 # agent is answering — its launch or a SendMessage to it, on Claude Code 2.1.237 and 2.1.280
 # alike — and is missing when the agent resumed on its own background work, or (once, on
@@ -4636,8 +4680,9 @@ def task_notes(text, line, t=None):
 
 def native_scan(path, end=None, main=True, marks=()):
     """One streaming pass over a Claude Code transcript — main's, or an agent's for the runs
-    it launched itself → (launches, notes, times), `times` holding for each line number in
-    `marks` the last line's own timestamp at or before it (a quarter of the lines carry none).
+    it launched itself → (launches, notes, times, stops), `times` holding for each line number
+    in `marks` the last line's own timestamp at or before it (a quarter of the lines carry
+    none), `stops` the line of the first TaskStop call naming each task id.
 
     `launches` maps an agentId (Agent/Task) or a runId (Workflow) to the call and its launch
     result, for every call the host confirmed: measured on Claude Code 2.1.281, a background
@@ -4650,11 +4695,11 @@ def native_scan(path, end=None, main=True, marks=()):
     background tasks notify in the same shape under ids no launch has. A line that does not
     parse is skipped, never raised: the prefilter is a substring test, so a quoted tag costs
     one json.loads."""
-    launches, notes, pending, times, stamped = {}, [], {}, {}, None
+    launches, notes, pending, times, stops, stamped = {}, [], {}, {}, {}, None
     try:
         f = path.open("r", encoding="utf-8", errors="replace")
     except OSError:
-        return launches, notes, times
+        return launches, notes, times, stops
     with f:
         for i, raw in enumerate(f, 1):
             if end is not None and i > end:
@@ -4665,7 +4710,7 @@ def native_scan(path, end=None, main=True, marks=()):
                 stamped = raw
             if i in marks:
                 times[i] = _line_time(stamped)
-            call = '"tool_use"' in raw and any(f'"{t}"' in raw for t in LAUNCH_TOOLS)
+            call = '"tool_use"' in raw and any(f'"{t}"' in raw for t in SCAN_TOOLS)
             result = bool(pending) and any(t in raw for t in pending)
             note = "<task-notification>" in raw
             if not (call or result or note):
@@ -4682,9 +4727,12 @@ def native_scan(path, end=None, main=True, marks=()):
             content = msg.get("content") if isinstance(msg, dict) else None
             if call and kind == "assistant" and isinstance(content, list):
                 for b in content:
-                    if (isinstance(b, dict) and b.get("type") == "tool_use"
-                            and b.get("name") in LAUNCH_TOOLS and isinstance(b.get("id"), str)
+                    if not (isinstance(b, dict) and b.get("type") == "tool_use"
                             and isinstance(b.get("input"), dict)):
+                        continue
+                    if b.get("name") == "TaskStop" and isinstance(b["input"].get("task_id"), str):
+                        stops.setdefault(b["input"]["task_id"], i)
+                    elif b.get("name") in LAUNCH_TOOLS and isinstance(b.get("id"), str):
                         pending[b["id"]] = b
             if result and kind == "user" and isinstance(content, list):
                 tur = rec.get("toolUseResult")
@@ -4707,7 +4755,7 @@ def native_scan(path, end=None, main=True, marks=()):
             if note:
                 for text in _note_texts(rec):
                     notes += task_notes(text, i, _iso_time(rec.get("timestamp")))
-    return launches, notes, times
+    return launches, notes, times, stops
 
 
 def _note_texts(rec):
@@ -4726,48 +4774,64 @@ def _note_texts(rec):
 def native_run(launch, key, session, parent=None):
     """One run as the scribe needs it, from its launch. An agent's executor comes from its
     meta.json (written at launch: `isFork`, `agentType`), a Workflow run is `workflow`; the
-    brief is the call's prompt, or a Workflow's script."""
+    brief is the call's prompt, or a Workflow's script, with a Workflow's `args` — the value its
+    script reads — beside it. `note_id` is the id its notifications and a TaskStop name: the
+    agentId, or the launch's taskId. `agents` are the transcripts, each with its meta.json,
+    whose lines are the run's work: an agent's own, or every one of a Workflow's but a
+    hippo:lane's — that agent only babysits a codex lane the wrapper records, as it does beside
+    main (measured live: a relay's 17,304 of a run's 41,740 tokens, and its `low` effort tied
+    the run's `high` for exec). A Workflow made of nothing else is skipped like one, once it
+    has ended (`native_end`): while it runs, its next agent may be another kind."""
     inp, tur, sub = launch["input"], launch["result"], session / "subagents"
     run = {"id": NATIVE_PREFIX + key, "key": key, "line": launch["line"], "t": launch["t"],
            "tuid": launch["tuid"], "parent": parent["id"] if parent else None, "notes": [],
-           "ref": None, "meta": {}, "resolved": None, "skip": False}
+           "ref": None, "meta": {}, "resolved": None, "skip": False, "note_id": key,
+           "args": None}
     if launch["tool"] == "Workflow":
-        brief, sp = inp.get("script"), tur.get("scriptPath")
+        brief, sp, args = inp.get("script"), tur.get("scriptPath"), inp.get("args")
         if not isinstance(brief, str) and isinstance(sp, str) and sp:
             brief = _read_text(Path(sp))
+        files = sub / "workflows" / key
+        every = [(p, _read_json(p.with_name(f"{p.stem}.meta.json")))
+                 for p in sorted(files.glob("agent-*.jsonl"))]
+        agents = [(p, m) for p, m in every if m.get("agentType") not in NATIVE_SKIP]
         return {**run, "executor": "workflow", "scope": one_line(tur.get("workflowName")),
-                "brief": brief, "files": sub / "workflows" / key,
+                "brief": brief, "files": files, "agents": agents,
+                "relays_only": bool(every) and not agents, "note_id": tur.get("taskId"),
+                "args": args if args is None or isinstance(args, str)
+                else json.dumps(args, ensure_ascii=False),
                 "summary": session / "workflows" / f"{key}.json"}
     meta = _read_json(sub / f"agent-{key}.meta.json")
     atype = meta.get("agentType") or inp.get("subagent_type")
     brief = inp.get("prompt") if isinstance(inp.get("prompt"), str) else tur.get("prompt")
+    files = sub / f"agent-{key}.jsonl"
     return {**run, "executor": "fork" if meta.get("isFork") is True or atype == "fork"
             else "subagent", "scope": one_line(inp.get("description") or tur.get("description")),
             "brief": brief if isinstance(brief, str) else None, "meta": meta,
             "resolved": tur.get("resolvedModel"), "skip": atype in NATIVE_SKIP,
-            "files": sub / f"agent-{key}.jsonl"}
+            "files": files, "agents": [(files, meta)]}
 
 
 def native_index(transcript, since, end):
     """DESIGN §3.5.3c: every native run main's transcript launched up to `end` → {id: run},
     each flagged with what the window (since, end] did to it — `seen` (launched or notified
-    in it), `done_now` (a notification in it) and `first_now` (its answer to its brief became
-    complete in it, `native_answer`; `answer` holds that answer's notifications). The whole
-    transcript is read, because a completion in this window may belong to a launch long before
-    the cursor.
+    in it), `ended` and `done_now` (it has ended, and did in this window: `native_end`) and
+    `first_now` (its answer to its brief became complete in it, `native_answer`; `answer`
+    holds that answer's notifications). The whole transcript is read, because a completion in
+    this window may belong to a launch long before the cursor.
 
     Nested runs — an agent's own Agent calls — live in that agent's transcript, and its
     subagents/ entry's meta.json names the parent (`parentAgentId`); they are indexed through
     their parent, carry `parent = ag-<parentAgentId>`, and take the parent's window: a parent
     notifies as done only once no child of its own is still running. A Workflow's own agents
     are not runs — the run is one."""
-    launches, notes, times = native_scan(transcript, end, marks=(since, end))
+    launches, notes, times, stops = native_scan(transcript, end, marks=(since, end))
     session = transcript.with_suffix("")
     runs, by_note = {}, {}
     for key, launch in launches.items():
         run = native_run(launch, key, session)
         runs[run["id"]] = run
-        by_note[launch["result"].get("taskId") if run["executor"] == "workflow" else key] = run
+        by_note[run["note_id"]] = run
         by_note[launch["tuid"]] = run
     for n in notes:
         run = by_note.get(n.task) or by_note.get(n.tuid)
@@ -4775,7 +4839,7 @@ def native_index(transcript, since, end):
             run["notes"].append(n)
     for run in runs.values():
         run["seen"] = run["line"] > since or any(n.line > since for n in run["notes"])
-        run["done_now"] = any(n.line > since for n in run["notes"])
+        native_end(run, stops, since, times.get(since))
         run["answer"] = native_answer(run, end, times.get(end))
         run["first_now"] = (run["answer"] is not None
                             and native_answer(run, since, times.get(since)) is None)
@@ -4785,7 +4849,7 @@ def native_index(transcript, since, end):
     queue = [r for r in runs.values() if r["key"] in parents]
     while queue:
         parent = queue.pop()
-        kids, kid_notes, _ = native_scan(parent["files"], main=False)
+        kids, kid_notes, _, kid_stops = native_scan(parent["files"], main=False)
         for key, launch in kids.items():
             if launch["tool"] == "Workflow" or NATIVE_PREFIX + key in runs:
                 continue
@@ -4793,11 +4857,33 @@ def native_index(transcript, since, end):
             run["notes"] = [n for n in kid_notes if n.task == key or n.tuid == launch["tuid"]]
             run["answer"] = native_answer(run, None, times.get(end))
             run.update(seen=parent["seen"], done_now=parent["done_now"],
+                       ended=bool(run["notes"]) or key in kid_stops,
                        first_now=parent["first_now"] and run["answer"] is not None)
             runs[run["id"]] = run
             if key in parents:
                 queue.append(run)
     return runs
+
+
+def native_end(run, stops, since, at):
+    """Whether the run has ended, and whether it did in the window after line `since` (time
+    `at`) → sets `ended` and `done_now`. A run ends at a notification — or, where none comes,
+    at main's TaskStop naming it (`stops`), and a Workflow at its run file saying `killed` or
+    `failed`: the host writes <session>/workflows/<runId>.json at a launch's end with its
+    taskId, status and end time, and a Workflow that was stopped or failed sends no
+    notification (measured, mlx-vlm: 4 runs stopped by TaskStop, each `killed`, none notified;
+    one had spent 2.59M tokens that no usage row carried). A run file naming another task is an
+    earlier launch's: a resume keeps the runId. Sets `skip` too on a Workflow that ended with
+    hippo:lane agents only (`native_run`)."""
+    stop, aborted, until = stops.get(run["note_id"]), False, None
+    if run["executor"] == "workflow" and run["note_id"] and not run["notes"]:
+        f = _read_json(run["summary"])
+        if f.get("status") in NATIVE_ABORTS and f.get("taskId") == run["note_id"]:
+            aborted, until = True, _iso_time(f.get("timestamp"))
+    run["ended"] = bool(run["notes"]) or stop is not None or aborted
+    run["skip"] = run["skip"] or (run["ended"] and run.get("relays_only", False))
+    run["done_now"] = (any(n.line > since for n in run["notes"]) or (stop or 0) > since
+                       or (aborted and (at is None or until is None or until > at)))
 
 
 def native_answer(run, upto, at):
@@ -4998,19 +5084,26 @@ def _agent_answered(path):
 
 def native_refs(rows, runs):
     """Point each run at the dispatch that records it: its own `ag-` row, or one main wrote
-    itself (src=cli) for the same run — within the same 24h, with a scope equal to the run's
-    description, case and spacing aside. That match is exact on purpose, and it is the limit:
-    a scope main paraphrased is not recognized, so the run is listed and recorded a second time
-    — one duplicate row — where a similarity guess would cost a real run its record (§3.5.6b
+    itself (src=cli) for the same run — under the run's bare id, the runId or agentId main sees
+    at launch (measured, mlx-vlm: 15 of 17 Workflow runs had a `wf_…` row of main's beside the
+    scribe's `ag-wf_…` twin, main's verdicts on one and the cost on the other, so neither
+    reached PRIORS), or within the same 24h with a scope equal to the run's description, case
+    and spacing aside. The scope match is exact on purpose, and it is the limit: a scope main
+    paraphrased is not recognized, so the run is listed and recorded a second time — one
+    duplicate row — where a similarity guess would cost a real run its record (§3.5.6b
     measured those). Main does paraphrase: all 4 of its rows for Agent runs in this repo's
     ledger did, so in practice this catches a row main wrote from the launch's own words."""
     ids = {e.get("id") for e in rows if e.get("ev") == "dispatch"}
     cli = [e for e in rows if e.get("ev") == "dispatch" and e.get("src") == "cli"
            and not str(e.get("id", "")).startswith(NATIVE_PREFIX)]
-    taken = {r["ref"] for r in runs.values() if r["ref"]}
+    mine = {e.get("id") for e in cli}
     for run in runs.values():
         if run["id"] in ids:
             run["ref"] = run["id"]
+        elif run["key"] in mine:
+            run["ref"] = run["key"]
+    taken = {r["ref"] for r in runs.values() if r["ref"]}
+    for run in runs.values():
         if run["ref"]:
             continue
         key = _scope_key(run["scope"])
@@ -5030,9 +5123,10 @@ def native_open(hp, transcript, since, end):
     the transcript launched nothing (a Codex rollout never does: its spawn_agent children are
     the clerk's, from the digest, as before). `listed` is what the clerk is asked for: each run
     with no row yet, launched within NATIVE_LIST_H — a run the clerk skips stays listed next
-    window. `window` is the top-level runs this window touched, which is when a fork, subagent
-    or workflow dispatch under any other id can only be a restatement of one. `recorded`
-    collects the runs this clerk output gives a row (`native_record`)."""
+    window, until it has ended (`native_settle`). `window` is the top-level runs this window
+    touched, which is when a fork, subagent or workflow dispatch under any other id can only be
+    a restatement of one. `recorded` collects the runs this clerk output gives a row
+    (`native_record`)."""
     runs = native_index(transcript, since, end)
     if not runs:
         return None
@@ -5067,8 +5161,8 @@ def _count(v):
 
 def native_stats(run):
     """One pass over the run's own transcript(s) — an agent's, or every agent's of a Workflow
-    run — cached on the run → {usage: {model: Counter(tin, tcached, tout)}, msgs:
-    Counter(model), effort: Counter, edits: [path]}.
+    run but a hippo:lane's (`native_run`) — cached on the run → {usage: {model: Counter(tin,
+    tcached, tout)}, msgs: Counter(model), effort: Counter, edits: {transcript: [path]}}.
 
     Measured on this machine (Claude Code 2.1.281): one API message spans several assistant
     lines whose output_tokens grow as it streams, so a message counts once, at its last line.
@@ -5081,10 +5175,8 @@ def native_stats(run):
     if "stats" in run:
         return run["stats"]
     usage, msgs, effort, edits = {}, collections.Counter(), collections.Counter(), {}
-    files = (sorted(run["files"].glob("agent-*.jsonl")) if run["executor"] == "workflow"
-             else [run["files"]])
-    for path in files:
-        last, started = {}, False
+    for path, _ in run["agents"]:
+        last, started, mine = {}, False, edits.setdefault(path, {})
         try:
             f = path.open("r", encoding="utf-8", errors="replace")
         except OSError:
@@ -5103,7 +5195,7 @@ def native_stats(run):
                     att = rec.get("attachment")
                     if (isinstance(att, dict) and att.get("type") == "edited_text_file"
                             and isinstance(att.get("filename"), str)):
-                        edits[att["filename"]] = None
+                        mine[att["filename"]] = None
                 msg = rec.get("message")
                 if kind != "assistant" or not isinstance(msg, dict):
                     continue
@@ -5116,7 +5208,7 @@ def native_stats(run):
                             and b.get("name") in NATIVE_EDIT_TOOLS):
                         p = inp.get("file_path") or inp.get("notebook_path")
                         if isinstance(p, str):
-                            edits[p] = None
+                            mine[p] = None
         for model, u, eff in last.values():
             model = native_model(model)
             msgs[model] += 1
@@ -5129,16 +5221,23 @@ def native_stats(run):
                              + _count(u.get("cache_creation_input_tokens")))
                 c["tcached"] += read
                 c["tout"] += _count(u.get("output_tokens"))
-    run["stats"] = {"usage": usage, "msgs": msgs, "effort": effort, "edits": list(edits)}
+    run["stats"] = {"usage": usage, "msgs": msgs, "effort": effort,
+                    "edits": {path: list(mine) for path, mine in edits.items()}}
     return run["stats"]
 
 
 def native_exec(run):
     """exec for a run, from what it ran on: its most-used model (a Workflow run's across its
-    agents), else the model the host resolved at launch — an observation too — and its effort,
-    `inherit` when no line records one. None when no model is readable yet: the row waits."""
+    agents), else the model the host resolved for it — an Agent launch's `resolvedModel`, a
+    Workflow run file's `defaultModel`, observations too — and its effort, `inherit` when no
+    line records one. None when no model is readable yet: the row waits."""
     stats = native_stats(run)
-    model = stats["msgs"].most_common(1)[0][0] if stats["msgs"] else run["resolved"]
+    if stats["msgs"]:
+        model = stats["msgs"].most_common(1)[0][0]
+    elif run["executor"] == "workflow":
+        model = _read_json(run["summary"]).get("defaultModel")
+    else:
+        model = run["resolved"]
     model = native_model(model) if isinstance(model, str) else ""
     if not re.fullmatch(r"[^/\s]+", model):
         return None
@@ -5146,25 +5245,32 @@ def native_exec(run):
     return f"{run['executor']}/{model}/{effort}"
 
 
-def native_task(hp, brief):
-    """The one task id in tasks.yaml the brief names as a whole token; zero or several → None."""
+def native_task(hp, run):
+    """The one task id in tasks.yaml the run's brief — with a Workflow's `args` — names as a
+    whole token; zero or several → None."""
+    text = "\n".join(t for t in (run["brief"], run["args"]) if isinstance(t, str))
     ids = {t.get("id") for t in tasks_load(hp)["tasks"] if isinstance(t.get("id"), str)}
-    hits = [tid for tid in ids if re.search(rf"(?<![\w/-]){re.escape(tid)}(?![\w/-])",
-                                            brief or "")]
+    hits = [tid for tid in ids if re.search(rf"(?<![\w/-]){re.escape(tid)}(?![\w/-])", text)]
     return hits[0] if len(hits) == 1 else None
 
 
 def native_record(hp, native, run, kind):
-    """The dispatch row for a listed run, the clerk's kind on everything code observed → None
-    when it landed, else the reason it did not. The run stays listed for the next window."""
-    if kind not in plan_kinds():
-        return (f"ev=dispatch: kind {kind!r} for {run['id']} is not one of "
-                f"{' '.join(sorted(plan_kinds()))} — the run stays listed")
+    """The dispatch row for a listed run, `kind` on everything code observed → None when it
+    landed or waits, else the reason it did not; the run stays listed until it has a row.
+
+    A Workflow's row waits for the run's end (`native_end`), quietly — nothing went wrong. Its
+    exec is its agents' majority model and effort, and a row written at the first Stop read
+    whatever lines existed then: measured live, `…/low` one second after the launch where the
+    whole run read `…/high`, and before any agent's first reply no model at all, which dumped
+    a failure for a run that was simply starting. Until then the run stays listed, so the
+    clerk's kind is asked for again in the window where it ends."""
+    if run["executor"] == "workflow" and not run["ended"]:
+        return None
     exec_ = native_exec(run)
     if exec_ is None:
         return f"ev=dispatch: no model readable for {run['id']} yet — the run stays listed"
     e = {"ev": "dispatch", "id": run["id"], "kind": kind, "exec": exec_, "scope": run["scope"]}
-    task = native_task(hp, run["brief"])
+    task = native_task(hp, run)
     if task:
         e["task"] = task
     if run["parent"]:
@@ -5196,18 +5302,33 @@ def native_take(hp, e, native, alias):
     typed must not be lost to the clerk's choice of id.
 
     An outcome naming a listed run whose dispatch this output did not record — refused, or
-    skipped — is dumped with that reason: the verdict was in this window's digest, and the next
-    clerk will not see it, so the dump is its only record."""
+    skipped — gets the run's row from code first when the run has ended, under the kind
+    NATIVE_UNREAD_KIND (`native_settle` would write that row at the end of this window anyway),
+    and then lands on it. A run that has not ended keeps no verdict: the outcome is dumped with
+    that reason, since the verdict was in this window's digest, the next clerk will not see it,
+    and the dump is its only record."""
+    def record(run, kind):
+        if kind not in plan_kinds():
+            return (f"ev=dispatch: kind {kind!r} for {run['id']} is not one of "
+                    f"{' '.join(sorted(plan_kinds()))} — the run stays listed")
+        return native_record(hp, native, run, kind)
+
     if (native and isinstance(e, dict) and e.get("ev") == "outcome"
             and isinstance(e.get("ref"), str) and e["ref"] in native["listed"]):
-        return True, (f"ev=outcome: {e['ref']} has no row — its dispatch was refused or "
-                      "skipped in this output, so this dump is the only record of the verdict")
+        run = native["listed"][e["ref"]]
+        err = native_record(hp, native, run, NATIVE_UNREAD_KIND) if run["ended"] else (
+            "a Workflow's row waits for its end" if run["executor"] == "workflow"
+            else "its dispatch was refused or skipped in this output")
+        if run["ref"]:
+            return False, None
+        return True, (f"ev=outcome: {e['ref']} has no row — {err}, so this dump is the only "
+                      "record of the verdict")
     if (not native or not isinstance(e, dict) or e.get("ev") != "dispatch"
             or not isinstance(e.get("id"), str)):
         return False, None
     did = e["id"]
     if did in native["listed"]:
-        return True, native_record(hp, native, native["listed"][did], e.get("kind"))
+        return True, record(native["listed"][did], e.get("kind"))
     if did.startswith(NATIVE_PREFIX):
         return True, (f"ev=dispatch: {did} is not under `# native runs to record` — "
                       "recorded already, or no run hippo found")
@@ -5223,7 +5344,7 @@ def native_take(hp, e, native, alias):
     reason = ("ev=dispatch: hippo lists every Agent, fork and Workflow run under "
               "`# native runs to record` — record it there, under its listed id")
     if run is not None and not run["ref"] and run["id"] in native["listed"]:
-        err = native_record(hp, native, run, e.get("kind"))
+        err = record(run, e.get("kind"))
         reason += f"; {run['id']} not recorded from it either: {err}" if err else ""
     if run is not None and run["ref"]:
         alias[did] = run["ref"]
@@ -5285,12 +5406,27 @@ def worktree_changes(hp, wt):
 
 
 def native_changes(hp, run):
-    wt = run["meta"].get("worktreePath")
-    facts = worktree_changes(hp, Path(wt)) if isinstance(wt, str) and wt else None
-    if facts is not None:
-        return facts
-    edits = native_stats(run)["edits"]
-    return f"{NATIVE_EDITS_HEAD}:\n" + ("\n".join(edits[:TRIAGE_GIT_LINES]) or "(none)")
+    """What the run changed, for the judge, agent by agent — an Agent run's one, each of a
+    Workflow's but its hippo:lane agents: git facts from the agent's own worktree when it ran
+    isolated and a base is honest (`worktree_changes`, a Workflow agent's `worktreePath` in its
+    meta.json under subagents/workflows/<runId>/), else the files it edited with its edit tools,
+    those in the project only. Measured on wf_cf850115-50b: 5 of the 12 paths its agents
+    edited were scratch files under the session's scratchpad, and its fix agent's commit in its
+    worktree — three files, no edit-tool call — was visible to no list."""
+    stats, facts, edits = native_stats(run), [], []
+    root = hp.resolve().parent
+    for path, meta in run["agents"]:
+        wt = meta.get("worktreePath")
+        got = worktree_changes(hp, Path(wt)) if isinstance(wt, str) and wt else None
+        if got is not None:
+            facts.append(got)
+            continue
+        edits += [p for p in stats["edits"].get(path, ()) if p not in edits
+                  and (not Path(p).is_absolute() or Path(p).resolve().is_relative_to(root))]
+    if facts and not edits:
+        return "\n\n".join(facts)
+    head = NATIVE_RUN_EDITS_HEAD if run["executor"] == "workflow" else NATIVE_EDITS_HEAD
+    return "\n\n".join([*facts, f"{head}:\n" + ("\n".join(edits[:TRIAGE_GIT_LINES]) or "(none)")])
 
 
 def native_triage(hp, run, ref, kind):
@@ -5321,18 +5457,34 @@ def native_triage(hp, run, ref, kind):
 
 
 def native_settle(hp, native):
-    """Step 3c's second half, after the clerk: what each recorded run cost, and — with the
-    judge on — what its answer to its brief says.
+    """Step 3c's second half, after the clerk: the row of each listed run that has ended with
+    none, what each recorded run cost, and — with the judge on — what its answer to its brief
+    says.
 
-    Usage is written for every run with a row that notified in this window, or that has
-    notified and still has no usage row (its row landed in a later window than its
-    completion). The rows are cumulative per model; one equal to the last row for (ref, model)
-    is not written again, so re-reading a window writes nothing twice, and a resumed agent
-    gets a new row at its next completion. Triage reads only a run's answer to its brief
-    (`native_answer`), only in the window where that answer became complete, at most once per
-    dispatch and NATIVE_TRIAGE_MAX calls per window: a later notification — a resumed
-    agent's, or a final one after an answer made of interim ones — is never triage material,
-    even when the first reading failed (the gap is the record)."""
+    A listed run that has ended (`native_end`) and still has no row — the clerk skipped it, its
+    kind was refused, or no clerk answered this window — gets its row from code under the kind
+    NATIVE_UNREAD_KIND, on every path out of the scribe, so every run that ends within its
+    listing gets exactly one row. Measured (2026-09-25): the cheap clerk recorded a listed run
+    only when the window's digest was about it — hippo's first 1.15 windows listed 4 finished
+    Workflow runs and the clerk answered `events: []`; they aged out unrecorded with 284M
+    tokens, as did open-webui's 6 Workflow runs and 5 of its 7 Agent runs. Code cannot read a
+    brief for its kind, and a guessed tag would sit in a real column of PRIORS: the marker is
+    a column that says the kind was never read, and the cost and any verdict are kept.
+
+    Usage is written for every run with a row that ended in this window, or that has ended and
+    still has no usage row (its row landed in a later window than its end) — a killed or failed
+    run too, whose agents spent what they spent. The rows are cumulative per model; one equal
+    to the last row for (ref, model) is not written again, so re-reading a window writes
+    nothing twice, and a resumed agent gets a new row at its next completion. Triage reads only
+    a run's answer to its brief (`native_answer`) — a run stopped with no notification has
+    none — only in the window where that answer became complete, at most once per dispatch and
+    NATIVE_TRIAGE_MAX calls per window: a later notification — a resumed agent's, or a final
+    one after an answer made of interim ones — is never triage material, even when the first
+    reading failed (the gap is the record)."""
+    for run in [r for r in native["listed"].values() if r["ended"]]:
+        err = native_record(hp, native, run, NATIVE_UNREAD_KIND)
+        if err:
+            dump_failure(hp, "native", err)
     rows = read_ledger(hp)
     runs = native["runs"]
     native_refs(rows, runs)
@@ -5344,7 +5496,7 @@ def native_settle(hp, native):
     now = datetime.now(timezone.utc)
     for run in runs.values():
         ref = run["ref"]
-        if not ref or run["skip"] or not run["notes"]:
+        if not ref or run["skip"] or not run["ended"]:
             continue
         recent = run["t"] is None or now - run["t"] <= timedelta(hours=NATIVE_LIST_H)
         if run["done_now"] or (ref not in costed and recent):
@@ -5526,7 +5678,7 @@ def cmd_scribe(args):
 
     payload = (
         f"# live directives\n\n{directive_roster(hp)}\n\n"
-        f"# dispatches already recorded\n\n{dispatch_roster(hp)}\n\n"
+        f"# dispatches already recorded\n\n{dispatch_roster(hp, native)}\n\n"
         f"{native_section(native)}"
         f"{hints}"
         f"# transcript digest\n\n{digest}"
@@ -5579,7 +5731,11 @@ def cmd_scribe(args):
         return 0 if isinstance(e.get("id"), str) and e["id"] in listed else 1
 
     events = sorted(obj.get("events", []), key=order)
-    alias = {}  # a restated dispatch id → the native run's row (native_take)
+    # An id an outcome may name a native run by → the row that records the run: its own `ag-`
+    # id when main's row is its record (native_refs) — the skills teach main that id, so main
+    # judges the run by it — and a restated dispatch id (native_take).
+    alias = {r["id"]: r["ref"] for r in native["runs"].values()
+             if r["ref"] and r["ref"] != r["id"]} if native else {}
     for e in events:
         # lifetime is retired (§3.2) and the prompt no longer asks for it; a clerk that still
         # says `turn` must not make its directive invisible to the view.
