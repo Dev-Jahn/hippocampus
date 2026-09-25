@@ -650,8 +650,34 @@ def test_an_interim_only_run_stays_in_flight_until_its_answer_is_complete(tmp_pa
         _call(te, desc="e2e"), _at(0, _launched(te, e2e, "e2e")),
         _at(5, _user(_note(bench, tb, interim=True, result="started"))),
         _at(5, _user(_note(e2e, te, interim=True, result="armed")))])
-    [flying] = hippo_cli.native_in_flight(path)
+    [flying] = hippo_cli.native_in_flight(tmp_path / ".hippo", path)
     assert flying.startswith("bench (subagent · 2h"), flying
+
+
+def _compact_flying(run_hippo, project):
+    """The in-flight line of main's capsule after a compaction."""
+    proc = run_hippo(["status", "--inject"], cwd=project, env={
+        "HIPPO_INJECT": "compact", "HIPPO_TRANSCRIPT": str(project / "transcript.jsonl")})
+    assert proc.returncode == 0, proc.stderr
+    return [ln for ln in proc.stdout.splitlines() if ln.startswith("· in flight:")]
+
+
+def test_a_run_main_logged_itself_is_in_flight_once(tmp_project, run_hippo):
+    """Main's own row for a run — under its bare Run ID, or a scope equal to its description —
+    is the run's record (`native_refs`), and the in-flight line already lists that row: the
+    run is not listed again from the transcript under another name and age."""
+    lexer = ("wf_bbbbbbbb-bbb", "wbbbb", "toolu_01BBBBBBBBBBBBBBBBBBBBBBBB")
+    docs = ("wf_cccccccc-ccc", "wcccc", "toolu_01CCCCCCCCCCCCCCCCCCCCCCCC")
+    for did, scope in ((WF, "parser port"), ("D-lexer", "Port-Lexer")):
+        assert run_hippo(["log", "dispatch", "--id", did, "--kind", "impl", "--exec",
+                          "workflow/opus/xhigh", "--scope", scope],
+                         cwd=tmp_project).returncode == 0
+    _write(tmp_project / "transcript.jsonl", [
+        _user("port three"), *_wf_launch(),
+        *_wf_launch(run=lexer[0], task=lexer[1], tuid=lexer[2], name="port-lexer"),
+        *_wf_launch(run=docs[0], task=docs[1], tuid=docs[2], name="port-docs")])
+    assert _compact_flying(run_hippo, tmp_project) == [
+        "· in flight: parser port (0h00m), Port-Lexer (0h00m), port-docs (workflow · 0h05m)"]
 
 
 def _event(task, text):

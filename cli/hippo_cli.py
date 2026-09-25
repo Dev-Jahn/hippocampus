@@ -1125,7 +1125,7 @@ def status_lines(hp, compacted=False, transcript=None):
     # Nothing flying → no line. The capsule only spends a line on a question that has an answer.
     flying = in_flight(hp)
     if compacted and reader == "main":
-        flying += native_in_flight(transcript)
+        flying += native_in_flight(hp, transcript)
     if flying:
         lines.append(f"· in flight: {', '.join(flying)}")
     p = hp / "worklog.md"
@@ -5149,7 +5149,7 @@ def _compaction_point(recs):
         for b in _blocks(last) if b.get("type") == "tool_result")
 
 
-def native_in_flight(transcript):
+def native_in_flight(hp, transcript):
     """§6: main's native runs still out, for its capsule after a compaction → ["scope (executor
     · age)"] — the summary can drop a launch, and main then does not know a result is owed.
 
@@ -5160,19 +5160,27 @@ def native_in_flight(transcript):
     A run main stopped never notifies (measured, mlx-vlm: 4 of 4 Workflow runs, their run files
     `killed`, none notified across two later restarts); one that died with its process is
     notified `stopped` when the session resumes (measured, 2.1.282). A foreground call is not
-    here: main compacts only once it has returned."""
+    here: main compacts only once it has returned. Nor is a run main logged itself: the scribe
+    takes main's row as its record (`native_refs`), and `in_flight` lists that row."""
     if not transcript:
         return []
     transcript = Path(transcript)
     launches, notes, _, stops = native_scan(transcript)
     if not launches:
         return []
+    session = transcript.with_suffix("")
+    runs = {NATIVE_PREFIX + key: native_run(launch, key, session)
+            for key, launch in launches.items()}
+    rows = read_ledger(hp)
+    native_refs(rows, runs)
+    mine = {e["id"] for e in rows
+            if e.get("ev") == "dispatch" and e.get("src") == "cli" and e.get("id")}
     now = datetime.now(timezone.utc)
     out = []
     for key, launch in launches.items():
-        if launch["result"].get("status") != "async_launched":
+        run = runs[NATIVE_PREFIX + key]
+        if launch["result"].get("status") != "async_launched" or run["ref"] in mine:
             continue
-        run = native_run(launch, key, transcript.with_suffix(""))
         run["notes"] = [n for n in notes if n.task == run["note_id"] or n.tuid == launch["tuid"]]
         native_end(run, stops, 0, None)
         # Stopped by main, or a Workflow whose run file says killed or failed: no answer is owed.

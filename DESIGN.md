@@ -1597,7 +1597,10 @@ Workflow runs, their run files `killed`, none notified across two later restarts
 TaskStop is what ends it; a run whose process ended is notified `stopped` when the session
 resumes (measured, 2.1.282, a process ended by SIGTERM). Only after a compaction: at startup
 nothing is out yet, and a resume notifies the old process's runs itself. A `hippo:lane` relay
-is left out: its lane is the ledger's own entry.
+is left out: its lane is the ledger's own entry. So is a run main logged itself, under its bare
+id or with its description as the scope: the scribe takes that row as the run's record
+(§3.5.3c), and the line lists the row already — probed, the run showed twice, under two names
+and two ages.
 
 Everything else such a file carries has a home already: the current phase is a directive,
 what shipped is the worklog, ordering is `task deps`, and a merge hazard belongs in the brief for
