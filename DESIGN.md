@@ -1603,7 +1603,11 @@ nothing is out yet, and a resume notifies the old process's runs itself. A `hipp
 is left out: its lane is the ledger's own entry. So is a run main logged itself, under its bare
 id or with its description as the scope: the scribe takes that row as the run's record
 (§3.5.3c), and the line lists the row already — probed, the run showed twice, under two names
-and two ages.
+and two ages. And so, for this line only, is a Workflow whose run file says `completed` for this
+launch: one that finished while main compacted has its notification queued until the compaction
+ends, while its result is in that file already (measured live, 2.1.282: the run file written
+0.2s into a 15s compaction, the notification delivered 0.5s after the capsule, which had listed
+the run); the scribe still ends the run at that notification.
 
 Everything else such a file carries has a home already: the current phase is a directive,
 what shipped is the worklog, ordering is `task deps`, and a merge hazard belongs in the brief for

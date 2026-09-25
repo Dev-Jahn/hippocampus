@@ -680,6 +680,21 @@ def test_a_run_main_logged_itself_is_in_flight_once(tmp_project, run_hippo):
         "· in flight: parser port (0h00m), Port-Lexer (0h00m), port-docs (workflow · 0h05m)"]
 
 
+def test_a_workflow_that_finished_while_main_compacted_is_not_in_flight(tmp_project, run_hippo):
+    """Measured live: a Workflow that finished while main compacted had its run file say
+    `completed` at once, and its notification queued until the compaction ended — after the
+    capsule. For the in-flight line its result is written, so it is back; a run file naming an
+    earlier launch's task (a resume keeps the runId) says nothing of this one."""
+    resumed = ("wf_bbbbbbbb-bbb", "wbbbb", "toolu_01BBBBBBBBBBBBBBBBBBBBBBBB")
+    _wf_file(tmp_project, status="completed", taskId=WF_TASK, result="ported")
+    _wf_file(tmp_project, run=resumed[0], status="completed", taskId="wolder", result="old")
+    _write(tmp_project / "transcript.jsonl", [
+        _user("port two"), *_wf_launch(),
+        *_wf_launch(run=resumed[0], task=resumed[1], tuid=resumed[2], name="port-lexer")])
+    assert _compact_flying(run_hippo, tmp_project) == [
+        "· in flight: port-lexer (workflow · 0h05m)"]
+
+
 def _event(task, text):
     """A Monitor's event: a notification with no status, its expiry included."""
     return (f"<task-notification>\n<task-id>{task}</task-id>\n<summary>Monitor event: "

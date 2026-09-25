@@ -5163,7 +5163,11 @@ def native_in_flight(hp, transcript):
     that died with its process is notified `stopped` when the session resumes (measured,
     2.1.282). A foreground call is not here: main compacts only once it has returned. Nor is a
     run main logged itself: the scribe takes main's row as its record (`native_refs`), and
-    `in_flight` lists that row."""
+    `in_flight` lists that row. Nor, for this list only, a Workflow whose run file says
+    completed for this launch: one that finished while main compacted has its notification
+    queued until the compaction ends (measured live, 2.1.282: the run file written 0.2s into a
+    15s compaction, the notification delivered 0.5s after the capsule), while its result is in
+    that file already; the scribe still ends it at that notification."""
     if not transcript:
         return []
     transcript = Path(transcript)
@@ -5186,8 +5190,12 @@ def native_in_flight(hp, transcript):
         run["notes"] = [n for n in notes if n.task == run["note_id"] or n.tuid == launch["tuid"]]
         native_end(run, stops, 0, None)
         # Stopped by main, or a Workflow whose run file says killed or failed: no answer is owed.
+        # One whose run file says completed has its result written: a Workflow that finished
+        # while main compacted has its notification queued until the compaction ends.
+        filed = _read_json(run["summary"]) if run["executor"] == "workflow" else {}
         if (run["skip"] or stops.get(run["note_id"]) is not None
-                or (run["ended"] and not run["notes"]) or native_answer(run, None, now) is not None):
+                or (run["ended"] and not run["notes"]) or native_answer(run, None, now) is not None
+                or (filed.get("status") == "completed" and filed.get("taskId") == run["note_id"])):
             continue
         age = f" · {age_label(run['t'], now)}" if run["t"] else ""
         out.append(f"{one_line(run['scope'] or key, 44)} ({run['executor']}{age})")
