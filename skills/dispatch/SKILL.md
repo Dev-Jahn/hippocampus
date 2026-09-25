@@ -64,7 +64,8 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   report in `<id>.out`, and prints one short line per command or message. A killed lane still
   records its rc and usage. A codex argument that collides with a wrapper flag goes after `--`.
 - A subagent, fork or Workflow run — or a Codex `spawn_agent` child — needs no hippo call: the
-  scribe records it and your verdict (in Claude Code its cost too, as `ag-<agentId>`).
+  scribe records it and your verdict (in Claude Code its cost too, as `ag-<agentId>`, or a
+  Workflow's `ag-<runId>` — its Run ID, not its Task ID).
 - `--depth 1` = an orchestrator lane that may spawn; its children start at 0. Lane-origin
   launches pass a dollar breaker ($500 per parent per 24h, `dispatch: {max_wave_usd: N}` in
   `.hippo/config.yaml`); main is never gated.

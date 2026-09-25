@@ -53,7 +53,8 @@ hippo dispatch --watch <dispatch-id> [--for SECONDS]
   `--watch <id>` waits for one to end and prints its report path.
 - A subagent or Workflow run (in Codex, a `spawn_agent` child): no call — hippo records the
   launch and your verdict from the transcript at the end of the turn (in Claude Code its cost
-  too, under the id `ag-<agentId>`).
+  too, under the id `ag-<agentId>`, or a Workflow's `ag-<runId>` once it ends — its Run ID,
+  not its Task ID).
 - Lost your place → `status`.
 
 ## What runs by itself

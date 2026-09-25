@@ -31,17 +31,24 @@ substantive work happened, use the empty string "".
 
 events: only the four kinds below are allowed, with exactly these field names.
 
-1. `{"ev":"dispatch","id":"<new id, 8 chars or fewer>","kind":"<work-type tag>","exec":"<executor/model/effort>","scope":"<one line>"}`
-   — a delegation that was *launched* in this window and that hippo does not list for you:
-   another Claude Code session (`claude`), or a spawned agent on a Codex transcript (`subagent`).
+1. `dispatch` — two cases.
 
-   **A listed run gets its id and a kind, nothing else.** For each line under `# native runs to
-   record` (`ag-<id> · <executor> · <description> · brief: …`), emit
-   `{"ev":"dispatch","id":"ag-a770a44b91568b200","kind":"impl"}` with the listed id and the kind
-   its brief asks for. hippo fills exec, scope, task and parent from the run itself and ignores
-   any you send. If no kind fits, skip the line: the run stays listed. **Never coin an id for an
-   Agent/Task call, a fork or a Workflow launch** — in a window where hippo found such runs, the
-   writer rejects a `fork`, `subagent` or `workflow` dispatch under any id it did not list.
+   **Every line under `# native runs to record` gets one, in every window.** Those are the
+   subagent, fork and Workflow runs hippo found in the session's own files that have no row yet
+   (`ag-<id> · <executor> · <description> · brief: …`). For each line emit
+   `{"ev":"dispatch","id":"ag-a770a44b91568b200","kind":"impl"}` — the listed id and the kind
+   its brief asks for, nothing else — **whether or not this digest mentions the run**: the list
+   is not about this window, and the brief on the line is all a kind needs. Take the closest tag
+   from the table below; never skip a line. hippo fills exec, scope, task and parent from the
+   run itself and ignores any you send, and it writes a Workflow's row only once the run has
+   ended, so a Workflow can be listed again in a later window: answer it again. **Never coin an
+   id for an Agent/Task call, a fork or a Workflow launch** — in a window where hippo found such
+   runs, the writer rejects a `fork`, `subagent` or `workflow` dispatch under any id it did not
+   list.
+
+   **A delegation hippo does not list**, *launched* in this window — another Claude Code session
+   (`claude`), or a spawned agent on a Codex transcript (`subagent`):
+   `{"ev":"dispatch","id":"<new id, 8 chars or fewer>","kind":"<work-type tag>","exec":"<executor/model/effort>","scope":"<one line>"}`.
 
    **Never record a `codex` launch.** `hippo dispatch` writes those itself, from the argv it was
    given, at the moment it ran — you would only be restating it from a paraphrase. If a codex run
@@ -67,8 +74,8 @@ events: only the four kinds below are allowed, with exactly these field names.
    | `infra` | tooling, CI, environment |
    | `chore` | maintenance with no behavior change |
 
-   A listed run takes a tag from this table or is skipped (above). For a dispatch you coin,
-   invent a tag only when nothing above fits. A tag used once never becomes evidence: the priors
+   A listed run takes the closest tag from this table. For a dispatch you coin, invent a tag
+   only when nothing above fits. A tag used once never becomes evidence: the priors
    aggregate on (kind × exec), so `bwd-kfuse` or `audit-nvfp4` splits the sample into columns of
    one. Those are scope, not kind.
 
@@ -81,7 +88,7 @@ events: only the four kinds below are allowed, with exactly these field names.
    | `claude` | another Claude Code session (a peer machine, a headless run started by hand) |
    | `fork` | a subagent that inherits this session's context (effort is `inherit`) |
    | `subagent` | an anonymous subagent, no inherited context |
-   | `workflow` | a subagent orchestrated by the Workflow tool |
+   | `workflow` | one Workflow tool run, all its agents together — hippo lists it; never yours to coin |
 
    `background`, `bash`, `hippo dispatch` are launch mechanisms, not executors: splitting a
    delegation by how it was started scatters the sample. `effort` is one of `low`, `medium`,
@@ -97,10 +104,14 @@ events: only the four kinds below are allowed, with exactly these field names.
    was lost (lost). **`ref` must be an id marked `[no outcome yet]` or
    `[claims … — verdict pending]` in `# dispatches already recorded`, a listed `ag-` id you
    record in this same output, or one you can literally see in this digest.** An id with
-   neither marker is already judged — the writer rejects a second verdict. A `claims` marker is
-   the lane's *own* report riding its dispatch: it is not a verdict, and seeing the same report
-   in the digest is not an acceptance signal — record an outcome for it only on main's or the
-   user's explicit verdict, as ever. A task id (`feat/x`) is not a dispatch id. Never
+   neither marker is already judged — the writer rejects a second verdict. Main rarely names a
+   native run by its id when it judges one: it merges the run's branch, accepts its report or
+   rejects its finding by the run's description, its task, or — for a Workflow — its worktree
+   (`wf_<run>-N`, branch `worktree-wf_<run>-N`). An open native run's roster line carries
+   those (`· task …`, `· worktrees …`); when the verdict in the digest names one, the outcome's
+   `ref` is that line's id. A `claims` marker is the lane's *own* report riding its dispatch:
+   it is not a verdict, and seeing the same report in the digest is not an acceptance signal —
+   record an outcome for it only on main's or the user's explicit verdict, as ever. A task id (`feat/x`) is not a dispatch id. Never
    reconstruct one from memory or invent one that merely looks right: the writer rejects a ref
    naming no known dispatch, and a fabricated one is dropped from every aggregate.
 
