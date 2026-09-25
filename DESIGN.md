@@ -178,7 +178,10 @@ optional `src` (`scribe|cli|wrapper|executor`).
   the "tokens used" footer as total-only fallback; nothing → no event, a gap is a gap).
   `ref` joins a dispatch fail-closed. Dollars are computed at read time from the shipped
   `prices.yaml` (USD per 1M, refreshed each release, `as_of` printed by PRIORS so staleness is
-  visible); a model off the sheet renders as unpriced and named, never guessed. PRIORS' routing
+  visible); a model off the sheet renders as unpriced and named, never guessed. A replaced
+  model keeps its row, marked `legacy: true`, while recorded usage runs on it and the vendor
+  page still lists it: that row prices the history and is never routed to — the ladder, the
+  tier note and the breaker's unknown-model reservation all skip it (§3.6). PRIORS' routing
   table carries tokens, $ and $/accepted per cell — the question it unlocks is "the cheapest
   exec that clears the bar". A batch's total is derivable by summing children over `parent`.
   The one other writer (1.15.0) is the scribe's own code for a native run (§3.5.3c),

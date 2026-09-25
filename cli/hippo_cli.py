@@ -2226,13 +2226,15 @@ def _reserve_usd(model, prices):
     usage would see $0 exactly when it matters. The nominal token figure is a guard's
     arithmetic, not data — nothing of it reaches the ledger, and the moment the lane exits,
     its measured usage replaces the reservation. An unknown model reserves at the most
-    expensive tier on the sheet: a typo must not dodge the breaker."""
+    expensive tier on the sheet: a typo must not dodge the breaker. A lane on a `legacy` model
+    reserves at that model's own price; a legacy row is never the tier a typo is read as."""
     mtin, mtout = FANOUT_RESERVE_MTOK
     m = prices["models"].get(model)
     if m is None:
-        if not prices["models"]:
+        tiers = routable_models(prices).values()
+        if not tiers:
             return None
-        return max(mtin * v["input"] + mtout * v["output"] for v in prices["models"].values())
+        return max(mtin * v["input"] + mtout * v["output"] for v in tiers)
     return mtin * m["input"] + mtout * m["output"]
 
 
@@ -3804,10 +3806,11 @@ def price_ladder(prices):
     not rows — two generations of one model can sit at the same price (the sheet has carried
     fable-5 and fable-5-1, opus-4-8 and opus-5), and "second most expensive row" would make
     `mid` a `top` twin. Within a level the sheet's first row wins, because the sheet lists the
-    current model first. Read at call time, so a price refresh moves the ladder — the frozen
-    version of this is the routing.yaml the NOT-list retired (§4)."""
+    current model first. A `legacy` row is no level at all: back on the sheet, gpt-5.6-sol at
+    $4 would be `mid` in place of gpt-6-sol at $2. Read at call time, so a price refresh moves
+    the ladder — the frozen version of this is the routing.yaml the NOT-list retired (§4)."""
     by_price = {}
-    for m, v in prices["models"].items():
+    for m, v in routable_models(prices).items():
         if str(m).startswith("gpt-"):
             by_price.setdefault(float((v or {}).get("input", 0.0)), m)
     if not by_price:
@@ -3894,8 +3897,9 @@ def plan_adjust(en, effort, tier, ladder, cells, policy):
 
 def model_tier(model, ladder, prices):
     """The tier a model sits on, read by its price level against the ladder's ends — a model
-    between them (terra between luna and sol) is `mid`. None off the sheet: no guess."""
-    m = prices["models"].get(model) if ladder else None
+    between them is `mid`. None off the sheet: no guess. None on a `legacy` row too: a replaced
+    model's price is not a tier (gpt-5.6-luna costs twice gpt-6-luna and would read `mid`)."""
+    m = routable_models(prices).get(model) if ladder else None
     if m is None:
         return None
     price = float(m.get("input", 0.0))
@@ -4421,6 +4425,13 @@ def price_usd(u, prices):
     tcached = u.get("tcached") or 0
     return ((u["tin"] - tcached) * m["input"] + tcached * m.get("cached", m["input"])
             + u["tout"] * m["output"]) / 1e6
+
+
+def routable_models(prices):
+    """The sheet's rows a lane may be routed to — every row but the `legacy` ones. A replaced
+    model keeps its row only so the usage recorded on it stays priced; `price_usd` reads the
+    whole sheet, and anything that ranks or picks a model reads this."""
+    return {m: v for m, v in prices["models"].items() if not (v or {}).get("legacy")}
 
 
 def directive_roster(hp):

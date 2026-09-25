@@ -1,5 +1,10 @@
 # API list prices, USD per 1M tokens. PRIORS uses this to turn recorded usage into
-# dollars; a model absent here shows up as "unpriced" (named, never guessed).
+# dollars; a model absent here shows up as "unpriced" (named, never guessed). The gpt
+# rows' price levels are also the codex ladder the batch plan routes on (DESIGN §3.6).
+#
+# A replaced model keeps its row, marked `legacy: true`, while recorded history uses it
+# and the vendor page still lists it. A legacy row prices that history and is never
+# routed to: no ladder tier, no suggestion, no ranking.
 #
 # Refresh at every release: check the vendor pricing pages, update the numbers, and
 # bump `as_of` — PRIORS prints it, so a stale sheet is visible instead of silently
@@ -7,21 +12,26 @@
 # https://platform.claude.com/docs/en/about-claude/pricing
 as_of: "2026-09-25"
 models:
-  # OpenAI GPT-6, standard tier, short context (the page prices long context at 2x, batch at
-  # 0.5x, and the fast tier separately). gpt-6-sol/luna retired from the sheet 2026-09-23;
-  # gpt-5.6-terra is no longer on the vendor page at all, so it is unpriced rather than guessed.
+  # OpenAI, standard tier, short context (the page prices long context at 2x, batch at 0.5x,
+  # and the fast tier separately).
   gpt-6-astra: {input: 10.00, cached: 1.00, output: 50.00}
   gpt-6-sol:   {input: 2.00, cached: 0.20, output: 10.00}
   gpt-6-luna:  {input: 0.10, cached: 0.01, output: 0.50}
+  # GPT-5.6, replaced by GPT-6: lanes were recorded on it, and dropping these rows on
+  # 2026-09-23 turned that history unpriced. Restored 2026-09-25 as legacy; the vendor page
+  # still lists all three (5.6 Sol at a promotional price, held at least through 2026-11-21).
+  gpt-5.6-sol:   {input: 4.00, cached: 0.40, output: 20.00, legacy: true}
+  gpt-5.6-terra: {input: 2.00, cached: 0.20, output: 12.00, legacy: true}
+  gpt-5.6-luna:  {input: 0.20, cached: 0.02, output: 1.20, legacy: true}
   # Anthropic (cached = cache-read rate: 0.1x input; 0.025x on Fable 5.1, 0.05x on Opus 5.5).
-  # Fable 5, Opus 5 and Opus 4.8 are superseded but stay: native runs (DESIGN §3.5.3c) were
-  # recorded on them, and dropping their rows on 2026-09-23 turned that history unpriced.
-  # Restored 2026-09-25; the vendor page still lists all three.
   claude-fable-5-1: {input: 10.00, cached: 0.25, output: 50.00}
-  claude-fable-5:   {input: 10.00, cached: 1.00, output: 50.00}
   claude-opus-5-5:  {input: 4.00, cached: 0.20, output: 20.00}
-  claude-opus-5:    {input: 5.00, cached: 0.50, output: 25.00}
-  claude-opus-4-8:  {input: 5.00, cached: 0.50, output: 25.00}
   # Sonnet 5 launch pricing became the standard price; the 2026-09-01 increase was cancelled.
   claude-sonnet-5:  {input: 2.00, cached: 0.20, output: 10.00}
   claude-haiku-4-5: {input: 1.00, cached: 0.10, output: 5.00}
+  # Fable 5, Opus 5 and Opus 4.8, superseded: native runs (DESIGN §3.5.3c) were recorded on
+  # them, and dropping their rows on 2026-09-23 turned that history unpriced. Restored
+  # 2026-09-25 as legacy; the vendor page still lists all three.
+  claude-fable-5:   {input: 10.00, cached: 1.00, output: 50.00, legacy: true}
+  claude-opus-5:    {input: 5.00, cached: 0.50, output: 25.00, legacy: true}
+  claude-opus-4-8:  {input: 5.00, cached: 0.50, output: 25.00, legacy: true}

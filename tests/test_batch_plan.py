@@ -155,6 +155,32 @@ def test_the_ladder_reads_price_levels_not_rows():
                                              "top": "gpt-9-big"}
 
 
+def test_a_legacy_row_prices_history_and_is_never_a_tier():
+    """A replaced model stays on the sheet so the usage recorded on it keeps its price; it never
+    names, classifies or stands in for a tier. The shape that restored the gpt-5.6 rows: back
+    without the mark, 5.6 Sol at $4 would take `mid` from 6 Sol at $2."""
+    import sys
+    cli = str(REPO_ROOT / "cli")
+    if cli not in sys.path:
+        sys.path.insert(0, cli)
+    import hippo_cli
+    sheet = {"models": {"gpt-6-astra": {"input": 10.0, "output": 50.0},
+                        "gpt-6-sol": {"input": 2.0, "output": 10.0},
+                        "gpt-6-luna": {"input": 0.1, "output": 0.5},
+                        "gpt-5.6-sol": {"input": 4.0, "output": 20.0, "legacy": True},
+                        "gpt-5.6-luna": {"input": 0.2, "output": 1.2, "legacy": True},
+                        "gpt-5.5-max": {"input": 20.0, "output": 99.0, "legacy": True}}}
+    ladder = hippo_cli.price_ladder(sheet)
+    assert ladder == {"cheap": "gpt-6-luna", "mid": "gpt-6-sol", "top": "gpt-6-astra"}
+
+    usage = {"model": "gpt-5.6-luna", "tin": 1_000_000, "tcached": 0, "tout": 1_000_000}
+    assert hippo_cli.price_usd(usage, sheet) == pytest.approx(1.40)
+    assert hippo_cli.model_tier("gpt-5.6-luna", ladder, sheet) is None, "not `mid` at 2x Luna"
+    # A typo reserves at the top tier, not at a legacy row priced above it.
+    assert (hippo_cli._reserve_usd("gpt-6-atsra", sheet)
+            == hippo_cli._reserve_usd("gpt-6-astra", sheet))
+
+
 def test_the_request_asks_the_route_questions_over_the_whole_brief(tmp_project, tmp_path,
                                                                    run_hippo):
     capture = tmp_path / "sent.json"
