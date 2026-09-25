@@ -4760,22 +4760,23 @@ def native_answer(run, upto, at):
     The answer is the run's notifications up to the first after its first that names a call
     other than its launch: that one answers a SendMessage to the agent, and a resumed agent's
     later report is not its answer to the brief. The answer is complete at its first final
-    notification, which alone is read. When every one is interim — the agent stopped with
-    background work of its own still running — it is complete once the agent has answered a
-    SendMessage (main moved on from the answer), or once it has sat idle since the last one
-    with all that work ended (`native_settled`); the host's final notification cannot be
-    waited for. Measured (mlx-vlm, 2026-09-23): in 3 of 3 such runs the work left was a
-    `tail -f` Monitor that expired 5-11 minutes after the agent's last report; the host queued
-    the expiry in main's transcript and never delivered it to the idle agent, so none resumed
-    and no final notification came in the two days the session ran on — while each interim
-    report was the agent's whole report."""
+    notification, and is every one up to it, in order: an interim report before it can be the
+    agent's whole report, and the final one a line about its watcher. When every one is
+    interim — the agent stopped with background work of its own still running — it is
+    complete once the agent has answered a SendMessage (main moved on from the answer), or
+    once it has sat idle since the last one with all that work ended (`native_settled`); the
+    host's final notification cannot be waited for. Measured (mlx-vlm, 2026-09-23): in 3 of 3
+    such runs the work left was a `tail -f` Monitor that expired 5-11 minutes after the agent's
+    last report; the host queued the expiry in main's transcript and never delivered it to the
+    idle agent, so none resumed and no final notification came in the two days the session ran
+    on — while each interim report was the agent's whole report."""
     notes = [n for n in run["notes"] if upto is None or n.line <= upto]
     cut = next((k for k, n in enumerate(notes) if k and n.tuid not in (None, run["tuid"])),
                len(notes))
     chain = notes[:cut]
-    final = next((n for n in chain if not n.interim), None)
+    final = next((k for k, n in enumerate(chain) if not n.interim), None)
     if final is not None:
-        return [final]
+        return chain[:final + 1]
     if not chain or cut < len(notes):
         return chain or None
     done = native_settled(run, chain[-1].t)
@@ -5234,11 +5235,12 @@ def native_changes(hp, run):
 def native_triage(hp, run, ref, kind):
     """A run's answer to its brief, read the way the wrapper reads a lane at exit (§3.6) → True
     when the judge was asked. brief = the call's prompt (a Workflow's script), report = the
-    answer's <result> — its final notification's, or its interim ones' in order when no final
-    one came (`native_answer`) — or a Workflow's whole result; rc 0 only when it completed,
-    and the changes from the run's own transcript or worktree. A state over the judge's
-    budget is fitted like any lane's (`fit_triage_state`). When the judge does not answer — it
-    refuses a state no fitting rescued as over budget — its reason goes to stderr."""
+    answer's <result>s in order — its notifications up to its first final one, or its interim
+    ones when no final one came (`native_answer`) — or a Workflow's whole result; rc 0 only
+    when it completed, and the changes from the run's own transcript or worktree. A state over
+    the judge's budget is fitted like any lane's (`fit_triage_state`). When the judge does not
+    answer — it refuses a state no fitting rescued as over budget — its reason goes to
+    stderr."""
     answer = run["answer"]
     ex = {"rc": 0 if answer[-1].status == "completed" else 1, "check_rc": None}
     if run["executor"] == "workflow":

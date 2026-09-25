@@ -433,8 +433,8 @@ def test_an_interim_only_run_is_read_once_its_work_has_ended(tmp_project, run_hi
 
 def test_an_answer_waits_for_work_without_a_deadline_and_ends_at_a_sendmessage(tmp_path):
     """A background command has no deadline: the interim report is not read however long the
-    agent sits idle, and the final notification it resumed to send is its answer. A report
-    that answers a SendMessage is not the answer to the brief — main moved on from the
+    agent sits idle, and the final notification it resumed to send completes the answer. A
+    report that answers a SendMessage is not the answer to the brief — main moved on from the
     interim one, which becomes the answer in that window."""
     bash, sent = "abash000000000000", "asent000000000000"
     bash_tuid, sent_tuid, msg_tuid = ("toolu_01BashRunBashRunBashRun", "toolu_01SentSentSentSent",
@@ -463,7 +463,7 @@ def test_an_answer_waits_for_work_without_a_deadline_and_ends_at_a_sendmessage(t
     assert runs["ag-" + sent]["first_now"] is True
     assert hippo_cli.native_index(path, 0, 6)["ag-" + sent]["answer"] is None
     runs = hippo_cli.native_index(path, 8, 9)
-    assert [n.report for n in runs["ag-" + bash]["answer"]] == ["bench: 3.1x faster"]
+    assert [n.report for n in runs["ag-" + bash]["answer"]] == ["started", "bench: 3.1x faster"]
     assert (runs["ag-" + bash]["first_now"], runs["ag-" + sent]["first_now"]) == (True, False)
 
 
@@ -476,10 +476,10 @@ def _event(task, text):
 def test_a_monitor_ends_when_its_notice_reaches_the_agent_else_at_its_deadline(tmp_path):
     """Measured: the host delivers a Monitor's expiry from 0.40s before its deadline to 0.27s
     after. An expiry that wakes the agent just after the deadline ends the Monitor there, so
-    the run is not settled at the deadline and the final report it resumed to send is its
-    answer. Events before the agent's report are a live Monitor's, not its end; with no
-    notice after it, the Monitor ends at its deadline. A persistent one has none, and an event
-    of its own is not its end either."""
+    the run is not settled at the deadline, and its answer runs on to the final report it
+    resumed to send, the interim one kept before it. Events before the agent's report are a
+    live Monitor's, not its end; with no notice after it, the Monitor ends at its deadline. A
+    persistent one has none, and an event of its own is not its end either."""
     late, evts, pers = "alate000000000000", "aevts000000000000", "apers000000000000"
     tl, te, tp = ("toolu_01LateLateLateLateLate", "toolu_01EvtsEvtsEvtsEvtsEvts",
                   "toolu_01PersPersPersPersPers")
@@ -513,7 +513,7 @@ def test_a_monitor_ends_when_its_notice_reaches_the_agent_else_at_its_deadline(t
     none = (None, False)
     assert answers(9, 10) == {late: none, evts: none, pers: none}, "no deadline has passed"
     assert answers(10, 11) == {late: none, evts: ([8], True), pers: none}
-    assert answers(11, 12)[late] == ([12], True)
+    assert answers(11, 12)[late] == ([7, 12], True)
     assert answers(12, 13)[pers] == none
 
 

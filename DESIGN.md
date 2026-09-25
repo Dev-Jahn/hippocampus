@@ -552,34 +552,36 @@ subagent's own (PreCompact, below).
    window where that answer became complete — a resumed agent's later report is never triage
    material, even when the first reading failed. The answer is the run's notifications up to
    the first after its first that names a call other than its launch — that one answers a
-   SendMessage. It is complete at its first final notification, the only one read. An interim
-   one — the agent stopped with background work of its own still running, and says so —
-   completes it only where the host's final one cannot be waited for: once the agent has
-   answered a SendMessage (main moved on from the interim report), or once the agent's own
-   transcript shows it idle since its last report with all the work it had started ended —
-   each piece by its own notification or a TaskStop, and a Monitor with neither at its
-   deadline, the `timeoutMs` its launch result states whatever the call asked for — 0, none,
-   for a `persistent` one, which hosts 2.1.246–258 ran and which ended with a notification
-   each time. A Monitor's events carry no status, its expiry included, and one after the
-   report only moves that end later, to its own time: an expiry that wakes the idle agent just
-   after the deadline leaves the run unsettled before it (an agent gets its expiry from 0.40s
-   before the deadline to 0.27s after). Never earlier: the host can hold a notice for an idle
-   agent and write it into the agent's transcript, under its own earlier time, only once the
-   agent is resumed (mlx-vlm has an expiry written almost 9 hours after its time), and an event
-   read as the end then would settle the run back in a window that had found it still
-   watching — a run never triaged. That moment is fixed in the agent's transcript, so the
-   window that finds it is the only one; the interim reports, in order, are the report. Measured (mlx-vlm, 2026-09-23): 3 of 14 agent runs sent
-   only interim notifications. In each the work left was a `tail -f` Monitor that expired 5–11
-   minutes after the agent's last report; the host queued the expiry in main's transcript and
-   never delivered it to the idle agent, so it never resumed and no final notification came in
-   the two days the session ran on — and each interim report was the agent's whole report. A
-   fourth's only final notification answered its second SendMessage; its answer to the brief is
-   its first, interim report. What stays open is a background command whose end never reaches
-   the agent's transcript — that run is read when it ends, or never — or reaches it only once
-   the agent is resumed, whose earlier time settles the run back in a window that found it
-   running (the host writes a task's end late too: 10 recorded, all to an agent mid-turn, none
-   yet to an idle one), and a Stop in the fraction of a second between a Monitor's deadline and
-   an expiry that reaches the agent after it, which reads the run as settled.
+   SendMessage. It is complete at its first final notification, and every one up to it is
+   read, in order: an interim report before it can be the whole report, the final one after it
+   only a line saying its watcher expired. An interim one — the agent stopped with background
+   work of its own still running, and says so — completes it only where the host's final one
+   cannot be waited for: once the agent has answered a SendMessage (main moved on from the
+   interim report), or once the agent's own transcript shows it idle since its last report
+   with all the work it had started ended — each piece by its own notification or a TaskStop,
+   and a Monitor with neither at its deadline, the `timeoutMs` its launch result states whatever
+   the call asked for — 0, none, for a `persistent` one, which hosts 2.1.246–258 ran and which
+   ended with a notification each time. A Monitor's events carry no status, its expiry included,
+   and one after the report only moves that end later, to its own time: an expiry that wakes the
+   idle agent just after the deadline leaves the run unsettled before it (an agent gets its
+   expiry from 0.40s before the deadline to 0.27s after). Never earlier: the host can hold a
+   notice for an idle agent and write it into the agent's transcript, under its own earlier
+   time, only once the agent is resumed (mlx-vlm has an expiry written almost 9 hours after its
+   time), and an event read as the end then would settle the run back in a window that had found
+   it still watching — a run never triaged. That moment is fixed in the agent's transcript, so
+   the window that finds it is the only one; the interim reports, in order, are the report.
+   Measured (mlx-vlm, 2026-09-23): 3 of 14 agent runs sent only interim notifications. In each
+   the work left was a `tail -f` Monitor that expired 5–11 minutes after the agent's last
+   report; the host queued the expiry in main's transcript and never delivered it to the idle
+   agent, so it never resumed and no final notification came in the two days the session ran on
+   — and each interim report was the agent's whole report. A fourth's only final notification
+   answered its second SendMessage; its answer to the brief is its first, interim report. What
+   stays open is a background command whose end never reaches the agent's transcript — that run
+   is read when it ends, or never — or reaches it only once the agent is resumed, whose earlier
+   time settles the run back in a window that found it running (the host writes a task's end
+   late too: 10 recorded, all to an agent mid-turn, none yet to an idle one), and a Stop in the
+   fraction of a second between a Monitor's deadline and an expiry that reaches the agent after
+   it, which reads the run as settled.
    brief = the call's prompt (a Workflow's script); report = the answer's `<result>`s (a
    Workflow's whole result from `workflows/<runId>.json` — the notification's copy is cut at
    ~8k — handed to the judge as the JSON structure it is, not as a string of it whose every
