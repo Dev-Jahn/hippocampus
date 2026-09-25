@@ -634,6 +634,26 @@ def test_an_answer_waits_for_work_without_a_deadline_and_ends_at_a_sendmessage(t
     assert (runs["ag-" + bash]["first_now"], runs["ag-" + sent]["first_now"]) == (True, False)
 
 
+def test_an_interim_only_run_stays_in_flight_until_its_answer_is_complete(tmp_path):
+    """After a compaction main's capsule names its background runs still out (§6). An interim
+    notification promises a final one, so the run stays listed while the agent's own
+    background work runs; once that work has ended with the agent idle — the Monitor's deadline
+    passed — the interim report is the answer (the scribe's rule), and the run is back."""
+    bench, e2e = "abench00000000000", "ae2e0000000000000"
+    tb, te = "toolu_01BenchBenchBenchBench", "toolu_01E2eE2eE2eE2eE2eE2e"
+    session = tmp_path / "t"
+    _write(session / "subagents" / f"agent-{bench}.jsonl",
+           _watcher(bench, 5, tool="Bash", task="b9"))
+    _write(session / "subagents" / f"agent-{e2e}.jsonl", _watcher(e2e, 5))  # due at minute 21
+    path = _write(tmp_path / "t.jsonl", [
+        _call(tb, desc="bench"), _at(0, _launched(tb, bench, "bench")),
+        _call(te, desc="e2e"), _at(0, _launched(te, e2e, "e2e")),
+        _at(5, _user(_note(bench, tb, interim=True, result="started"))),
+        _at(5, _user(_note(e2e, te, interim=True, result="armed")))])
+    [flying] = hippo_cli.native_in_flight(path)
+    assert flying.startswith("bench (subagent · 2h"), flying
+
+
 def _event(task, text):
     """A Monitor's event: a notification with no status, its expiry included."""
     return (f"<task-notification>\n<task-id>{task}</task-id>\n<summary>Monitor event: "
