@@ -4787,15 +4787,19 @@ def native_settled(run, since):
     by which every piece of background work it had started ended, with no user or assistant
     line after `since` before then (it was not resumed, by a message or by that work). None
     when that never happened, when `since` is unknown, or when the transcript cannot be read.
-    A task ends with its own notification (one with a status) or the agent's TaskStop. After
-    `since` any notice of it counts — a Monitor's expiry is an event with no status, and one
-    that reaches the idle agent wakes it, so the run is not settled before it (measured, an
-    agent gets its expiry from 0.40s before the deadline to 0.27s after). A Monitor no notice
-    of which reached the agent ends at its deadline: the host kills it at the `timeoutMs` its
-    launch result states, whatever the call asked for — 0 for a `persistent` one, which has
-    none (hosts 2.1.246-258 ran those). Anything else — a background Bash command, an agent or
-    a workflow of its own — has no deadline: it runs until it says it ended. A fixed moment,
-    so a window that finds the run settled is never contradicted by a later one."""
+    A task ends with its own notification (one with a status) or the agent's TaskStop; a
+    Monitor with neither at its deadline: the host kills it at the `timeoutMs` its launch
+    result states, whatever the call asked for — 0 for a `persistent` one, which has none
+    (hosts 2.1.246-258 ran those, and each ended with a notification). A Monitor's events carry
+    no status, its expiry included, and one after `since` only moves that end later, to its own
+    time: an expiry that wakes the idle agent just after the deadline leaves the run unsettled
+    before it (measured, an agent gets its expiry from 0.40s before the deadline to 0.27s
+    after). Never earlier: the host can queue a notice for an idle agent and write it into the
+    agent's transcript, under its own earlier time, only once the agent is resumed (measured,
+    mlx-vlm: an expiry written almost 9 hours after its time). Anything else — a background
+    Bash command, an agent or a workflow of its own — has no deadline: it runs until it says it
+    ended. A fixed moment, so a window that finds the run settled is never contradicted by a
+    later one."""
     memo = run.setdefault("settled", {})
     if since is None or since in memo:
         return memo.get(since)
@@ -4804,7 +4808,7 @@ def native_settled(run, since):
         f = run["files"].open("r", encoding="utf-8", errors="replace")
     except OSError:
         return None
-    pending, work, ended, resumed = {}, {}, {}, None
+    pending, work, ended, late, resumed = {}, {}, {}, {}, None
     with f:
         for raw in f:
             try:
@@ -4836,12 +4840,14 @@ def native_settled(run, since):
                     ms = _num(tur.get("timeoutMs")) if name == "Monitor" else None
                     work[tid] = t + timedelta(milliseconds=ms) if ms else None
             for text in _note_texts(rec):
-                # Before `since` a notice with no status is a live Monitor's event, not its end.
-                for tid in ([m.group(1).strip() for m in TASK_NOTE_RE.finditer(text)] if t > since
-                            else [n.task for n in task_notes(text, 0)]):
-                    ended.setdefault(tid, t)
-    # Each task's end: its own notice, else its deadline; None: still running.
-    ends = [ended.get(tid, deadline) for tid, deadline in work.items()]
+                for n in task_notes(text, 0):
+                    ended.setdefault(n.task, t)
+                for m in TASK_NOTE_RE.finditer(text) if t > since else ():
+                    late.setdefault(m.group(1).strip(), []).append(t)
+    # Each task's end: its own notification, else its deadline or a later notice after `since`;
+    # None: still running.
+    ends = [ended.get(tid) or deadline and max([deadline, *late.get(tid, ())])
+            for tid, deadline in work.items()]
     done = None if None in ends else max([since, *ends])
     memo[since] = done if done is not None and (resumed is None or done < resumed) else None
     return memo[since]

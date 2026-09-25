@@ -478,7 +478,8 @@ def test_a_monitor_ends_when_its_notice_reaches_the_agent_else_at_its_deadline(t
     after. An expiry that wakes the agent just after the deadline ends the Monitor there, so
     the run is not settled at the deadline and the final report it resumed to send is its
     answer. Events before the agent's report are a live Monitor's, not its end; with no
-    notice after it, the Monitor ends at its deadline. A persistent one has none."""
+    notice after it, the Monitor ends at its deadline. A persistent one has none, and an event
+    of its own is not its end either."""
     late, evts, pers = "alate000000000000", "aevts000000000000", "apers000000000000"
     tl, te, tp = ("toolu_01LateLateLateLateLate", "toolu_01EvtsEvtsEvtsEvtsEvts",
                   "toolu_01PersPersPersPersPers")
@@ -491,7 +492,8 @@ def test_a_monitor_ends_when_its_notice_reaches_the_agent_else_at_its_deadline(t
     watched[3:3] = [_at(5, _queued(_event("m1", "step 1 ok"))),
                     _at(9, _queued(_event("m1", "step 2 ok")))]
     _write(session / "subagents" / f"agent-{evts}.jsonl", watched)
-    _write(session / "subagents" / f"agent-{pers}.jsonl", _watcher(pers, 15, persistent=True))
+    _write(session / "subagents" / f"agent-{pers}.jsonl", _watcher(pers, 15, [
+        _at(17, _queued(_event("m1", "step 3 ok")))], persistent=True))
     lines = [_call(tl, desc="late"), _at(0, _launched(tl, late, "late")),               # 1, 2
              _call(te, desc="evts"), _at(0, _launched(te, evts, "evts")),               # 3, 4
              _call(tp, desc="pers"), _at(0, _launched(tp, pers, "pers")),               # 5, 6
@@ -513,6 +515,31 @@ def test_a_monitor_ends_when_its_notice_reaches_the_agent_else_at_its_deadline(t
     assert answers(10, 11) == {late: none, evts: ([8], True), pers: none}
     assert answers(11, 12)[late] == ([12], True)
     assert answers(12, 13)[pers] == none
+
+
+def test_an_event_written_late_never_ends_a_monitor_before_its_deadline(tmp_path):
+    """Measured (mlx-vlm): the host can hold a notice for an idle agent and write it into the
+    agent's transcript, under its own earlier time, only when a SendMessage resumes it. Such
+    an event, stamped between the report and the deadline, does not settle the run back in a
+    window that found it still watching: the interim report becomes the answer in the
+    SendMessage's window, and the earlier window still reads as it did."""
+    a, tl, ts = "astale00000000000", "toolu_01StaleStaleStaleStale", "toolu_01SendMessageSendMessa"
+    agent = tmp_path / "t" / "subagents" / f"agent-{a}.jsonl"
+    path = _write(tmp_path / "t.jsonl", [
+        _call(tl, desc="e2e"), _at(0, _launched(tl, a, "e2e")),                   # 1, 2
+        _at(15, _user(_note(a, tl, interim=True))),                               # 3
+        _at(18, _user("main works on"))])                                         # 4
+    _write(agent, _watcher(a, 15))
+    assert hippo_cli.native_index(path, 2, 4)["ag-" + a]["answer"] is None, "deadline: minute 21"
+
+    _write(agent, _watcher(a, 15, [
+        _at(19, _user("also check the 429 path")),
+        _at(16, _queued(_event("m1", "step 3 ok"))),
+        _at(19.5, _assistant({"type": "text", "text": "429 checked."}))]))
+    _write(path, [_at(19.6, _user(_note(a, ts, interim=True, result="429 checked.")))], "a")
+    run = hippo_cli.native_index(path, 4, 5)["ag-" + a]
+    assert ([n.line for n in run["answer"]], run["first_now"]) == ([3], True)
+    assert hippo_cli.native_index(path, 2, 4)["ag-" + a]["answer"] is None
 
 
 def test_a_restated_launch_keeps_main_s_verdict(tmp_project, run_hippo, tmp_path):
