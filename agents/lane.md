@@ -22,8 +22,10 @@ prompt is a single `hippo dispatch …` command. The lane does the work, never y
    - Exit code 2: there is no lane record (the project has no `.hippo/`). Go to step 4.
 4. Wait on the output file itself: the command holds it open until it ends. Run this with the
    Bash tool in the foreground and `timeout: 600000`, `<path>` replaced by the output file:
-   `f='<path>'; SECONDS=0; while [ $SECONDS -lt 540 ] && lsof -w -t "$f" >/dev/null; do sleep 5; done; lsof -w -t "$f" >/dev/null && exit 3; tail -n 20 "$f"`
+   `f='<path>'; SECONDS=0; while lsof -w -t "$f" >/dev/null; r=$?; [ $r = 0 ]; do [ $SECONDS -lt 540 ] || exit 3; sleep 5; done; [ $r = 1 ] || { echo "lane: cannot tell whether the command still runs (lsof exited $r)" >&2; exit 4; }; tail -n 20 "$f"`
    - Exit code 3: the command is still running. Run the same command again, at once.
+   - Exit code 4: `lsof` could not run, so nothing here tells whether the command has ended.
+     Go to step 5 — main needs that line.
    - Otherwise it printed the output file's last lines. Go to step 5.
 5. Reply with the output of that last command, verbatim — every line exactly as printed,
    nothing added, nothing left out, no wording of your own.

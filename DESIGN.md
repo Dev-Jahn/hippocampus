@@ -863,20 +863,32 @@ inside a lane.
 
 **With no record to watch** — `--watch` exits 2 because the project has no `.hippo/`, or the
 output never shows a `dispatch:` id — the agent waits on the command itself, in one foreground
-call: `f='<output file>'; SECONDS=0; while [ $SECONDS -lt 540 ] && lsof -w -t "$f" >/dev/null;
-do sleep 5; done; lsof -w -t "$f" >/dev/null && exit 3; tail -n 20 "$f"`. The background shell
-and the wrapper hold that file open until they exit — codex writes into the wrapper's pipes, and
+call: `f='<output file>'; SECONDS=0; while lsof -w -t "$f" >/dev/null; r=$?; [ $r = 0 ]; do [
+$SECONDS -lt 540 ] || exit 3; sleep 5; done; [ $r = 1 ] || { echo "lane: cannot tell whether the
+command still runs (lsof exited $r)" >&2; exit 4; }; tail -n 20 "$f"`. The background shell and
+the wrapper hold that file open until they exit — codex writes into the wrapper's pipes, and
 Claude Code itself does not hold it (measured with `lsof`, 2.1.282) — so the loop ends with the
-command; still held after 540s it exits 3 like the watch, and the agent runs it again. It
-replaced "end your turn and reply when the completion notice arrives", which a Workflow breaks:
-a Workflow agent whose turn ends is done, and its background command is killed with it
-(measured, 2.1.282: the lane SIGTERMed 6s into an 8s run, the run returning only the two launch
-lines). Re-measured (2.1.282, sonnet, a stub codex, 2026-09-26), as a plain Agent and inside a
-Workflow, a 20s and a 570–600s lane each: with `.hippo/` the watch exited 0 for the short lane
-and 3 at 540s then 0 for the long one; without it the watch exited 2, the wait held until the
-lane's shell was gone — the long one's exiting 3 once at 541s — and every lane ended `exited
-rc=0`. Each of the eight replies was byte-equal to its last call's output (the wait's is the
-wrapper's lines and the host's `[exited with code 0]`), each Workflow's result held them as
+command; still held after 540s it exits 3 like the watch, and the agent runs it again. `lsof`
+exits 0 while a process holds the file and 1 once none does; any other code means it did not run
+— 127 where it is not installed, as on a minimal Linux image — and the wait exits 4 with that
+line, which the agent replies with, rather than print the file's last lines as if the command
+had ended. The first form took every non-zero `lsof` exit for "nothing holds it": with `lsof`
+off `PATH` and a writer holding the file for 8s, it printed the launch line and exited 0 at
+once, and the agent would have replied and ended its turn on a running lane (measured under zsh,
+2026-09-26). This form, live (2.1.282, sonnet, a stub codex, no `.hippo/`, `/usr/sbin` left off
+the Bash tool's `PATH`, 2026-09-26), as a plain Agent and inside a Workflow: the wait exited 4
+and each reply — main's result, the Workflow's — was that one line (the agent left out the
+shell's `command not found` line above it); inside the Workflow the lane was SIGTERMed 7s in, as
+the agent's turn ended. Main is told; the lane is not saved. The wait is measured on macOS
+(`lsof` 4.91) only. It replaced "end your turn and reply when the completion notice arrives",
+which a Workflow breaks: a Workflow agent whose turn ends is done, and its background command is
+killed with it (measured, 2.1.282: the lane SIGTERMed 6s into an 8s run, the run returning only
+the two launch lines). Re-measured (2.1.282, sonnet, a stub codex, 2026-09-26), as a plain Agent
+and inside a Workflow, a 20s and a 570–600s lane each: with `.hippo/` the watch exited 0 for the
+short lane and 3 at 540s then 0 for the long one; without it the watch exited 2, the wait held
+until the lane's shell was gone — the long one's exiting 3 once at 541s — and every lane ended
+`exited rc=0`. Each of the eight replies was byte-equal to its last call's output (the wait's is
+the wrapper's lines and the host's `[exited with code 0]`), each Workflow's result held them as
 given, and main got one notification per plain agent. A Workflow script launches the agent as
 `agent("<command>", {agentType: 'hippo:lane'})`; with no schema it returns those lines as a
 string. That run is a Workflow run of its own to the scribe (§3.5.3c): 38,801 sonnet tokens for
@@ -1150,12 +1162,13 @@ the sheet, and shipping 300 JSONL lines only offers something to recompute from,
   grammar in one block (every command, flag and enum value, held to `build_parser` by a test),
   when to reach for each, and what runs by itself. One screen; anything larger is a regression.
   It names the id a native run is recorded under — `ag-<agentId>`, or `ag-<runId>` for a
-  Workflow, whose launch result prints a `Task ID` first and the `Run ID: wf_…` four lines on;
-  a ref built from the Task ID names nothing hippo will ever record — and asks main to name a
-  task id once in a brief or script (the scribe links a run only to the one task id its brief
-  names, §3.5.3c) and `ag-wf_…` when it states a Workflow's verdict. Measured 2026-09-26: in
-  this repo's ledger 0 of 4 Workflow rows had a verdict — one's task done and its branch merged
-  — and 1 of 4 a task, against 2 of 3 subagent rows with a verdict; mlx-vlm linked 1 of 17.
+  Workflow, whose launch result prints a `Task ID` first and the `Run ID: wf_…` four lines on; a
+  ref built from the Task ID names nothing hippo will ever record — and asks main to name exactly
+  one task id in a brief or script (the scribe links a run only when its brief names one task id;
+  a second, anywhere in it, links none — §3.5.3c) and `ag-wf_…` when it states a Workflow's
+  verdict. Measured 2026-09-26: in this repo's ledger 0 of 4 Workflow rows had a verdict — one's
+  task done and its branch merged — and 1 of 4 a task, against 2 of 3 subagent rows with a
+  verdict; mlx-vlm linked 1 of 17.
 - **`hippo:checkup`** (~5KB) — a `/doctor`-style project diagnosis. It reads the ledger, PRIORS,
   failures, cursor gaps, recent transcripts and CLAUDE.md/memory, then reports waste patterns
   (retry loops, limit stalls, orphan dispatches), directive hygiene (stale or contradictory

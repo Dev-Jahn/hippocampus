@@ -11,6 +11,7 @@ its per-entry .err shape and goes through the same machinery.
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -619,6 +620,29 @@ def test_the_lane_agents_wait_blocks_until_the_command_lets_go_of_its_output(tmp
         proc = subprocess.run([shell, "-c", _lane_agent_wait(out, window=1)],
                               capture_output=True, text=True, timeout=60)
         assert (proc.returncode, proc.stdout, proc.stderr) == (3, "", "")
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+@pytest.mark.parametrize("shell", [s for s in ("/bin/bash", "/bin/zsh") if os.path.exists(s)])
+def test_the_lane_agents_wait_says_so_when_lsof_cannot_run(tmp_path, shell):
+    """With no `lsof` (a minimal Linux image) the wait cannot tell a running command from an
+    ended one. It must say so and exit 4, not print the file's last lines and exit 0 — the agent
+    reads that as "ended" and replies, and inside a Workflow its reply kills the lane."""
+    out = tmp_path / "task.output"
+    out.write_text("dispatch: no .hippo/ — skipping the dispatch record\n", encoding="utf-8")
+    bare = tmp_path / "bin"  # tail and sleep, no lsof
+    bare.mkdir()
+    for tool in ("tail", "sleep"):
+        (bare / tool).symlink_to(shutil.which(tool))
+    holder = _hold(out, ["sleep", "30"])
+    try:
+        proc = subprocess.run([shell, "-c", _lane_agent_wait(out)], capture_output=True,
+                              text=True, timeout=60, env={"PATH": str(bare)})
+        assert (proc.returncode, proc.stdout) == (4, "")
+        assert proc.stderr.splitlines()[-1] == (
+            "lane: cannot tell whether the command still runs (lsof exited 127)")
     finally:
         holder.kill()
         holder.wait()
