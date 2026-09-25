@@ -65,7 +65,8 @@ hippo dispatch --watch <dispatch-id> [--for SECONDS]
   In Claude Code each subagent gets the directives addressed to executors — no need to copy them
   into its brief — and a compaction summary ends with `## hippo deltas`, commands to check and run.
 - The judge, only when `TYPESAFE_API_KEY` is set: gate hints for the scribe, notes on directives,
-  routing and triage on dispatch and on a subagent's report. Without the key nothing changes.
+  routing and triage on dispatch and on a subagent's report, and a capsule `check:` line for an
+  open task a turn seems to have finished. Without the key nothing changes.
 - The dispatch wrapper records the launch, the lane's usage and its triage.
 - Recording through the CLI only raises certainty; nothing breaks if you skip a record.
 

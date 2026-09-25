@@ -919,6 +919,7 @@ DOCUMENTED_WS_ENTRIES = {  # DESIGN §3.1 + §3.5.1 (scribe.lock)
     "worklog.md",
     "PRIORS.md",
     "cursors.json",
+    "task-flags.json",
     "failures",
     "briefs",
     "config.yaml",

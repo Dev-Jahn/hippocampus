@@ -108,6 +108,7 @@ enforcement:      none
   worklog.md        # generated: the human-facing work log the scribe accumulates (date sections)
   PRIORS.md         # generated: the distilled surface the distiller regenerates
   cursors.json      # the scribe's per-session transcript cursors
+  task-flags.json   # generated: open tasks a window read as ended, for the capsule (§3.5.9)
   failures/         # dumps of clerk output that failed validation (checkup reports them)
   briefs/           # delegation briefs (COMMON.md + one file per task) — see below
   lanes/            # per codex lane: its record, raw stderr and report (§3.6); pruned after 7 days
@@ -117,7 +118,7 @@ enforcement:      none
 In a directory with no `.hippo/`, every hook and every CLI command is a **completely silent no-op**
 (zero contamination of other projects).
 
-Every file hippo rewrites (tasks, worklog, PRIORS, cursors, lane records) is replaced whole: written to a tmp file
+Every file hippo rewrites (tasks, worklog, PRIORS, cursors, task flags, lane records) is replaced whole: written to a tmp file
 beside it, fsync'd, then renamed over it (`write_durable`). The ledger is only ever appended to.
 Measured (b200, 2026-09-23): a node failure during an in-place worklog rewrite left steno's 412KB
 worklog.md at 0 bytes on a shared filesystem that kept the truncation and lost the data.
@@ -680,6 +681,57 @@ subagent's own (PreCompact, below).
    had run 18 times ever, in 10 projects, 5 of them typed by hand, and PRIORS — the routing
    evidence the dispatch skill tells main to read — was stale in every one. A schedule was ruled
    out (§4); the Stop that already drives the scribe is the clock.
+9. **Open tasks that look ended** (judge on only). A task main finished and never closed stays
+   open in tasks.yaml, and every capsule after it re-injects the task as open work — the stale
+   record PreCompact's request catches only at a compaction (§3.4). So after step 8, on the
+   clerk's success and failure paths alike, the scribe asks `clerks/jev/task-end.yaml` over the
+   window's digest — the one the gate read — beside every open task (`pending|active`; id,
+   title and notes as tasks.yaml holds them), one `done_{i}` each: does the digest show that
+   task's work finished or abandoned? It is a request of its own, never merged into the gate's,
+   whose recall was measured on a digest-only state (3b). An answer at or over `recheck_at` 0.5
+   is asked again with that one task alone beside the digest; at or over `flag_at` 0.7 on the
+   recheck, the task is flagged. Every request is metered (`ev:clerk name:jev-task-end`,
+   `src:scribe`); a failed one writes that row `ok:false`, puts its reason on stderr
+   (`jev-task-end: …`) and flags nothing. A flag is `{t, p}` under the task's id in
+   `task-flags.json`, `t` being when the scribe read the tasks, and it is shown, never applied:
+   the capsule's `check:` line asks main (§6), and no status changes. It is not a ledger event —
+   §3.2 stays exactly as it is — because what shows is derived from the file and tasks.yaml at
+   every read: a flag goes quiet by itself once main writes to the task after it (its `updated`
+   stamp passes `t`) or the task is no longer open. The file is written here only, under the lock
+   the scribe holds for its whole run (step 1): read, merged with this window's flags, pruned of
+   every flag that no longer shows, and replaced whole — two sessions' scribes keep each
+   other's flags.
+
+   It runs last because it reads nothing the scribe wrote (the clerk never writes tasks.yaml)
+   and nothing waits on it: a slow or failed judge holds up no clerk and no distiller, and a
+   flag lands at most one Stop later than it could. Its windows are the ones the replay below
+   asked — every one past the prefilter, whatever the gate answered (the gate decides nothing,
+   3b), and none with no task open. **Codex runs it the same**: the question reads only the
+   digest, and digest_lite reduces a rollout to the line vocabulary the gate already reads
+   there. The replay's windows were all Claude Code's; one Codex turn, smoked live (btop's first
+   hippo turn, which squash-merged three tasks), flagged all three (0.96, 0.91, 0.97).
+
+   Measured (2026-09-25): a replay of every Stop in 6 sessions over 5 projects on this Mac —
+   592 windows, 93.5% of the judgments from one mlx-vlm session, each window's rosters rebuilt
+   as they stood then — asked 5,635 task judgments in 715 requests, median 658 ms each. Of the
+   22 flags that fell outside the window where main closed the item, independent adjudication
+   labelled 15 right and 7 wrong; 6 of the wrong ones were task flags, all one shape — one stage
+   merged, the task goes on. That is 6 in 5,635, 0.106% false task flags per judgment, against a
+   0.1% bar (some 2,000 judgments a day meet 5–15 real closures; past the bar most flags would
+   be wrong). 65 of 69 task closures were flagged at or before main closed them and 16 at least
+   one window early, but only 5 of those 16 had a session start in between, where the line
+   shows (4 right, 1 wrong): the line earns its place on the task main does not close in the
+   turn that finished it, and a wrong one costs a line and a note. The bars jitter — an identical
+   state re-asked moved by up to 0.03, and 8 rechecks sat in [0.68, 0.72] — so a flag at the bar
+   may come and go between runs, and they are not retuned on this data. The shipped step, run
+   live over the replay's 20-window pilot (the 18 windows with a task open, 28 requests, one
+   window through the whole `hippo scribe`, gate included), raised the same 7 task flags plus one
+   in that band: a recheck the replay read at 0.68 read 0.70, and 0.66 when asked once more —
+   main closed that task in that very window. Its 109 stage-1 answers moved from the replay's by
+   0.01 on average and 0.10 at most, none across `recheck_at` — the replay's state also carried
+   the live directives, the one input that differs. Asking about those was the replay's other
+   half — per live directive, did a user line drop, reverse or complete it — and it caught 3 of
+   15 withdrawals, so it was not built.
 
 ### 3.6 The dispatch wrapper (`hippo dispatch`)
 
@@ -1139,6 +1191,10 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
   treatment a broken clerk prompt gets. A caller fans out over n items by
   calling it once per item and merging the maps — n narrow questions in one request, not one
   question about n things.
+- **The specs**, and where each is asked: `scribe-gate` (the scribe's gate, §3.5.3b),
+  `task-end` (open tasks a window reads as ended, §3.5.9), `directive` (conflict and audience
+  notes, §6), `brief-check` and `route` (before a launch, §3.6), `harvest` (a lane's triage at
+  exit, §3.6, and a native run's, §3.5.3c), `failure-cluster` and `verify` (the harvest, §3.6).
 - **`judge(hp, name, state, questions) → (answers, meta)`** never raises for a backend or network
   problem. `meta` is `{ok, reason, ms, tokens, model}`; `tokens` is the reply's input+output usage.
   A missing answer for a requested id is a failure like any other. A missing or malformed spec file
@@ -1206,6 +1262,17 @@ The `cli:` line is main's only (a lane has its `report:` line instead): the comm
 because the capsule is what re-arrives after a compaction and that is exactly when the grammar
 was being re-read — measured, 405 `--help` calls across 19 projects, and 59 of Codex's 96 (61%)
 came within 30 tool calls of a compaction.
+
+A `check:` line (main's only) names the open tasks whose flag still shows (§3.5.9) —
+`· check: feat/x, fix/y look finished or abandoned — close them, or note what is left` — at
+every session start, compaction included, in tasks.yaml order, and is absent when none does. It
+is the judge's reading and worded as one, never a status: main closes the task (`task
+done|drop`) or writes what is left into its notes, and either write moves the task's `updated`
+stamp past the flag, which is what hides it — nothing is deleted by hand and nothing is applied
+(staleness is shown, never resolved, as the third rule below says of directives). Neither a
+lane's capsule nor a subagent's slice carries it: closing a task is main's call, and a worker's
+surface is two commands (§9.7). Without the key the scribe never writes the file, so a project
+that never had one never sees the line.
 
 A `scribe:` line (main's only) appears when the latest three or more `ev:clerk name:turn-scribe`
 rows all failed — the streak and the newest scribe dump's first line, which carries the backend's
