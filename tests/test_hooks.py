@@ -363,6 +363,12 @@ def _said(text):
     return _rec("assistant", [{"type": "text", "text": text}])
 
 
+def _response(mid, *recs):
+    """The lines of one response: the host writes each block as a line of its own, all with the
+    response's message id."""
+    return [{**r, "message": {**r["message"], "id": mid}} for r in recs]
+
+
 def _lines(path, recs, mode="w"):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open(mode, encoding="utf-8") as f:
@@ -385,6 +391,13 @@ def _session(project, main, agents=None):
 # agent's file reads there. One running a tool has no user line to compact on.
 WORKING = [_user("brief"), _call("toolu_r1", "Read"), _answer("toolu_r1")]
 RUNNING = [_user("brief"), _call("toolu_r1", "Bash")]
+# Agents that are done: a Workflow agent ends in its StructuredOutput call's result, and one
+# stopped by Esc in the interrupt line (measured); no model turn follows either.
+FINISHED = [_user("brief"), _call("toolu_s1", "StructuredOutput", verdict="ok"),
+            _user([{"type": "tool_result", "tool_use_id": "toolu_s1",
+                    "content": "Structured output provided successfully"}])]
+STOPPED = [*RUNNING, _answer("toolu_r1"),
+           _user([{"type": "text", "text": "[Request interrupted by user for tool use]"}])]
 
 # Main, fork mode on: it launched in the background and ended its turn — or went on working.
 LAUNCHED = [_user("go"), _call("toolu_1"), _answer("toolu_1", status="async_launched",
@@ -414,11 +427,12 @@ def _session_start(project, repo_root, source="compact", prompt="p1"):
 def test_an_agent_s_own_compaction_is_not_main_s(tmp_project, repo_root, run_hippo):
     """On 2.1.282 an agent's own compaction fires PreCompact and SessionStart(compact) with
     main's session, transcript and prompt_id and no agent_id (measured, §3.4). Main is not
-    compacting while it sits idle (after its reply or a local command), runs a tool or has moved
-    past the hook's prompt, so then the agent at a compaction point is whose compaction it is:
-    no deltas request (commands it ran
-    would land as main's, src=cli), and once compacted what SubagentStart gave it — never main's
-    capsule with its `compact:` line. Background agents and Workflow agents too: with
+    compacting while it sits idle (after its reply, a local command, a `!` command or an Esc),
+    has a call of its response still out (a tool it runs, a foreground agent beside a call
+    already back) or has moved past the hook's prompt, so then the agent at a compaction point
+    is whose compaction it is: no deltas request (commands it ran would land as main's,
+    src=cli), and once compacted what SubagentStart gave it — never main's capsule with its
+    `compact:` line. Background agents and Workflow agents too: with
     CLAUDE_CODE_FORK_SUBAGENT=1 every Agent call is one of those."""
     _directives(tmp_project, run_hippo)
     cases = {
@@ -429,9 +443,21 @@ def test_an_agent_s_own_compaction_is_not_main_s(tmp_project, repo_root, run_hip
         "main already past the hook's prompt": ([*IDLE, _user("<task-notification>…", "p2")],
                                                 "agent-a1"),
         "main idle after a manual /compact": (AFTER_COMPACT, "agent-a1"),
+        # Main sends no request until every call of its response is back, so a call already
+        # answered beside the foreground agent it still waits on is no compaction point.
+        "a foreground agent beside a call already back": (
+            [_user("go"), *_response("m1", _call("toolu_1"), _call("toolu_b", "Read")),
+             _answer("toolu_b")], "agent-a1"),
+        "main idle after an Esc": (
+            [*LAUNCHED, _call("toolu_b", "Bash"), _answer("toolu_b"),
+             _user([{"type": "text", "text": "[Request interrupted by user]"}])], "agent-a1"),
+        "main idle after a `!` command": (
+            [*IDLE, _user("<bash-input>ls</bash-input>", "p0"),
+             _user("<bash-stdout>t.jsonl</bash-stdout><bash-stderr></bash-stderr>", "p0")],
+            "agent-a1"),
     }
     for case, (main, rel) in cases.items():
-        prompt = "p0" if main is AFTER_COMPACT else "p1"
+        prompt = "p0" if main[-1].get("promptId") == "p0" else "p1"
         _session(tmp_project, main, {rel: ("general-purpose", WORKING)})
         proc = _pre_compact_at(tmp_project, repo_root, prompt)
         assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), case
@@ -448,10 +474,11 @@ def test_an_agent_s_own_compaction_is_not_main_s(tmp_project, repo_root, run_hip
 
 def test_main_s_own_compactions_keep_the_request(tmp_project, repo_root):
     """Main losing its request is the worse error, so anything short of main shown not to be
-    compacting is main's: main at the hook's prompt ending in a user line (mid-turn, or waiting
-    on its reply beside an agent), a prompt main just took that is not on disk yet, a manual
-    /compact (only the user types it, into main), no agent at a compaction point, and a host
-    that sends no prompt_id."""
+    compacting is main's: main at the hook's prompt ending in a user line with every call of its
+    response back (mid-turn, or waiting on its reply beside an agent) — a call a dead process
+    left unanswered before a new prompt included — a prompt main just took that is not on disk
+    yet, a manual /compact (only the user types it, into main), no agent at a compaction point
+    (finished agents stay at a user line for good), and a host that sends no prompt_id."""
     cases = {
         "mid-turn beside its own agent": ([*LAUNCHED, _call("toolu_b", "Read"),
                                            _answer("toolu_b")], WORKING, "p1", None),
@@ -465,6 +492,15 @@ def test_main_s_own_compactions_keep_the_request(tmp_project, repo_root):
         "an agent running a tool": (IDLE, RUNNING, "p1", None),
         "an agent that answered": ([_user("go"), _call("toolu_1"), _answer("toolu_1")],
                                    [*WORKING, _said("done")], "p1", None),
+        # Finished agents stay at a user line for good; they are no compaction's owner.
+        "a finished Workflow agent": (IDLE, FINISHED, "p1", None),
+        "an agent stopped by Esc": (IDLE, STOPPED, "p1", None),
+        "back from every call of its response": (
+            [_user("go"), *_response("m1", _call("toolu_1"), _call("toolu_b", "Read")),
+             _answer("toolu_b"), _answer("toolu_1", status="async_launched", agentId="a1")],
+            WORKING, "p1", None),
+        "a call a dead process left, then a prompt": (
+            [*IDLE, _call("toolu_x", "Bash"), _user("go on", "p2")], WORKING, "p2", None),
         "a host without prompt_id": (IDLE, WORKING, None, None),
     }
     for case, (main, agent, prompt, trigger) in cases.items():
@@ -521,10 +557,10 @@ def _note(task, status="completed"):
 
 def test_the_capsule_after_a_compaction_names_native_runs_still_out(tmp_project, repo_root):
     """A summary can drop a launch; main's capsule after a compaction names each background run
-    with nothing back yet, beside the ledger's in-flight entries (§6). Not a run that notified —
-    one that died with an earlier process is notified `stopped` on resume (measured) — nor one
-    main stopped (a stopped run never notifies, measured), nor a hippo:lane relay (its lane is
-    the ledger's)."""
+    whose answer is not back yet, beside the ledger's in-flight entries (§6). Not a run that
+    notified — one that died with an earlier process is notified `stopped` on resume (measured)
+    — nor one main stopped (a stopped run never notifies, measured), nor a hippo:lane relay
+    (its lane is the ledger's). An interim notification is test_native_runs'."""
     main = [_user("go"), *_launch("toolu_0", description="old process run", agentId="a0"),
             _note("a0", "stopped"), _user("go on", "p2"),
             *_launch("toolu_1", "p2", description="scan the parser", agentId="a1"),
