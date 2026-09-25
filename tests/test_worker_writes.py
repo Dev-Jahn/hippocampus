@@ -9,10 +9,12 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 
+import pytest
 import yaml
 
 from conftest import REPO_ROOT, read_ledger
-from test_native_runs import _assistant, _clerk, _note, _queued, _scribe, _user, _write
+from test_native_runs import (WF, WF_TASK, _assistant, _clerk, _note, _queued, _scribe, _user,
+                              _wf_file, _wf_launch, _write)
 
 sys.path.insert(0, str(REPO_ROOT / "cli"))
 import hippo_cli  # noqa: E402
@@ -155,6 +157,37 @@ def test_a_malformed_tasks_file_never_holds_the_scribe_back(tmp_project, run_hip
     assert cursors["s1"] == len((tmp_project / "transcript.jsonl").read_text().splitlines())
     assert any("malformed tasks.yaml" in p.read_text()
                for p in (tmp_project / ".hippo" / "failures").glob("*-native-*"))
+
+
+@pytest.mark.parametrize("end", ["TaskStop", "killed"])
+def test_a_run_over_a_day_old_is_read_in_the_window_it_ends(tmp_project, run_hippo, tmp_path,
+                                                            end):
+    """A run launched over 24h ago is no longer read while it runs, so the window it ends in is
+    the last to read what its agents wrote since — and main's TaskStop, or a run file saying
+    `killed`, ends a Workflow with no notification (§3.5.3c)."""
+    hp, transcript = tmp_project / ".hippo", tmp_project / "transcript.jsonl"
+    (hp / "tasks.yaml").write_text(yaml.safe_dump({"tasks": [
+        {"id": "feat/x", "title": "x", "status": "done", "notes": [], "updated": _stamp(1)},
+    ]}), encoding="utf-8")
+    launch = _wf_launch()
+    launch[1]["timestamp"] = _at(-25 * 3600)
+    _write(transcript, [_user("run it"), *launch])
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w1"))
+
+    brief = {"type": "user", "timestamp": _at(0, 500), "message": {"role": "user",
+                                                                   "content": "x"}}
+    _write(tmp_project / "transcript" / "subagents" / "workflows" / WF / "agent-a1.jsonl",
+           [brief, *_bash("toolu_1", 0, "hippo task done feat/x")])
+    if end == "TaskStop":
+        _write(transcript, [_user("stop it"), _assistant({
+            "type": "tool_use", "id": "toolu_01StopStopStopStopStopSt", "name": "TaskStop",
+            "input": {"task_id": WF_TASK}})], mode="a")
+    else:
+        _wf_file(tmp_project, status="killed", taskId=WF_TASK)
+        _write(transcript, [_user("next")], mode="a")
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w2"))
+    assert json.loads((hp / "worker-writes.json").read_text()) == {
+        "task:feat/x": {"t": _stamp(1), "run": "ag-" + WF, "op": "task done feat/x"}}
 
 
 def test_a_command_is_read_the_way_the_shell_and_the_cli_read_it():

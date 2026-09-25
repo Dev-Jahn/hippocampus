@@ -753,8 +753,9 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
    native worker's shell carries exactly main's environment (§3.4), so a `hippo task done` it
    runs lands as main's, and nothing at write time can tell — a per-call hook is the only other
    place that could, and §4 keeps those out. The scribe reads it afterwards, from the runs 3c
-   indexed: for each run the window touched and each still running (launched within 24h), the
-   run's own transcript(s) — an agent's, a nested agent's, every agent of a Workflow
+   indexed: for each run the window touched or ended (a TaskStop, or a run file saying `killed`
+   or `failed`, ends one with no notification, 3c; past 24h that window is the last to read it)
+   and each still running (launched within 24h), the run's own transcript(s) — an agent's, a nested agent's, every agent of a Workflow
    (`subagents/workflows/<runId>/agent-*.jsonl`) — and never main's, so main's own calls never
    count; nothing before the first user line (a fork's opens with main's launching message).
    Each Bash command is walked the way step 9's replay walked main's own calls: quotes, operators,
