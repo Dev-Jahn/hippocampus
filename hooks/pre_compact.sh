@@ -8,8 +8,10 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # A subagent compacting its own context is not main: commands it ran would land as main's
-# (src=cli). Main's PreCompact carries no agent_id (measured); the host adds one to events fired
-# inside a subagent, as SubagentStart/SubagentStop show — for compaction that is a guard, unmeasured.
+# (src=cli). On 2.1.282 its compaction fires this hook as main's — main's session_id and
+# transcript_path, no agent_id (measured, §3.4) — so the CLI tells it apart on disk: the
+# foreground agent main is waiting on is still working. This check is for a host that marks
+# the event the way it marks SubagentStart and SubagentStop.
 [ -n "$(json_get agent_id)" ] && exit 0
 
 cwd="$(json_get cwd)"
