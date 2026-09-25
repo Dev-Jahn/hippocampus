@@ -4510,9 +4510,10 @@ NATIVE_EDIT_TOOLS = ("Edit", "Write", "NotebookEdit", "MultiEdit")
 NATIVE_EDITS_HEAD = ("files this agent edited with its edit tools; shell edits of files it "
                      "never read are not visible")
 # A notification's header opens with these, in this order. <tool-use-id> names the call the
-# agent is answering: the launch, or a SendMessage to it (Claude Code 2.1.280; absent there
-# on 2.1.237), and none when it resumed on its own background work; the task-id always names
-# the agent.
+# agent is answering — its launch or a SendMessage to it, on Claude Code 2.1.237 and 2.1.280
+# alike — and is missing when the agent resumed on its own background work, or (once, on
+# 2.1.237) on the end of an agent a SendMessage reached while it was still running; the task-id
+# always names the agent.
 TASK_NOTE_RE = re.compile(r"<task-notification>\s*<task-id>([^<]*)</task-id>"
                           r"(?:\s*<tool-use-id>([^<]*)</tool-use-id>)?")
 TASK_STATUS_RE = re.compile(r"<status>([^<]*)</status>")

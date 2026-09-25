@@ -514,9 +514,10 @@ subagent's own (PreCompact, below).
    script) and every `<task-notification>`, on a user line or a `queued_command` attachment
    (the `queue-operation` lines around it are bookkeeping, Bash background tasks notify in the
    same shape under ids no launch has, and the task-id always names the agent: the
-   `<tool-use-id>` names the call it answers — the launch, a SendMessage (2.1.280; none on
-   2.1.237), or none when it resumed on its own background work). An agent's own Agent calls
-   live in its transcript, and its `subagents/agent-<id>.meta.json` names the
+   `<tool-use-id>` names the call it answers — the launch or a SendMessage, on 2.1.237 and
+   2.1.280 alike — and is missing when the agent resumed on its own background work, or (once,
+   on 2.1.237) on the end of an agent a SendMessage reached while it still ran). An agent's
+   own Agent calls live in its transcript, and its `subagents/agent-<id>.meta.json` names the
    `parentAgentId`: nested runs are indexed through their parent and carry
    `parent: ag-<parentAgentId>`. A Workflow's own agents are not runs — the run is one — and
    a `hippo:lane` agent, which only babysits a codex lane the wrapper records, is skipped.
