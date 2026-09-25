@@ -623,7 +623,10 @@ def _lane_record(project, **over):
 
 def test_a_lane_row_shows_its_lane_and_every_other_row_keeps_its_default(tmp_project, tmp_path):
     hippo_cli.lanes_dir(tmp_project / ".hippo")  # what every lane start does: the pointer
-    _lane_record(tmp_project)
+    # Started 2h00m15s ago: a clock second passing while the status line runs cannot change
+    # the rendered elapsed time (a lane started "now" read 0s or 1s).
+    started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 7215))
+    _lane_record(tmp_project, started=started)
     lane_text = (json.dumps({"type": "user", "message": {"content": "hippo dispatch …"}}) + "\n"
                  + json.dumps({"tool_result": f"dispatch:{DID}"}) + "\n")
     ctx = _session(tmp_path, tmp_project, [
@@ -633,7 +636,7 @@ def test_a_lane_row_shows_its_lane_and_every_other_row_keeps_its_default(tmp_pro
     (line,) = proc.stdout.splitlines()
     assert json.loads(line) == {
         "id": "alane",
-        "content": "codex · pass2 tensorize · 0s · 14 cmds · exec: pytest -q tests/test_pass2.py"}
+        "content": "codex · pass2 tensorize · 2h00m · 14 cmds · exec: pytest -q tests/test_pass2.py"}
 
 
 def test_a_lane_row_follows_the_last_id_its_agent_named_and_shows_the_end(tmp_project,
