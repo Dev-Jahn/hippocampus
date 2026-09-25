@@ -5156,12 +5156,14 @@ def native_in_flight(hp, transcript):
     Out: launched in the background (`async_launched`), with its answer to the brief not
     complete yet (`native_answer`, the scribe's rule: an interim notification — the agent
     stopped with background work of its own still running — promises a final one, unless that
-    work has ended or main has messaged the agent since), and no TaskStop of main's naming it.
-    A run main stopped never notifies (measured, mlx-vlm: 4 of 4 Workflow runs, their run files
-    `killed`, none notified across two later restarts); one that died with its process is
-    notified `stopped` when the session resumes (measured, 2.1.282). A foreground call is not
-    here: main compacts only once it has returned. Nor is a run main logged itself: the scribe
-    takes main's row as its record (`native_refs`), and `in_flight` lists that row."""
+    work has ended or main has messaged the agent since), and not ended by the scribe's end
+    rule (`native_end`): no TaskStop of main's naming it, and for a Workflow no run file saying
+    killed or failed for this launch. A run main stopped never notifies (measured, mlx-vlm: 4 of
+    4 Workflow runs, their run files `killed`, none notified across two later restarts); one
+    that died with its process is notified `stopped` when the session resumes (measured,
+    2.1.282). A foreground call is not here: main compacts only once it has returned. Nor is a
+    run main logged itself: the scribe takes main's row as its record (`native_refs`), and
+    `in_flight` lists that row."""
     if not transcript:
         return []
     transcript = Path(transcript)

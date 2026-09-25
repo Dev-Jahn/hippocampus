@@ -1582,9 +1582,11 @@ flying the line is absent; a dispatch older than a day is not in flight but forg
 
 After a compaction the line also names main's native runs still out (§3.5.3c) —
 `build:parser (workflow · 0h12m)` — read from main's transcript, not the ledger: launched in the
-background, its answer to the brief not complete yet, and no TaskStop of main's naming it. The
-summary can drop a launch, and then main no longer knows a result is owed (measured: main
-compacting with a Workflow of its own still out got `wf-sleeper (workflow · 0h00m)`). "Not
+background, its answer to the brief not complete yet, and not ended by the scribe's end rule
+(§3.5.3c): no TaskStop of main's naming it, and for a Workflow no run file saying `killed` or
+`failed` for this launch. The summary can drop a launch, and then main no longer knows a result
+is owed (measured: main compacting with a Workflow of its own still out got `wf-sleeper
+(workflow · 0h00m)`). "Not
 complete" is the rule the scribe reads an answer by (`native_answer`): no notification, or only
 interim ones — the agent stopped with background work of its own still running, which promises
 a final one — while that work runs and main has not messaged the agent since. Two runs on this
@@ -1594,8 +1596,9 @@ run exactly while its result is owed; counting only a final one would list forev
 interim-first runs here that never got one — each one's work has since ended with the agent
 idle, and none is listed. A run main stopped never notifies (measured, mlx-vlm: 4 of 4
 Workflow runs, their run files `killed`, none notified across two later restarts), so its
-TaskStop is what ends it; a run whose process ended is notified `stopped` when the session
-resumes (measured, 2.1.282, a process ended by SIGTERM). Only after a compaction: at startup
+TaskStop is what ends it — or, for a Workflow stopped or failed with no TaskStop of main's, its
+run file; a run whose process ended is notified `stopped` when the session resumes (measured,
+2.1.282, a process ended by SIGTERM). Only after a compaction: at startup
 nothing is out yet, and a resume notifies the old process's runs itself. A `hippo:lane` relay
 is left out: its lane is the ledger's own entry. So is a run main logged itself, under its bare
 id or with its description as the scope: the scribe takes that row as the run's record
