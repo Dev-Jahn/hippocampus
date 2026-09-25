@@ -1084,11 +1084,12 @@ until the lane's shell was gone — the long one's exiting 3 once at 541s — an
 the wrapper's lines and the host's `[exited with code 0]`), each Workflow's result held them as
 given, and main got one notification per plain agent. A Workflow script launches the agent as
 `agent("<command>", {agentType: 'hippo:lane'})`; with no schema it returns those lines as a
-string. That run is a Workflow run of its own to the scribe (§3.5.3c): 38,801 sonnet tokens for
-the two relays above, which is why the dispatch skill sends a fan-out with nothing after it to
-`--batch`. Headless `-p` waits for a background Workflow only ten minutes past main's last turn,
-then kills it (`print wind-down … at the wait ceiling`; the lane is recorded `killed by
-SIGTERM`), which is why the Workflow's long lane was 570s.
+string. The relays are no run of their own to the scribe (§3.5.3c): their cost — 38,801 sonnet
+tokens for the two above — is recorded nowhere, and a Workflow made of nothing else gets no row,
+which is why the dispatch skill sends a fan-out with nothing after it to `--batch`. Headless
+`-p` waits for a background Workflow only ten minutes past main's last turn, then kills it
+(`print wind-down … at the wait ceiling`; the lane is recorded `killed by SIGTERM`), which is
+why the Workflow's long lane was 570s.
 
 **The row** (`settings.json` → `subagentStatusLine` → `scripts/lane_status.py`). Claude Code
 runs a plugin's subagentStatusLine about every 5s with the visible agent rows on stdin. For each
