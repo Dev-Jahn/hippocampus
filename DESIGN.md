@@ -191,16 +191,19 @@ optional `src` (`scribe|cli|wrapper|executor`).
 - `ev:triage` (1.14.0) is the judge's reading of a finished lane (§3.6) — written by the wrapper
   (`src=wrapper`) at lane exit, from single dispatch and batch alike, and rejected from the
   clerk by the same rule as `usage`: the wrapper observed it. The scribe's code writes one too
-  (`src=scribe`, 1.15.0) for a native run's first completion (§3.5.3c).
+  (`src=scribe`, 1.15.0) for a native run's answer to its brief (§3.5.3c).
   `route ∈ {accept-candidate, escalate, no-go-candidate, failed}`, `verify` is a bool,
   `cause ∈ {capability, spec, environment, transient}` or absent, and `p` is a flat map of the
   compact probabilities the route was computed from (`done`, `blocked`, `ask`, `creep`,
-  `evidence`, and `risk` on its 0–3 ladder — numbers only). `ref` joins a dispatch fail-closed.
-  A judge failure writes nothing: the `ev:clerk name:jev-harvest ok:false` row is the gap. A
-  route is evidence of a check rc's standing, never a verdict — and recording it closes a loop:
-  the in-flight line shows the latest route beside the lane's claim, and PRIORS tables each
-  triaged dispatch's route against main's first verdict (§3.6b), measuring the judge the way it
-  measures executors.
+  `evidence`, and `risk` on its 0–3 ladder — numbers only). `trimmed` (1.15.1, absent when
+  nothing was) lists the fields of the state that were shortened to fit the judge
+  (`stderr_tail`, `brief`, `changes`, `report` — §3.6): the row is the only record a single
+  dispatch or a native run keeps of what the judge did not see. `ref` joins a dispatch
+  fail-closed. A judge failure writes nothing: the `ev:clerk name:jev-harvest ok:false` row is
+  the gap. A route is evidence of a check rc's standing, never a verdict — and recording it
+  closes a loop: the in-flight line shows the latest route beside the lane's claim, and PRIORS
+  tables each triaged dispatch's route against main's first verdict (§3.6b), measuring the
+  judge the way it measures executors.
 - `dispatch.depth` (int, absent = 0) and `dispatch.parent` (§9.5, built in 1.9.0): depth is how
   far a lane may re-delegate — 0 is a leaf whose capsule says so, 1 may spawn children that
   start at 0. `parent` is stamped by the wrapper from `HIPPO_DISPATCH` when a launch happens
@@ -475,15 +478,17 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
    carries its report inline), each Workflow launch (`runId`, `taskId`, `workflowName`, the
    script) and every `<task-notification>`, on a user line or a `queued_command` attachment
    (the `queue-operation` lines around it are bookkeeping, Bash background tasks notify in the
-   same shape under ids no launch has, and after a SendMessage only the task-id names the
-   agent). An agent's own Agent calls live in its transcript, and its
-   `subagents/agent-<id>.meta.json` names the `parentAgentId`: nested runs are indexed
-   through their parent and carry `parent: ag-<parentAgentId>`. A Workflow's own agents are not
-   runs — the run is one — and a `hippo:lane` agent, which only babysits a codex lane the
-   wrapper records, is skipped. **Rows**: a run's id is `ag-<agentId>` (`ag-<runId>` for a
-   Workflow), which main sees at launch. The kind is the one slot a reading of the brief has to
-   fill, and the clerk reads the turn anyway: the payload lists each run with no row yet,
-   launched within 24h, as `ag-<id> · <executor> · <description> · brief: <first 300 chars>`,
+   same shape under ids no launch has, and the task-id always names the agent: the
+   `<tool-use-id>` names the call it answers — the launch, a SendMessage (2.1.280; none on
+   2.1.237), or none when it resumed on its own background work). An agent's own Agent calls
+   live in its transcript, and its `subagents/agent-<id>.meta.json` names the
+   `parentAgentId`: nested runs are indexed through their parent and carry
+   `parent: ag-<parentAgentId>`. A Workflow's own agents are not runs — the run is one — and
+   a `hippo:lane` agent, which only babysits a codex lane the wrapper records, is skipped.
+   **Rows**: a run's id is `ag-<agentId>` (`ag-<runId>` for a Workflow), which main sees at
+   launch. The kind is the one slot a reading of the brief has to fill, and the clerk reads
+   the turn anyway: the payload lists each run with no row yet, launched within 24h, as
+   `ag-<id> · <executor> · <description> · brief: <first 300 chars>`,
    the clerk answers `{"ev":"dispatch","id":"ag-…","kind":…}`, and code keeps only the kind —
    one of the dispatch skill's tags, else the event is dumped and the run stays listed — and
    fills the rest from what the run left behind: `exec` = `fork` (meta `isFork`), `workflow` or
@@ -507,29 +512,59 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
    final context size, not spend, and is never read. A row equal to the last one for
    `(ref, model)` is not written again, so re-reading a window writes nothing twice, and a
    resumed agent gets a fresh cumulative row at its next completion.
-   **Triage** (judge on only): a run's first completion is read exactly as a wrapper lane at exit
-   (§3.6), `src=scribe`, once per dispatch, at most 8 calls a window, and only in the window
-   where it arrives — a resumed agent's later report is never triage material, even when the
-   first reading failed. An interim notification is no completion (an agent that stopped with
-   background work of its own still running says so, and notifies again when done; measured, 3
-   of the 14 agent runs in one mlx-vlm session sent only interim ones, and have no triage).
-   brief = the call's prompt (a Workflow's script); report = the notification's `<result>` (a
-   Workflow's whole result from `workflows/<runId>.json`, re-serialized compactly — the
-   notification's copy is cut at ~8k — and one that still does not fit the judge gets no
-   triage, a gap, never a shortened one); rc 0 only on `completed`; changes = the files the
-   agent edited with its edit tools plus its `edited_text_file` attachments, headed as what they
-   are (a shell edit of a file it never read is not visible), or git facts from its worktree
-   when it ran isolated and a base is honest (a HEAD that never moved: the working tree; one
-   that moved and has not reached main's branch: its merge-base with main's HEAD; else the list)
-   — never main's tree, which also holds main's work. The route never reaches the clerk.
+   **Triage** (judge on only): a run's answer to its brief is read exactly as a wrapper lane at
+   exit (§3.6), `src=scribe`, once per dispatch, at most 8 calls a window, and only in the
+   window where that answer became complete — a resumed agent's later report is never triage
+   material, even when the first reading failed. The answer is the run's notifications up to
+   the first after its first that names a call other than its launch — that one answers a
+   SendMessage. It is complete at its first final notification, the only one read. An interim
+   one — the agent stopped with background work of its own still running, and says so —
+   completes it only where the host's final one cannot be waited for: once the agent has
+   answered a SendMessage (main moved on from the interim report), or once the agent's own
+   transcript shows it idle since its last report with all the work it had started ended — a
+   Bash command, an agent or a workflow of its own by its own notification or a TaskStop; a
+   Monitor also by any notice of it after that report, its expiry included (an event with no
+   status): one that reaches the idle agent wakes it, so the run is not settled before it, and
+   an agent gets its expiry from 0.40s before the deadline to 0.27s after. With no such notice
+   a Monitor ends at its deadline, the `timeoutMs` its launch result states whatever the call
+   asked for — 0, none, for a `persistent` one, which hosts 2.1.246–258 ran. That moment is
+   fixed in the agent's transcript, so the window that finds it is the only one; the interim
+   reports, in order, are the report. Measured (mlx-vlm, 2026-09-23): 3 of 14 agent runs sent
+   only interim notifications. In each the work left was a `tail -f` Monitor that expired 5–11
+   minutes after the agent's last report; the host queued the expiry in main's transcript and
+   never delivered it to the idle agent, so it never resumed and no final notification came in
+   the two days the session ran on — and each interim report was the agent's whole report. A
+   fourth's only final notification answered its second SendMessage; its answer to the brief is
+   its first, interim report. What stays open is a background command whose end never reaches
+   the agent's transcript — that run is read when it ends, or never — and a Stop in the
+   fraction of a second between a Monitor's deadline and an expiry that reaches the agent after
+   it, which reads the run as settled.
+   brief = the call's prompt (a Workflow's script); report = the answer's `<result>`s (a
+   Workflow's whole result from `workflows/<runId>.json` — the notification's copy is cut at
+   ~8k — handed to the judge as the JSON structure it is, not as a string of it whose every
+   quote is escaped, and fitted by its structure like any over-budget report, §3.6: measured,
+   2 of 23 results were over the budget, 226,811 and 129,195 characters of research and
+   design output; with every finding and field kept, 305 of 657 strings cut to 215
+   characters and 4 of 174 to 3,833, both fit); rc 0 only on `completed`; changes = the
+   files the agent edited with its edit tools plus its `edited_text_file` attachments, headed
+   as what they are (a shell edit of a file it never read is not visible), or git facts from
+   its worktree when it ran isolated and a base is honest (a HEAD that never moved: the
+   working tree; one that moved and has not reached main's branch: its merge-base with main's
+   HEAD; else the list) — never main's tree, which also holds main's work. The route never
+   reaches the clerk.
    Nothing here raises out of the scribe: a bug is dumped to `failures/*-native-*` and the clerk
    runs as always. Replayed Stop by Stop over four real sessions on this Mac (2026-09-24, mock
    clerk and judge, scratch ledgers): 55 runs — 26 subagents, 3 forks, 3 nested forks, 23
    Workflow runs — got 55 rows; the 51 that had notified got usage (53 per-model totals over
    seven models), and 46 were triaged — the other five being 2 Workflow results over the judge's
-   budget and the 3 interim-only runs. The clerk had recorded two of the same Workflow runs as
-   `workflow/subagent/inherit` and `workflow/unknown/inherit`; code read
-   `workflow/claude-opus-5-5/xhigh` for both. The index costs 0.05s over a 24MB transcript.
+   budget and the 3 interim-only runs, all five triaged since 1.15.1. Replayed again over the
+   same windows (2026-09-25), the mlx-vlm session went from 26 to 30 of 32 runs triaged and
+   the hippo one from 9 to 10 of 12, the rest not yet notified; over both sessions as they
+   stood a day later, 60 of 65 and 12 of 13 — every run that notified (the 5 left had been
+   killed, and hippo's last was still running) — and none twice. The clerk had recorded two
+   of the same Workflow runs as `workflow/subagent/inherit` and `workflow/unknown/inherit`;
+   code read `workflow/claude-opus-5-5/xhigh` for both. The index costs 0.05s over a 24MB
+   transcript, and 0.10s over 39MB, 0.03s of it reading the agents whose answer is interim.
    **Codex is unchanged**: a `spawn_agent`'s brief is encrypted in the rollout
    (`gAAAAB…`), so the clerk keeps recording those children from the digest.
 4. Resolve the backend: `config.yaml > $HIPPO_CLERK_BACKEND > automatic (codex/gpt-6-luna/low when
@@ -860,9 +895,15 @@ has — `accept-candidate` is not acceptance, and batch still writes no `ev:outc
 lands in the journal as a `triage` line with every probability and in the ledger as
 `ev:triage` (§3.2), and the progress line gains `triage=<route>`. Over budget, the state is
 trimmed in one fixed order (stderr, brief, changes, then the report from its *head*, since a
-lane's summary of itself is at the end) and the record names what was cut — no silent
-shortening, and no answer invented for a judge that failed: `route: null` and an `ev:clerk
-name:jev-harvest ok:false` row are the record.
+lane's summary of itself is at the end) and the record names what was cut — the journal line
+and the `ev:triage` row's `trimmed` — no silent shortening, and no answer invented for a judge
+that failed: `route: null` and an `ev:clerk name:jev-harvest ok:false` row are the record. A
+structured report (a Workflow's JSON result, §3.5.3c) is never cut through the middle: every
+key and item stays, and every string in it is cut to the one longest length that fits,
+keeping its head, where a finding or a field states its point. Below `TRIAGE_LEAF_MIN` (120
+characters, about a sentence per item) it no longer says what the result said, so such a
+report is left whole, the judge refuses it as over budget, and the caller prints that reason
+on stderr (single dispatch and the scribe alike).
 
 **The harvest.** Every run ends with it, on stdout above the summary line (which stays last).
 Each exited entry is read — the triage its latest attempt already carries, or a fresh one where

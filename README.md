@@ -105,7 +105,7 @@ that returns probabilities, never prose — a few typed questions at moments whe
 holds the text: the scribe's digest (advisory hints for the clerk), the live directive set
 (`directive add`, `directive list`), every dispatch's brief before it launches and
 its report at exit (single and `--batch` alike), and each Claude Code subagent's or
-Workflow run's brief and report at its first completion, which the scribe finds at Stop.
+Workflow run's brief and the report that answers it, which the scribe finds at Stop.
 Answers are evidence a code policy thresholds; the judge never writes a verdict. There is no
 setting and no prompt: without the key, every command behaves exactly as it always has.
 Question specs are text in `clerks/jev/*.yaml`; the design is `DESIGN.md` §2 (judge), §3.5,
