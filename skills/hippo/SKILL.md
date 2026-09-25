@@ -65,8 +65,9 @@ hippo dispatch --watch <dispatch-id> [--for SECONDS]
 - The capsule, at session start and after every compaction: tasks, live directives, in flight —
   after a compaction also your subagent and Workflow runs with no result back yet. In Claude Code
   each subagent gets the directives addressed to executors — no need to copy them into its brief,
-  and its own compaction gets them again — and your compaction summary ends with
-  `## hippo deltas`, commands to check and run.
+  and its own compaction gets them again — and is told hippo writes are yours unless its brief
+  asks for one; a task, directive or verdict a subagent wrote shows as `worker wrote:` until you
+  confirm or undo it. Your compaction summary ends with `## hippo deltas`, commands to check and run.
 - The judge, only when `TYPESAFE_API_KEY` is set: gate hints for the scribe, notes on directives,
   routing and triage on dispatch and on a subagent's report, and a capsule `check:` line for an
   open task a turn seems to have finished. Without the key nothing changes.

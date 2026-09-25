@@ -109,6 +109,7 @@ enforcement:      none
   PRIORS.md         # generated: the distilled surface the distiller regenerates
   cursors.json      # the scribe's per-session transcript cursors
   task-flags.json   # generated: open tasks a window read as ended, for the capsule (§3.5.9)
+  worker-writes.json  # generated: task, directive and verdict writes a subagent made (§3.5.3d)
   failures/         # dumps of clerk output that failed validation (checkup reports them)
   briefs/           # delegation briefs (COMMON.md + one file per task) — see below
   lanes/            # per codex lane: its record, raw stderr and report (§3.6); pruned after 7 days
@@ -118,7 +119,7 @@ enforcement:      none
 In a directory with no `.hippo/`, every hook and every CLI command is a **completely silent no-op**
 (zero contamination of other projects).
 
-Every file hippo rewrites (tasks, worklog, PRIORS, cursors, task flags, lane records) is replaced whole: written to a tmp file
+Every file hippo rewrites (tasks, worklog, PRIORS, cursors, task flags, worker writes, lane records) is replaced whole: written to a tmp file
 beside it, fsync'd, then renamed over it (`write_durable`). The ledger is only ever appended to.
 Measured (b200, 2026-09-23): a node failure during an in-place worklog rewrite left steno's 412KB
 worklog.md at 0 bytes on a shared filesystem that kept the truncation and lost the data.
@@ -395,8 +396,22 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
 - **SubagentStart** (Claude Code; matcher `*`): `hooks/subagent_start.sh` → silent exit 0 with no
   `.hippo/`, for agent type `fork` (it already carries main's context, capsule included) and for
   `hippo:lane` (it only watches a codex lane, whose capsule comes from codex's own SessionStart);
-  otherwise the live directives addressed to executors, in the same envelope with
-  `hookEventName: "SubagentStart"` — and nothing at all when none is. Its walk crosses a linked
+  otherwise the live directives addressed to executors under the header `[hippo] directives N
+  live — this project's recorded rules`, then one line whether or not a directive is live —
+  `· hippo task, directive and outcome writes are main's — run one only when your brief asks for
+  it, otherwise put what should change in your report` — in the same envelope with
+  `hookEventName: "SubagentStart"`. The header named the lines "the user's standing rules"
+  through 1.15.1; every Workflow agent gets this slice (42 of 42 in this repo on 2.1.282), and its
+  harness tells it the relayed request is the only user voice, so the header now names a
+  record, not a voice. The writes line exists because a native worker's shell carries exactly
+  main's environment — every agent kind, Workflow agents included (18 env dumps on 2.1.282:
+  no variable marks a subagent or carries its id, `AI_AGENT` reads `…_agent` in main's shell
+  too) — so its `hippo task done` lands as main's, and a mlx-vlm Workflow agent did close a
+  task on the real project that way, with nothing recording it was not main (§3.5.3d records it
+  now). It is text: measured live (2026-09-26, sonnet), worded without "only when your brief
+  asks", a background Agent and a Workflow agent both declined the write their brief asked for
+  and reported it instead — and the real mlx-vlm close was one main's workflow script asked
+  for; worded as above, both ran it. Its walk crosses a linked
   worktree's `.git` file (§3.3): an `isolation: "worktree"` agent starts in
   `<project>/.claude/worktrees/agent-<id>` (measured, 2.1.281), and those are the agents that
   edit files — the conservative stop left exactly them without "never push". The reason: SessionStart
@@ -404,9 +419,9 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
   below carries one; it does fire after the subagent's own compaction, PreCompact below), so
   until this hook a user's standing rule reached a Claude Code worker only if main retyped it
   into the brief — the gap the audience axis (§9.4) closed for lanes. The slice
-  is directives only: no `report:` line (a native worker runs without `HIPPO_DISPATCH`, so its
-  `log outcome` would land as src=cli — main's verdict on its own work — while the scribe
-  records the run and main's verdict itself, §3.5.3c), no depth line
+  is directives and that one line only: no `report:` line (a native worker runs without
+  `HIPPO_DISPATCH`, so its `log outcome` would land as src=cli — main's verdict on its own
+  work — while the scribe records the run and main's verdict itself, §3.5.3c), no depth line
   (`HIPPO_DEPTH` indexes wrapper lanes, §9.5; a subagent's nesting is main's call in its brief).
   Measured on 2.1.281 (2026-09-24): it fires for general-purpose, Explore, fork, claude, custom
   and workflow-subagent agents, foreground and background, the matcher being the agent type;
@@ -417,7 +432,8 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
   holds its first request — 113ms in a headless session (the host's own `durationMs`), 94ms
   median over 15 direct runs, 73ms of it the one CLI call. In that session a general-purpose
   subagent quoted back exactly the executor slice, and a fork quoted main's capsule — its own
-  context, with nothing injected.
+  context, with nothing injected. A fork gets no writes line either: it is main's context
+  copied, `cli:` line included, and a write it makes is recorded like any worker's (§3.5.3d).
 - **PreCompact** (Claude Code): `hooks/pre_compact.sh` → silent exit 0 with no `.hippo/`, and
   for an agent's own compaction (below); otherwise plain text with exit 0, which the host
   appends to the compaction instructions: end the summary with `## hippo deltas`, one line per
@@ -733,6 +749,67 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
    of 5 runs with the release's prompt and roster, and in 5 of 5 with this one's.
    **Codex is unchanged**: a `spawn_agent`'s brief is encrypted in the rollout
    (`gAAAAB…`), so the clerk keeps recording those children from the digest.
+3d. **Worker writes** (every mode, no judge; after 3c's usage and triage, on every path). A
+   native worker's shell carries exactly main's environment (§3.4), so a `hippo task done` it
+   runs lands as main's, and nothing at write time can tell — a per-call hook is the only other
+   place that could, and §4 keeps those out. The scribe reads it afterwards, from the runs 3c
+   indexed: for each run the window touched and each still running (launched within 24h), the
+   run's own transcript(s) — an agent's, a nested agent's, every agent of a Workflow
+   (`subagents/workflows/<runId>/agent-*.jsonl`) — and never main's, so main's own calls never
+   count; nothing before the first user line (a fork's opens with main's launching message).
+   Each Bash command is walked the way step 9's replay walked main's own calls: quotes, operators,
+   redirections and heredoc bodies (a brief that quotes a command is text), `H=hippo` and
+   `${v%%pat}` expanded, a `for … in …; do … done` run per item, `h() { hippo … "$@"; }` taken as
+   an alias; each hippo command in it is read by hippo's own parser. The set is the writes that
+   are main's (§9.2: a worker may not say a task is done or its work accepted, and may not
+   rule): `task add|set|done|drop`, `directive add|withdraw` and `log outcome`, `log raw` of
+   either kind included; a dispatch, a review or a read is an observation a worker may make.
+   A call counts only where **this project's state shows it landed** — a task whose `updated`
+   stamp falls between the call (to the second, as the CLI stamps) and its result, or the
+   notification that a call sent to the background ended, and whose fields hold every value the
+   call set (a `done`'s or `drop`'s status, the field a `set` wrote as tasks.yaml stores it, an
+   added task's title, status, notes and deps), or a `src=cli` ledger row stamped there whose
+   kind, id and values do (a directive's state and text, a verdict's ref and result). The state
+   proves the call's success and its project at once. Resolving the project from the cwd and
+   the command's `cd`s cannot follow a `cd` into a variable set elsewhere, `HIPPO_DIR` or a
+   script, and reading success from the output misses output a command discarded (`2>&1 | tail
+   -2` after a `directive add` can keep its notes and drop its record); a call against a scratch
+   copy, a worktree outside the repo or another project, or one that failed, leaves nothing here
+   to match, and one from a worktree of this repo does. The values are part of the match
+   because the thing alone is not: a `task set <id> notes` matched on its task claimed main's
+   close of that task in the same window, and a background call's window runs as long as the
+   command does. `log outcome --from-batch` is not counted: its verdicts are named in a journal
+   whose path is relative to a shell the scribe never sees, so nothing on the line says which
+   rows it wrote, and matched on its kind alone it claimed any verdict main wrote in the window
+   (both shapes probed in review, 2026-09-26). None of the worker writes measured below was one.
+   The record is `worker-writes.json` — `{"task:<id>" | "directive:<id>" | "outcome:<dispatch
+   id>": {t, run, op}}`, `t` the state's own stamp, the latest write per key winning — which
+   §6's `worker:` line reads. A write shows until main writes to the same thing after `t`: a
+   task until its `updated` passes `t` (every task write moves it) or it leaves tasks.yaml, a
+   directive or a verdict until a later event on it from the CLI or the scribe. The file is
+   written under the scribe's lock, merged and pruned of what no longer shows, like
+   task-flags.json (step 9), and it is no ledger event (§3.2 stays exactly as it is): the fact
+   is re-derivable from the transcripts while they exist, and the file holds only what still
+   asks for main. A worker's verdict remains the first one PRIORS reads (§3.2); main's own
+   verdict after it clears the line and stays in the ledger as the correction, and a wrong
+   first-pass entry is a `tools/ledger_edit.py` fix — no worker verdict has been measured.
+   Measured (2026-09-26): replayed Stop by Stop over mlx-vlm session 01994ca9 (475 windows, 54
+   Workflow runs) against a scratch copy of its ledger and tasks (tasks.yaml plus the archive
+   the done ones moved to), the one real write — `wf_a868d1a2-52f`'s agent ran `hippo task done
+   ops/artifact-pruning-20260924` at 20:20:16Z, as main's workflow script asked it to — was
+   recorded at the first Stop after it, 20:27:54Z, and nothing else was. Over this repo's own
+   session (7dd428b0, 52 windows) it parsed 46 worker writes — 33 directive, 12 task, 1
+   outcome — every one against a scratch project, and recorded none; open-webui's (847fa716, 67
+   windows) had none. The step took 0.023s a window at the median and 0.085s at most across the
+   three, reading up to 38 transcripts (24MB) in one window. Re-run once the match took every
+   value a call set, the three replays found the same.
+   Live (2.1.282, sonnet, mock clerk): a background Agent's `task done` and a Workflow agent's
+   `directive add`, each asked by main's brief, were recorded under their runs; main, resumed,
+   read the line, confirmed both with writes of its own, and the next scribe emptied the file.
+   Not seen: a write made from a script, through `xargs` or `bash -c`, or through an alias from
+   the user's shell profile. A write main makes inside a worker call's own window to the same
+   thing with the same values — the same status on the task, the same verdict on the dispatch —
+   reads as the worker's; it costs a line.
 4. Resolve the backend: `config.yaml > $HIPPO_CLERK_BACKEND > automatic (codex/gpt-6-luna/low when
    codex exists, otherwise claude -p sonnet at low effort) > mock` (for tests). That pair is hippo's
    one cheap tier (the lane agent, §3.6, is its sonnet-low half); hippo runs no haiku (the A/B note
@@ -1443,8 +1520,9 @@ are proposals; skip any that are wrong`` — because the summary lands in main's
 capsule does (measured), and PreCompact asked it for those commands (§3.4). "Has", not "ends
 with": the host appends its own paragraphs after the summary. The condition is there for Codex,
 which fires SessionStart(compact) but gets no PreCompact. A native subagent gets none of this
-block: SubagentStart hands it the `[hippo] directives N live — the user's standing rules for
-this project` header and its executor-audience directive lines, nothing else, and so does the
+block: SubagentStart hands it the `[hippo] directives N live — this project's recorded rules`
+header and its executor-audience directive lines, then the line that hippo's task, directive
+and outcome writes are main's unless its brief asks for one, nothing else, and so does the
 SessionStart(compact) of its own compaction, which the host fires as main's (§3.4 — except
 while main, at the same prompt, waits on its own reply).
 
@@ -1463,6 +1541,17 @@ stamp past the flag, which is what hides it — nothing is deleted by hand and n
 lane's capsule nor a subagent's slice carries it: closing a task is main's call, and a worker's
 surface is two commands (§9.7). Without the key the scribe never writes the file, so a project
 that never had one never sees the line.
+
+A `worker:` line (main's only) names the task, directive and verdict writes a subagent made
+that main has not written to since (§3.5.3d), oldest first, each with the run that made it —
+`· worker wrote: task done ops/artifact-pruning-20260924 (ag-wf_a868d1a2-52f) — not yours yet:
+confirm it with a write of your own, or undo it` — five at most, the rest counted with the
+file's name; absent when none shows. A native worker's shell is main's, so each of those writes
+landed as main's (src=cli), and the line is where that stops being silent: main re-runs or
+touches it to make it its own, or undoes it, and either write hides it, like the `check:`
+line. Measured live (2.1.282): main, resumed with two such writes in the line — both ones its
+own brief had asked for — confirmed both and the line went; replayed, the only real one in 475
+mlx-vlm windows is the example above. It works without the key.
 
 A `scribe:` line (main's only) appears when the latest three or more `ev:clerk name:turn-scribe`
 rows all failed — the streak and the newest scribe dump's first line, which carries the backend's
@@ -1722,7 +1811,11 @@ parent's dispatch id means a batch's cost sums itself.
   when the writers are executors rather than the scribe.
 - **The surface handed to an executor should be two commands** — `hippo status --inject` and
   `hippo log outcome`. Not `task`, not `directive add`, not `prior`. A small surface is a small
-  policy; most of §9.2 is unnecessary if there is nothing to misuse.
+  policy; most of §9.2 is unnecessary if there is nothing to misuse. A native worker (Agent,
+  fork, Workflow) has no `HIPPO_DISPATCH` to turn its writes into claims, and no signal in its
+  environment stands in for one (§3.4), so there the same line is text in its SubagentStart
+  slice and a record after the fact (§3.5.3d): what it writes anyway shows in main's capsule
+  until main makes it its own or undoes it.
 
 ### 9.8 Order
 

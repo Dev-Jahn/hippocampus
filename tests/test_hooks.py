@@ -241,19 +241,25 @@ def _subagent(project, repo_root, agent_type="general-purpose"):
     return _run_hook(repo_root / "hooks" / "subagent_start.sh", payload, cwd=project)
 
 
+WORKER_RULE = ("· hippo task, directive and outcome writes are main's — run one only when your "
+               "brief asks for it, otherwise put what should change in your report")
+SLICE = ["[hippo] directives 2 live — this project's recorded rules",
+         "· live: use GPUs 0 and 1 only", "· live: never push; main merges", WORKER_RULE]
+
+
 def test_a_subagent_gets_the_executor_directives_and_nothing_else(tmp_project, repo_root,
                                                                   run_hippo):
     """Only the envelope is injected into a subagent (plain text is dropped, measured), and the
     slice is the executor audience — no report line (a native worker's `log outcome` would land
-    as main's verdict), no depth line, no tasks."""
+    as main's verdict), no depth line, no tasks — under a header that names the directives as
+    the project's record, not the user's voice (a Workflow agent's harness says the relayed
+    request is the only one), then the one line that says hippo writes are main's."""
     _directives(tmp_project, run_hippo)
     proc = _subagent(tmp_project, repo_root)
     assert proc.returncode == 0, proc.stderr
     hs = json.loads(proc.stdout)["hookSpecificOutput"]
     assert hs["hookEventName"] == "SubagentStart"
-    lines = hs["additionalContext"].splitlines()
-    assert lines[0].startswith("[hippo] directives 2 live")
-    assert lines[1:] == ["· live: use GPUs 0 and 1 only", "· live: never push; main merges"]
+    assert hs["additionalContext"].splitlines() == SLICE
 
 
 def test_a_worktree_isolated_subagent_gets_the_directives_too(tmp_project, repo_root,
@@ -275,13 +281,18 @@ def test_a_worktree_isolated_subagent_gets_the_directives_too(tmp_project, repo_
     proc = _subagent(wt, repo_root)
     assert proc.returncode == 0, proc.stderr
     lines = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"].splitlines()
-    assert lines[1:] == ["· live: use GPUs 0 and 1 only", "· live: never push; main merges"]
+    assert lines == SLICE
 
 
-def test_a_subagent_hook_is_silent_for_forks_lanes_and_no_directive(tmp_project, repo_root,
-                                                                    run_hippo, uninitialized_dir):
-    for agent_type in ("general-purpose", "fork", "hippo:lane"):
-        proc = _subagent(tmp_project, repo_root, agent_type)  # no directive at all yet
+def test_a_subagent_hook_is_silent_for_forks_lanes_and_outside_a_project(
+        tmp_project, repo_root, run_hippo, uninitialized_dir):
+    """With no directive live a worker still gets the writes line — a hippo write from its shell
+    lands as main's either way — while a fork (main's context) and hippo:lane get nothing."""
+    proc = _subagent(tmp_project, repo_root)  # no directive at all yet
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"] == WORKER_RULE
+    for agent_type in ("fork", "hippo:lane"):
+        proc = _subagent(tmp_project, repo_root, agent_type)
         assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), agent_type
     _directives(tmp_project, run_hippo)
     for agent_type in ("fork", "hippo:lane"):
@@ -461,9 +472,7 @@ def test_an_agent_s_own_compaction_is_not_main_s(tmp_project, repo_root, run_hip
         _session(tmp_project, main, {rel: ("general-purpose", WORKING)})
         proc = _pre_compact_at(tmp_project, repo_root, prompt)
         assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), case
-        lines = _session_start(tmp_project, repo_root, prompt=prompt).splitlines()
-        assert lines[0].startswith("[hippo] directives 2 live"), case
-        assert lines[1:] == ["· live: use GPUs 0 and 1 only", "· live: never push; main merges"]
+        assert _session_start(tmp_project, repo_root, prompt=prompt).splitlines() == SLICE, case
     # A fork's compaction summarized away the capsule it carried from main, so it gets the slice
     # too; hippo:lane gets nothing, as at its start.
     for atype, first in (("fork", "[hippo] directives 2 live"), ("hippo:lane", "")):
