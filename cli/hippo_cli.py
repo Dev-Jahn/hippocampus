@@ -5164,44 +5164,24 @@ def native_in_flight(transcript):
     if not transcript:
         return []
     transcript = Path(transcript)
-    launches, notes, _ = native_scan(transcript)
+    launches, notes, _, stops = native_scan(transcript)
     if not launches:
         return []
-    stopped = {b["input"].get("task_id") for rec in _main_calls(transcript, "TaskStop")
-               for b in _blocks(rec)
-               if b.get("name") == "TaskStop" and isinstance(b.get("input"), dict)}
     now = datetime.now(timezone.utc)
     out = []
     for key, launch in launches.items():
-        task = launch["result"].get("taskId") if launch["tool"] == "Workflow" else key
-        if launch["result"].get("status") != "async_launched" or task and task in stopped:
+        if launch["result"].get("status") != "async_launched":
             continue
         run = native_run(launch, key, transcript.with_suffix(""))
-        run["notes"] = [n for n in notes if n.task == task or n.tuid == launch["tuid"]]
-        if run["skip"] or native_answer(run, None, now) is not None:
+        run["notes"] = [n for n in notes if n.task == run["note_id"] or n.tuid == launch["tuid"]]
+        native_end(run, stops, 0, None)
+        # Stopped by main, or a Workflow whose run file says killed or failed: no answer is owed.
+        if (run["skip"] or stops.get(run["note_id"]) is not None
+                or (run["ended"] and not run["notes"]) or native_answer(run, None, now) is not None):
             continue
         age = f" · {age_label(run['t'], now)}" if run["t"] else ""
         out.append(f"{one_line(run['scope'] or key, 44)} ({run['executor']}{age})")
     return out
-
-
-def _main_calls(transcript, tool):
-    """Main's assistant records that call `tool`."""
-    try:
-        f = transcript.open("r", encoding="utf-8", errors="replace")
-    except OSError:
-        return
-    with f:
-        for raw in f:
-            if f'"{tool}"' not in raw or '"tool_use"' not in raw:
-                continue
-            try:
-                rec = json.loads(raw)
-            except ValueError:
-                continue
-            if (isinstance(rec, dict) and rec.get("type") == "assistant"
-                    and not rec.get("isSidechain")):
-                yield rec
 
 
 def _blocks(rec):
