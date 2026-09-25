@@ -581,6 +581,49 @@ def test_the_lane_agent_is_a_low_effort_sonnet_relay_with_bash_alone():
     assert re.search(r"grep -m1 -o 'dispatch:d\[0-9a-f\]\*'", text)
 
 
+def _lane_agent_wait(path, window=None):
+    """The lane agent's wait on a background command it has no lane record for (lane.md step
+    4), as the text gives it, with `<path>` filled in; `window` shortens its 540s. The sleep is
+    cut to 1s so the suite stays fast — the loop is otherwise the one the agent runs."""
+    text = (REPO_ROOT / "agents" / "lane.md").read_text(encoding="utf-8")
+    (cmd,) = re.findall(r"^   `(f='<path>'.*)`$", text, re.M)
+    cmd = cmd.replace("<path>", str(path)).replace("sleep 5", "sleep 1")
+    return cmd.replace("-lt 540", f"-lt {window}") if window else cmd
+
+
+def _hold(path, argv):
+    """A process holding `path` open as its stdout, the way the Bash tool's background shell
+    holds its output file."""
+    with open(path, "a", encoding="utf-8") as out:  # closed here, so only the child holds it
+        return subprocess.Popen(argv, stdout=out)
+
+
+@pytest.mark.parametrize("shell", [s for s in ("/bin/bash", "/bin/zsh") if os.path.exists(s)])
+def test_the_lane_agents_wait_blocks_until_the_command_lets_go_of_its_output(tmp_path, shell):
+    """Inside a Workflow a finished agent's background command is killed (measured: the lane
+    SIGTERMed 6s into an 8s run), so with no lane record to watch the agent must wait for the
+    command itself. The wait ends when nothing holds the output file, prints its last lines and
+    exits 0; still held at the window's end, it exits 3 for the agent to run it again."""
+    out = tmp_path / "task.output"
+    out.write_text("dispatch: no .hippo/ — skipping the dispatch record\n", encoding="utf-8")
+    holder = _hold(out, ["sh", "-c", "sleep 2; echo last line"])
+    t0 = time.monotonic()
+    proc = subprocess.run([shell, "-c", _lane_agent_wait(out)], capture_output=True, text=True,
+                          timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert time.monotonic() - t0 >= 1.5 and holder.poll() is not None
+    assert proc.stdout.splitlines()[-1] == "last line" and "no .hippo/" in proc.stdout
+
+    holder = _hold(out, ["sleep", "30"])
+    try:
+        proc = subprocess.run([shell, "-c", _lane_agent_wait(out, window=1)],
+                              capture_output=True, text=True, timeout=60)
+        assert (proc.returncode, proc.stdout, proc.stderr) == (3, "", "")
+    finally:
+        holder.kill()
+        holder.wait()
+
+
 # --------------------------------------------------------------------------
 # the agent-panel row: settings.json's subagentStatusLine → scripts/lane_status.py
 # --------------------------------------------------------------------------

@@ -45,7 +45,8 @@ The plugin, its slash commands, and the CLI are all named `hippo`.
   (the scribe runs it when the page is a week old and five new verdicts have
   landed; `hippo prior distill` runs it by hand).
 - **agent** (`agents/lane.md`, Claude Code) — `hippo:lane` runs one codex lane so it has a
-  row in the agent panel, and hands main the lane's final lines when it ends. The plugin's
+  row in the agent panel, and hands main — or the Workflow script that launched it — the
+  lane's final lines when it ends. The plugin's
   `settings.json` points the panel's `subagentStatusLine` at `scripts/lane_status.py`, so that
   row reads `codex · <scope> · <elapsed> · <cmds> cmds · <last command or message>`; other
   agents' rows are left as Claude Code draws them.

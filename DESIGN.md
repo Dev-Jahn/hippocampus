@@ -861,6 +861,30 @@ that command, stops the lane or does its work, so no judgment of its own reaches
 plain Bash form stays for the Codex host, which has no agent panel, and for a lane launched from
 inside a lane.
 
+**With no record to watch** — `--watch` exits 2 because the project has no `.hippo/`, or the
+output never shows a `dispatch:` id — the agent waits on the command itself, in one foreground
+call: `f='<output file>'; SECONDS=0; while [ $SECONDS -lt 540 ] && lsof -w -t "$f" >/dev/null;
+do sleep 5; done; lsof -w -t "$f" >/dev/null && exit 3; tail -n 20 "$f"`. The background shell
+and the wrapper hold that file open until they exit — codex writes into the wrapper's pipes, and
+Claude Code itself does not hold it (measured with `lsof`, 2.1.282) — so the loop ends with the
+command; still held after 540s it exits 3 like the watch, and the agent runs it again. It
+replaced "end your turn and reply when the completion notice arrives", which a Workflow breaks:
+a Workflow agent whose turn ends is done, and its background command is killed with it
+(measured, 2.1.282: the lane SIGTERMed 6s into an 8s run, the run returning only the two launch
+lines). Re-measured (2.1.282, sonnet, a stub codex, 2026-09-26), as a plain Agent and inside a
+Workflow, a 20s and a 570–600s lane each: with `.hippo/` the watch exited 0 for the short lane
+and 3 at 540s then 0 for the long one; without it the watch exited 2, the wait held until the
+lane's shell was gone — the long one's exiting 3 once at 541s — and every lane ended `exited
+rc=0`. Each of the eight replies was byte-equal to its last call's output (the wait's is the
+wrapper's lines and the host's `[exited with code 0]`), each Workflow's result held them as
+given, and main got one notification per plain agent. A Workflow script launches the agent as
+`agent("<command>", {agentType: 'hippo:lane'})`; with no schema it returns those lines as a
+string. That run is a Workflow run of its own to the scribe (§3.5.3c): 38,801 sonnet tokens for
+the two relays above, which is why the dispatch skill sends a fan-out with nothing after it to
+`--batch`. Headless `-p` waits for a background Workflow only ten minutes past main's last turn,
+then kills it (`print wind-down … at the wait ceiling`; the lane is recorded `killed by
+SIGTERM`), which is why the Workflow's long lane was 570s.
+
 **The row** (`settings.json` → `subagentStatusLine` → `scripts/lane_status.py`). Claude Code
 runs a plugin's subagentStatusLine about every 5s with the visible agent rows on stdin. For each
 row whose `subagents/agent-<id>.meta.json` says `hippo:lane`, the script takes the lane's
@@ -1125,6 +1149,13 @@ the sheet, and shipping 300 JSONL lines only offers something to recompute from,
   read it 856 times while `--help` was called 405 times in 19 projects — so it carries the whole
   grammar in one block (every command, flag and enum value, held to `build_parser` by a test),
   when to reach for each, and what runs by itself. One screen; anything larger is a regression.
+  It names the id a native run is recorded under — `ag-<agentId>`, or `ag-<runId>` for a
+  Workflow, whose launch result prints a `Task ID` first and the `Run ID: wf_…` four lines on;
+  a ref built from the Task ID names nothing hippo will ever record — and asks main to name a
+  task id once in a brief or script (the scribe links a run only to the one task id its brief
+  names, §3.5.3c) and `ag-wf_…` when it states a Workflow's verdict. Measured 2026-09-26: in
+  this repo's ledger 0 of 4 Workflow rows had a verdict — one's task done and its branch merged
+  — and 1 of 4 a task, against 2 of 3 subagent rows with a verdict; mlx-vlm linked 1 of 17.
 - **`hippo:checkup`** (~5KB) — a `/doctor`-style project diagnosis. It reads the ledger, PRIORS,
   failures, cursor gaps, recent transcripts and CLAUDE.md/memory, then reports waste patterns
   (retry loops, limit stalls, orphan dispatches), directive hygiene (stale or contradictory
@@ -1132,7 +1163,7 @@ the sheet, and shipping 300 JSONL lines only offers something to recompute from,
   failures, overhead, and why PRIORS is stale when auto-distill has not fired). Proposals are
   recommend-first, at most two AskUserQuestion rounds, with reversibility stated. Nothing is
   applied automatically.
-- **`hippo:dispatch`** (~9KB, from 16KB — a third of it described batch flags retired in 1.14.0)
+- **`hippo:dispatch`** (~10KB, from 16KB — a third of it described batch flags retired in 1.14.0)
   — the revised "fleet-dispatch", now "delegation lanes": the measured lessons only, the flags
   left to `hippo:hippo`. The key revisions (all grounded in the audit and the guide): a verifier
   **reports everything and main filters** (with a literal-minded model, a severity ceiling
@@ -1142,7 +1173,13 @@ the sheet, and shipping 300 JSONL lines only offers something to recompute from,
   content-filter false positives); grep the shared and individual brief clauses for
   contradictions before composing them; symbol coupling is checked across lanes; and the gate
   check and the push must always be separate calls. Measured use: 7 invocations plus 37 file
-  reads across 28 projects, against 2 for checkup.
+  reads across 28 projects, against 2 for checkup. Its routing table names the shape beside
+  the role — one scoped worker to an Agent, a fan-out or a panel read as one result to a
+  Workflow (whose `isolation: 'worktree'` replaces the manual worktree step), what PRIORS or a
+  directive sends to codex to a codex lane or `--batch` — and leaves the executor to that
+  evidence: until 2026-09-26 no passage compared the three, while a live directive in this repo
+  sent implementation to Claude subagents. The lane agent's Workflow form (§3.6) sits beside
+  its Agent form and `--batch`, which fans out with no relay agent at all.
 
 ### 3.8 Hosts (Claude Code · Codex CLI)
 

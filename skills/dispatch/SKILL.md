@@ -1,6 +1,6 @@
 ---
 name: dispatch
-description: Operating contract for delegation lanes — hand several tasks to external executors (codex exec) and subagents at once while main collects, verifies and merges. Use when the user says "launch in parallel", "split it up", "run a batch", or "start everything you can". Worth reading for a single delegation too, when the call pattern or worktree isolation matters.
+description: Operating contract for delegation lanes — hand several tasks to external executors (codex exec), subagents and Workflows at once while main collects, verifies and merges. Use when the user says "launch in parallel", "split it up", "run a batch", or "start everything you can". Worth reading for a single delegation too, when the call pattern or worktree isolation matters.
 ---
 
 # hippo: dispatch — delegation lanes
@@ -22,14 +22,18 @@ Every rule here comes from a dogfooding audit or a measurement. The flags are in
 |---|---|
 | Registry, merge, gate, push, verdicts | main |
 | A one-command experiment (soak, bench) | main's `run_in_background` |
-| Implementation or investigation that edits files | a lane in its own worktree |
+| One scoped worker (implement, investigate) | an Agent subagent — `isolation: "worktree"` if it edits |
+| A fan-out or a panel read as one result | a Workflow — `isolation: 'worktree'` per editing agent |
+| What `hippo prior` or a directive sends to codex | a codex lane (§2); many, `--batch` (§2b) |
 | Boundary verification of **another** executor's output | a verification lane (§4) |
 | Hard design | an independent duo, synthesized by main |
 
-Never spawn a lane to re-verify your own work. Do not delegate chores that cost less to do than
-to brief.
+A subagent, fork or Workflow run — or a Codex `spawn_agent` child — needs no hippo call: the
+scribe records it and your verdict (in Claude Code its cost too, as `ag-<agentId>`; a Workflow's
+is `ag-<runId>`, its launch's `Run ID: wf_…`, not its Task ID). Never spawn a lane to re-verify
+your own work. Do not delegate chores that cost less to do than to brief.
 
-## 2. Launch
+## 2. A codex lane
 
 ```bash
 hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
@@ -39,11 +43,12 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
 ```
 
 - **On Claude Code, launch a single lane through the lane agent**: `Agent(subagent_type:
-  "hippo:lane", description: "<scope>", prompt: "<the hippo dispatch command above>")`. The
-  lane gets a row in the agent panel with its latest command or message (Enter opens it, x
-  stops it — the kill is recorded), and one notification arrives when it ends: rc, triage,
-  report path, raw-log path. Read the report from there. The plain Bash form stays for the
-  Codex host and for a lane launched from inside a lane.
+  "hippo:lane", description: "<scope>", prompt: "<the command above>")` — an agent-panel row
+  with the lane's latest command or message (x stops it, recorded), one notification at the
+  end: rc, triage, report and raw-log paths. A Workflow script calls it as `agent("<command on
+  one line>", {agentType: 'hippo:lane'})`, no schema, when a later step reads the lane's
+  result; many lanes with nothing after them go to `--batch` (§2b), which pays no relay (15–20k
+  sonnet tokens each). The plain Bash form stays for Codex and for a lane launched in a lane.
 - **`--kind` is the PRIORS axis — reuse a tag**: `impl fix perf verify audit design research
   spike docs infra chore` (one ledger carried 26 tags over 108 dispatches, 19 used once). The
   subject goes in `--scope`.
@@ -55,16 +60,12 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   `--fast` = codex's fast service tier, same exec axis.
 - **Sandbox**: the bypass flag because the lane runs unattended (the worktree makes it safe),
   `--skip-git-repo-check` because the worktree's `.git` is a file. Drop both for read-only lanes.
-- The wrapper records the launch, closes stdin, plants `HIPPO_DISPATCH`/`HIPPO_DEPTH`/
-  `HIPPO_DIR`, and puts its own `bin/` first on the lane's PATH (a bare `hippo` works on both
-  hosts): the lane's capsule carries its directives and report line, and its
-  `log outcome` is a **claim** — the verdict is main's. The plain form launches through
-  `run_in_background`, never nohup/disown (orphans), and never redirects its output
-  (`> log 2>&1`): the wrapper keeps codex's raw stderr in `.hippo/lanes/<id>.log` and the
-  report in `<id>.out`, and prints one short line per command or message. A killed lane still
-  records its rc and usage. A codex argument that collides with a wrapper flag goes after `--`.
-- A subagent, fork or Workflow run — or a Codex `spawn_agent` child — needs no hippo call: the
-  scribe records it and your verdict (in Claude Code its cost too, as `ag-<agentId>`).
+- The wrapper records the launch, closes stdin, plants `HIPPO_DISPATCH`/`HIPPO_DEPTH`/`HIPPO_DIR`
+  and puts its `bin/` first on the lane's PATH: the lane's capsule carries its directives and
+  report line; its `log outcome` is a **claim** — the verdict is main's. The plain form runs
+  through `run_in_background`, never nohup/disown (orphans) or `> log 2>&1` (raw stderr stays in
+  `.hippo/lanes/<id>.log`, the report in `<id>.out`). A killed lane still records rc and usage.
+  A codex argument that collides with a wrapper flag goes after `--`.
 - `--depth 1` = an orchestrator lane that may spawn; its children start at 0. Lane-origin
   launches pass a dollar breaker ($500 per parent per 24h, `dispatch: {max_wave_usd: N}` in
   `.hippo/config.yaml`); main is never gated.
@@ -98,8 +99,7 @@ entries:
 - **`--dry-run` is the plan**: difficulty per brief, the suggested exec, notes. An entry with
   no `model` launches on the suggestion when `TYPESAFE_API_KEY` is set; without it, `model` is
   required. The manifest is per-batch data, never standing config.
-- Editing entries get worktrees created by main first: `-C` in `args`, or
-  `cwd: .claude/worktrees/<id>`.
+- Editing entries get worktrees main made first: `-C` in `args`, or `cwd: .claude/worktrees/<id>`.
 - **One batch per stage; main stays between stages.** Do not encode a DAG into one manifest.
 - **Mass-identical failures are one defect**: 130 identical check failures were one missing
   `pytest.ini`, paid as 130 repair lanes. Diagnose the cluster, repair it with one brief.
@@ -134,8 +134,8 @@ not the brief. Do not pin a base SHA; "your worktree's starting HEAD is the base
 ## 5. Isolation, collection, merge
 
 - Every editing lane gets `.claude/worktrees/<name>` on its own branch, made **before** launch
-  and removed **after** the merge (`git worktree add .claude/worktrees/<name> -b task/<name>`).
-  Copy untracked build artifacts in when the lane needs them.
+  and removed **after** the merge (`git worktree add .claude/worktrees/<name> -b task/<name>`;
+  an agent's `isolation: "worktree"` makes its own). Copy in untracked build artifacts it needs.
 - A killed lane's worktree is inspected (`git log`, `status`) and pushed if worth keeping before
   removal — untracked artifacts were lost once.
 - **Disjoint files are not disjoint lanes**: grep the symbols a lane deletes or renames for
