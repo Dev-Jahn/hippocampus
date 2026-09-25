@@ -9,6 +9,7 @@ import collections
 import concurrent.futures
 import contextlib
 import fcntl
+import fnmatch
 import hashlib
 import io
 import json
@@ -1021,6 +1022,51 @@ def task_check(hp, tasks):
             "or note what is left")
 
 
+WORKER_WRITES = "worker-writes.json"  # generated: hippo writes a subagent made (§3.5.3d)
+WORKER_SHOW_MAX = 5  # writes the `worker:` line names; the rest it counts
+
+
+def worker_write_shows(key, entry, tasks, rows):
+    """A write a worker made (`task:<id>`, `directive:<id>` or `outcome:<dispatch id>`, stamped
+    `t` as the state stamped it) shows until main has written to the same thing after it: a task
+    until its `updated` stamp passes `t` — every task write moves it — or it leaves tasks.yaml; a
+    directive or a verdict until a later event on it from main's side, the CLI or the scribe
+    recording main's conversation. Derived at every read, like a task flag (§3.5.9)."""
+    t = _iso_time(entry.get("t")) if isinstance(entry, dict) else None
+    noun, _, ident = key.partition(":")
+    if t is None or noun not in ("task", "directive", "outcome"):
+        return False
+    if noun == "task":
+        task = tasks.get(ident)
+        u = _iso_time(task["updated"]) if task and task.get("updated") else None
+        return task is not None and (u is None or u <= t)
+    field = "id" if noun == "directive" else "ref"
+    return not any(e.get("ev") == noun and e.get(field) == ident
+                   and e.get("src") in ("cli", "scribe") and (event_time(e) or t) > t
+                   for e in rows)
+
+
+def worker_line(hp, tasks):
+    """The capsule's `worker:` line, or None (§6, main's capsule only): the task, directive and
+    verdict writes a subagent made that main has not written to since, oldest first. A native
+    worker's shell is main's, so its writes landed as main's (src=cli); the line asks main to
+    make each one its own or undo it, and never acts."""
+    entries = load_json_object(hp, WORKER_WRITES, "worker-writes")
+    if not entries:
+        return None
+    by_id = {t["id"]: t for t in tasks if isinstance(t.get("id"), str)}
+    rows = read_ledger(hp)
+    shown = sorted((e for k, e in entries.items() if worker_write_shows(k, e, by_id, rows)),
+                   key=lambda e: str(e.get("t")))
+    if not shown:
+        return None
+    items = [f"{one_line(e.get('op'), 80)} ({e.get('run')})" for e in shown[:WORKER_SHOW_MAX]]
+    if len(shown) > WORKER_SHOW_MAX:
+        items.append(f"{len(shown) - WORKER_SHOW_MAX} more in .hippo/{WORKER_WRITES}")
+    return (f"· worker wrote: {', '.join(items)} — not yours yet: confirm it with a write of "
+            "your own, or undo it")
+
+
 def live_directives(hp, reader):
     """The active directives addressed to `reader` (§9.4): `all`, and absent, reach both."""
     return [d for d in directives(hp).values() if d.get("state") == "active"
@@ -1117,6 +1163,9 @@ def status_lines(hp, compacted=False):
         check = task_check(hp, data["tasks"])
         if check:
             lines.append(check)
+        worker = worker_line(hp, data["tasks"])
+        if worker:
+            lines.append(worker)
         failing = scribe_failing(hp)
         if failing:
             lines.append(failing)
@@ -1139,21 +1188,33 @@ def status_lines(hp, compacted=False):
     return lines
 
 
+WORKER_RULE = ("· hippo task, directive and outcome writes are main's — run one only when your "
+               "brief asks for it, otherwise put what should change in your report")
+
+
 def subagent_lines(hp):
     """What SubagentStart injects into a native subagent (§3.4): the live directives addressed
-    to executors, and nothing else — nothing at all when there is none.
+    to executors, then the one line that says which hippo writes are main's.
 
-    Not a lane's capsule. No `report:` line: a native worker runs without HIPPO_DISPATCH, so its
-    `log outcome` would land as src=cli — main's verdict on its own work — while the scribe
-    already records the run and main's verdict at the end of the turn (§3.5.3c). No depth line:
-    HIPPO_DEPTH indexes wrapper lanes (§9.5), and a subagent's nesting is main's call in its
-    brief. No tasks, in-flight or last: those are main's state, and a worker acts on them
-    through main's brief, not beside it (principle 2)."""
+    The header names the directives as the project's record, not as the user speaking: a
+    Workflow agent's harness tells it the relayed request is the only user voice (measured,
+    2.1.282), and a header claiming "the user's standing rules" competed with that. The writes
+    line is there whether or not a directive is: a native worker's shell is main's, so what it
+    writes lands as main's (src=cli) — measured, a Workflow agent closed a task on a real
+    project and nothing recorded it was not main. It leaves main's own ask standing: worded
+    without "when your brief asks", both sonnet workers of a live run declined the write their
+    brief asked for, and that real close was one main's script asked for. The scribe records
+    every such write for main to confirm or undo (§3.5.3d).
+
+    Not a lane's capsule. No `report:` line: a native worker's `log outcome` would land as
+    main's verdict on its own work, while the scribe already records the run and main's verdict
+    at the end of the turn (§3.5.3c). No depth line: HIPPO_DEPTH indexes wrapper lanes (§9.5),
+    and a subagent's nesting is main's call in its brief. No tasks, in-flight or last: those are
+    main's state, and a worker acts on them through main's brief, not beside it (principle 2)."""
     live = live_directives(hp, "executor")
-    if not live:
-        return []
-    return [f"[hippo] directives {len(live)} live — the user's standing rules for this project",
-            *directive_lines(live)]
+    head = ([f"[hippo] directives {len(live)} live — this project's recorded rules",
+             *directive_lines(live)] if live else [])
+    return [*head, WORKER_RULE]
 
 
 PRECOMPACT_CAP = 3000  # chars of the whole text: it is appended to every compaction's instructions
@@ -1662,6 +1723,14 @@ def log_outcome_bulk(args):
     print(json.dumps(summary, ensure_ascii=False))
 
 
+def directive_id(text):
+    """The id `directive add` derives from --text when --id is omitted (§3.2): a kebab slug of
+    its first 20 characters plus 4 of the full text's hash — a content fingerprint — or None
+    when the text has no [a-z0-9] to build one from."""
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:20].strip("-")
+    return f"{slug}-{hashlib.sha1(text.encode()).hexdigest()[:4]}" if slug else None
+
+
 def cmd_log(args):
     e = {"ev": args.ev}
     prior_verdicts = []
@@ -1707,8 +1776,8 @@ def cmd_log(args):
         if not did:
             if args.state != "active" or not args.text:
                 die("directive: --id may be omitted only for a new (active) directive that carries --text")
-            slug = re.sub(r"[^a-z0-9]+", "-", args.text.lower()).strip("-")[:20].strip("-")
-            if not slug:
+            did = directive_id(args.text)
+            if not did:
                 # Text with no ascii letters (Korean, for one) slugs to the empty string, and the
                 # old fallback turned every such directive into "directive-<hash>" — an id nobody
                 # can recall or reuse. Refusing is the honest move: name it yourself.
@@ -1716,7 +1785,6 @@ def cmd_log(args):
                     "directive: --text has no [a-z0-9] to build an id from — pass --id explicitly "
                     "(lowercase kebab ascii, e.g. --id gpu-pinning)"
                 )
-            did = f"{slug}-{hashlib.sha1(args.text.encode()).hexdigest()[:4]}"
         e.update(id=did, state=args.state)
         if args.text:
             e["text"] = args.text
@@ -5065,6 +5133,12 @@ def _count(v):
     return v if isinstance(v, int) and not isinstance(v, bool) else 0
 
 
+def native_files(run):
+    """The run's own transcript(s): an agent's, or every agent's of a Workflow run."""
+    return (sorted(run["files"].glob("agent-*.jsonl")) if run["executor"] == "workflow"
+            else [run["files"]])
+
+
 def native_stats(run):
     """One pass over the run's own transcript(s) — an agent's, or every agent's of a Workflow
     run — cached on the run → {usage: {model: Counter(tin, tcached, tout)}, msgs:
@@ -5081,9 +5155,7 @@ def native_stats(run):
     if "stats" in run:
         return run["stats"]
     usage, msgs, effort, edits = {}, collections.Counter(), collections.Counter(), {}
-    files = (sorted(run["files"].glob("agent-*.jsonl")) if run["executor"] == "workflow"
-             else [run["files"]])
-    for path in files:
+    for path in native_files(run):
         last, started = {}, False
         try:
             f = path.open("r", encoding="utf-8", errors="replace")
@@ -5363,15 +5435,401 @@ def native_settle(hp, native):
 
 
 def native_guard(hp, fn, *a):
-    """Run one piece of step 3c; a bug in it is dumped to failures/, never raised. The step is
-    an addition: a crash here would cost the window its clerk, and a scribe that crashes never
-    advances its cursor past the window that broke it."""
+    """Run one piece of step 3c or 3d; a bug in it is dumped to failures/, never raised. The
+    step is an addition: a crash here would cost the window its clerk, and a scribe that
+    crashes never advances its cursor past the window that broke it. `die` counts — a
+    malformed tasks.yaml, read by a record or by 3d, exits through SystemExit."""
     try:
         return fn(*a)
-    except Exception:  # noqa: BLE001 — dumped, never swallowed
+    except (Exception, SystemExit):  # noqa: BLE001 — dumped, never swallowed
         p = dump_failure(hp, "native", traceback.format_exc())
         print(f"native: step failed — dump: {p}", file=sys.stderr)
         return None
+
+
+# --- worker writes (§3.5.3d) ---------------------------------------------------------------
+# A native worker's shell carries exactly main's environment — every agent kind, Workflow
+# agents included, measured on Claude Code 2.1.282 — so a hippo write it makes lands as main's
+# (src=cli), and nothing at write time can tell. The scribe already reads each run's own
+# transcript; it finds the writes there afterwards and records them for main's capsule.
+
+HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+SHELL_OPS = {";", "&&", "||", "|", "&", "(", ")", ";;", "|&"}
+SHELL_WORDS = {"{", "}", "then", "do", "else", "elif", "if", "while", "until", "!", "time",
+               "fi", "done"}
+ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+PARAM_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(%%|%|##|#)?([^}]*)\}"
+                      r"|\$([A-Za-z_][A-Za-z0-9_]*|@)")
+HIPPO_PROG_RE = re.compile(r"(?:^|/)(?:hippo|hippo_cli\.py)$")
+HIPPO_LAUNCHERS = {"env", "command", "exec", "nohup", "uv", "run", "--script", "python",
+                   "python3"}
+
+
+def _strip_heredocs(cmd):
+    """The command without its heredoc bodies: a brief that quotes `hippo task done` is text."""
+    out, lines, i, tags = [], cmd.split("\n"), 0, []
+    while i < len(lines):
+        out.append(lines[i])
+        tags += [m.group(2) for m in HEREDOC_RE.finditer(lines[i])]
+        i += 1
+        while tags and i < len(lines):
+            while i < len(lines) and lines[i].strip() != tags[0]:
+                i += 1
+            i, tags = i + 1, tags[1:]
+    return "\n".join(out)
+
+
+def _shell_words(cmd):
+    """A shell command's words and operators, quotes resolved and newlines read as `;`, with
+    heredoc bodies, comments and redirections dropped; `${…}` stays whole for `_expand`. None
+    on an unterminated quote."""
+    s, words, cur, has, skip, q, i = _strip_heredocs(cmd), [], "", False, False, None, 0
+
+    def flush():
+        nonlocal cur, has, skip
+        if cur or has:
+            if skip:
+                skip = False  # the word was a redirection's target
+            else:
+                words.append(cur)
+        cur, has = "", False
+
+    while i < len(s):
+        ch = s[i]
+        if q == "'" or (q == '"' and ch != "\\"):
+            if ch == q:
+                q = None
+            else:
+                cur += ch
+            i += 1
+        elif q == '"':
+            nxt = s[i + 1:i + 2]
+            cur += nxt if nxt in ('"', "\\", "$", "`") else ch
+            i += 2 if nxt in ('"', "\\", "$", "`") else 1
+        elif ch in "'\"":
+            q, has, i = ch, True, i + 1
+        elif ch == "\\" and i + 1 < len(s):
+            if s[i + 1] != "\n":
+                cur, has = cur + s[i + 1], True
+            i += 2
+        elif ch == "$" and s[i + 1:i + 2] == "{":
+            j = s.find("}", i)
+            j = len(s) - 1 if j < 0 else j
+            cur, i = cur + s[i:j + 1], j + 1
+        elif ch == "#" and not cur and not has:
+            while i < len(s) and s[i] != "\n":
+                i += 1
+        elif ch in " \t\n":
+            flush()
+            if ch == "\n":
+                words.append(";")
+            i += 1
+        elif ch in "<>":
+            if cur.isdigit():  # the fd of `2>&1`, `2>/dev/null`
+                cur, has = "", False
+            else:
+                flush()
+            while i < len(s) and s[i] in "<>":
+                i += 1
+            if s[i:i + 1] == "&":
+                i += 1
+                while i < len(s) and (s[i].isdigit() or s[i] == "-"):
+                    i += 1
+            else:
+                skip = True
+        elif ch in ";&|()":
+            flush()
+            op = s[i:i + 2] if s[i:i + 2] in ("&&", "||", ";;", "|&") else ch
+            words.append(op)
+            i += len(op)
+        else:
+            cur += ch
+            i += 1
+    if q is not None:
+        return None
+    flush()
+    return words
+
+
+def _expand(word, env):
+    """`$v`, `${v}` and `${v%%pat}`, `${v%pat}`, `${v##pat}`, `${v#pat}` — the forms a loop over
+    task ids is written in. An unknown variable stays as written."""
+    def one(m):
+        if m.group(4):
+            return env.get(m.group(4), m.group(0))
+        name, op, pat = m.groups()[:3]
+        if name not in env:
+            return m.group(0)
+        v = env[name]
+        cuts = range(len(v) + 1)
+        if op in ("%%", "%"):
+            for k in (cuts if op == "%%" else reversed(cuts)):
+                if fnmatch.fnmatchcase(v[k:], pat):
+                    return v[:k]
+        elif op:
+            for k in (reversed(cuts) if op == "##" else cuts):
+                if fnmatch.fnmatchcase(v[:k], pat):
+                    return v[k:]
+        return v
+    return PARAM_RE.sub(one, word)
+
+
+def _starts(words, k, lo):
+    return k == lo or words[k - 1] in SHELL_OPS or words[k - 1] in ("do", "then", "else")
+
+
+def _commands(words, env, funcs):
+    """Walk a command's words → the argv of every simple command, expanded: an assignment
+    (`H=hippo`) sets a variable, a `for v in a b c; do …; done` runs its body once per item,
+    and a function whose body is `hippo … "$@"` is an alias for that prefix."""
+    out, cur, i = [], [], 0
+
+    def flush():
+        nonlocal cur
+        while cur and cur[0] in SHELL_WORDS:
+            cur = cur[1:]
+        if cur and all(ASSIGN_RE.match(a) for a in cur):
+            for a in cur:
+                k, v = a.split("=", 1)
+                env[k] = _expand(v, env)
+        elif cur:
+            argv = [_expand(a, env) for a in cur]
+            out.append(funcs.get(argv[0], argv[:1]) + argv[1:])
+        cur = []
+
+    while i < len(words):
+        w = words[i]
+        if not cur and words[i + 1:i + 4] == ["(", ")", "{"]:  # NAME ( ) { hippo … "$@"; }
+            k = i + 4
+            while k < len(words) and words[k] != "}":
+                k += 1
+            body = [_expand(b, env) for b in words[i + 4:k]]
+            if body and HIPPO_PROG_RE.search(body[0]) and "$@" in body:
+                funcs[w] = body[:body.index("$@")]
+            i = k + 1
+            continue
+        if w == "for" and not cur and words[i + 2:i + 3] == ["in"]:
+            var, j = words[i + 1], i + 3
+            items = []
+            while j < len(words) and words[j] not in (";", "do"):
+                items.append(_expand(words[j], env))
+                j += 1
+            while j < len(words) and words[j] in (";", "do"):
+                j += 1
+            depth, k = 1, j
+            while k < len(words):
+                # `for`/`done` are keywords only where a command starts: in `hippo task done $t`
+                # the word is an argument.
+                if _starts(words, k, j) and words[k] in ("for", "while"):
+                    depth += 1
+                if _starts(words, k, j) and words[k] == "done":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k += 1
+            for it in items:
+                env[var] = it
+                out += _commands(words[j:k], env, funcs)
+            i = k + 1
+            continue
+        if w in SHELL_OPS:
+            flush()
+        else:
+            cur.append(w)
+        i += 1
+    flush()
+    return out
+
+
+def hippo_args(argv):
+    """The arguments after `hippo` when a simple command runs the hippo CLI — by name, by a
+    path to bin/hippo or to hippo_cli.py, behind env assignments, `env [-u NAME]`, `command`,
+    `exec`, `nohup` or `uv run --script` — else None."""
+    k = 0
+    while k < len(argv):
+        a = argv[k]
+        if HIPPO_PROG_RE.search(a):
+            return argv[k + 1:]
+        if a == "-u" and k + 1 < len(argv):
+            k += 2
+            continue
+        if not (ASSIGN_RE.match(a) or a in HIPPO_LAUNCHERS):
+            return None
+        k += 1
+    return None
+
+
+def worker_call(parser, args):
+    """One hippo command → the write it asks for, as the state would show it once landed, or
+    None. The set is the writes that are main's (§9.2: a worker may not say that a task is done
+    or its work accepted, and may not rule): `task add|set|done|drop`, `directive add|withdraw`
+    and `log outcome`, plus `log raw` of a directive or an outcome. The rest — a dispatch, a
+    review, a usage row — is an observation a worker may make, and a read changes nothing. The
+    command is read by hippo's own parser, so it means exactly what it meant to the CLI."""
+    if not args or args[0] not in ("task", "directive", "log"):
+        return None
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            a = parser.parse_args(insert_default_sub(list(args)))
+    except SystemExit:  # -h, or a command the CLI refused as well
+        return None
+    fn = getattr(a, "fn", None)
+    if fn in (cmd_task_add, cmd_task_set, cmd_task_done, cmd_task_drop):
+        status = {cmd_task_add: getattr(a, "status", None), cmd_task_done: "done",
+                  cmd_task_drop: "dropped"}.get(fn)
+        if fn is cmd_task_set and a.field == "status":
+            status = a.value
+        verb = fn.__name__.removeprefix("cmd_task_")
+        return {"task": a.id, "want": {"status": status} if status else {},
+                "op": f"task {verb} {a.id}" + (f" {a.field}" if fn is cmd_task_set else "")}
+    if fn is cmd_directive_withdraw:
+        row = {"ev": "directive", "id": a.id, "state": "withdrawn"}
+    elif fn is cmd_log and a.ev == "directive":
+        row = {"ev": "directive", "id": a.id or directive_id(a.text or ""), "state": a.state}
+    elif fn is cmd_log and a.ev == "outcome":
+        # --from-batch names its verdicts in a journal, not on the line: every one it wrote.
+        row = {"ev": "outcome"} if a.from_batch else {"ev": "outcome", "ref": a.ref,
+                                                        "result": a.result}
+    elif fn is cmd_log_raw:
+        try:
+            e = json.loads(a.json)
+        except ValueError:
+            return None
+        if not isinstance(e, dict) or e.get("ev") not in ("directive", "outcome"):
+            return None
+        row = {k: e[k] for k in ("ev", "id", "state", "ref", "result") if k in e}
+    else:
+        return None
+    row = {k: v for k, v in row.items() if v is not None}
+    # With no id or ref the CLI refuses the write (a worker has no HIPPO_DISPATCH to default a
+    # ref from); a row that named neither would match any row in the call's window.
+    if len(row) > 1 and not row.get("id" if row["ev"] == "directive" else "ref"):
+        return None
+    return {"row": row}
+
+
+def worker_calls(path, parser):
+    """The hippo writes one agent's own Bash calls asked for → [(call, lo, hi)], each timed from
+    its call — to the second, as the CLI stamps — to its result, or, for a call sent to the
+    background, to the notification that it ended. Nothing before the first user line: a
+    fork's transcript opens with main's own launching message copied in (native_stats)."""
+    out, pending, background, started = [], {}, {}, False
+    try:
+        f = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    with f:
+        for raw in f:
+            if started and not (('"tool_use"' in raw and "hippo" in raw)
+                                or (pending and '"tool_result"' in raw)
+                                or (background and "<task-notification>" in raw)):
+                continue
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            kind = rec.get("type")
+            started = started or kind == "user"
+            t = _iso_time(rec.get("timestamp"))
+            if not started or t is None:
+                continue
+            for b in _blocks(rec):
+                inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+                cmd = inp.get("command")
+                if (kind == "assistant" and b.get("type") == "tool_use"
+                        and b.get("name") == "Bash" and isinstance(cmd, str) and "hippo" in cmd):
+                    calls = [c for argv in _commands(_shell_words(cmd) or [], {}, {})
+                             if (c := worker_call(parser, hippo_args(argv)))]
+                    if calls:
+                        pending[b.get("id")] = (calls, t.replace(microsecond=0))
+                if (kind == "user" and b.get("type") == "tool_result"
+                        and b.get("tool_use_id") in pending):
+                    calls, lo = pending.pop(b["tool_use_id"])
+                    tur = rec.get("toolUseResult")
+                    bg = tur.get("backgroundTaskId") if isinstance(tur, dict) else None
+                    if isinstance(bg, str):
+                        background[bg] = (calls, lo)
+                    else:
+                        out += [(c, lo, t) for c in calls]
+            for text in _note_texts(rec) if background else ():
+                for n in task_notes(text, 0):
+                    if n.task in background:
+                        calls, lo = background.pop(n.task)
+                        out += [(c, lo, t) for c in calls]
+    return out
+
+
+def _stamp(t):
+    return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def worker_landed(call, lo, hi, tasks, rows, task_of):
+    """Where one worker call's write shows in this project's state → [(key, t, op)], `t` the
+    state's own stamp. The state is the proof, of the call's success and of its project at once:
+    a task whose `updated` stamp and status, or a `src=cli` ledger row whose kind, id and value,
+    match the call and fall between the call and its result. A call against another project —
+    a scratch copy, a worktree outside the repo, a remote — or one that failed left nothing
+    here to match, whatever its cwd, its `cd`s, HIPPO_DIR or its output said; one against this
+    project from inside a worktree of it did."""
+    def within(t):
+        return t is not None and lo <= t <= hi
+
+    if "task" in call:
+        task = tasks.get(call["task"])
+        u = _iso_time(task["updated"]) if task and task.get("updated") else None
+        if within(u) and all(task.get(k) == v for k, v in call["want"].items()):
+            return [(f"task:{call['task']}", _stamp(u), call["op"])]
+        return []
+    want, out = call["row"], []
+    ref = want.get("ref")
+    for e in rows:
+        if (e.get("ev") != want["ev"] or e.get("src") != "cli" or not within(event_time(e))
+                or any(e.get(k) != v for k, v in want.items() if k not in ("ev", "ref"))
+                or (ref and e.get("ref") != ref and not (  # `task:<id>` resolved at write time
+                    ref.startswith("task:") and task_of.get(e.get("ref")) == ref[5:]))):
+            continue
+        if e["ev"] == "directive":
+            verb = "add" if e.get("state") == "active" else "withdraw"
+            out.append((f"directive:{e.get('id')}", e["t"], f"directive {verb} {e.get('id')}"))
+        else:
+            out.append((f"outcome:{e.get('ref')}", e["t"],
+                        f"outcome {e.get('result')} on {e.get('ref')}"))
+    return out
+
+
+def worker_writes(hp, native):
+    """Step 3d (§3.5.3d): the task, directive and verdict writes a subagent made in this project,
+    recorded for main's capsule (`worker_line`) — never undone, never blocked.
+
+    Read from each run's own transcript(s) — an agent's, or every agent of a Workflow — for the
+    runs this window touched and those still running: a write can land any time until a run
+    ends, and one that ended in an earlier window was read then. Main's transcript is not read,
+    so main's own calls never count. A write is recorded only where this project's state shows
+    it (`worker_landed`), under the thing it wrote to, the latest write winning; the file keeps
+    what still shows (`worker_write_shows`) and is replaced whole under the scribe's lock, like
+    task-flags.json. Nothing here needs the judge."""
+    parser, now, found = build_parser(), datetime.now(timezone.utc), {}
+    tasks = {t["id"]: t for t in tasks_load(hp)["tasks"] if isinstance(t.get("id"), str)}
+    rows = read_ledger(hp)
+    task_of = {e.get("id"): e.get("task") for e in rows if e.get("ev") == "dispatch"}
+    for run in native["runs"].values():
+        running = run["answer"] is None and (
+            run["t"] is None or now - run["t"] <= timedelta(hours=NATIVE_LIST_H))
+        if not (run["seen"] or running):
+            continue
+        for path in native_files(run):
+            for call, lo, hi in worker_calls(path, parser):
+                for key, t, op in worker_landed(call, lo, hi, tasks, rows, task_of):
+                    if key not in found or found[key]["t"] <= t:
+                        found[key] = {"t": t, "run": run["id"], "op": op}
+    old = load_json_object(hp, WORKER_WRITES, "worker-writes")
+    merged = {**old, **{k: e for k, e in found.items()
+                        if not isinstance(old.get(k), dict) or str(old[k].get("t")) <= e["t"]}}
+    kept = {k: e for k, e in merged.items() if worker_write_shows(k, e, tasks, rows)}
+    if kept or (hp / WORKER_WRITES).exists():
+        write_durable(hp / WORKER_WRITES, json.dumps(kept, ensure_ascii=False, indent=2) + "\n")
 
 
 def task_ends(hp, digest):
@@ -5481,12 +5939,14 @@ def cmd_scribe(args):
 
     # 3c. Native runs (DESIGN §3.5.3c), in every mode: indexed before anything can return, so a
     # completion in a window the prefilter skips still gets its cost recorded. The rows need
-    # the clerk's kind; usage and triage follow it (settle), on every path out of here.
+    # the clerk's kind; usage and triage follow it (settle), on every path out of here, and so
+    # do the hippo writes the runs' own transcripts show (3d).
     native = native_guard(hp, native_open, hp, transcript, since, end)
 
     def settle():
         if native:
             native_guard(hp, native_settle, hp, native)
+            native_guard(hp, worker_writes, hp, native)
 
     # 3. Deterministic prefilter: with no substantive activity, skip the model call entirely
     # (digest line shapes: "[123] TOOL Bash: …" / "[124] USER: …")

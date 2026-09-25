@@ -36,12 +36,15 @@ The plugin, its slash commands, and the CLI are all named `hippo`.
   `hooks/claude-hooks.json`) — `SessionStart` re-injects a ≤6-line status
   block (survives compaction); `Stop` fires the scribe clerk detached, never
   blocking; in Claude Code, `SubagentStart` hands each subagent the directives
-  addressed to executors, and `PreCompact` asks the compaction summary to end
-  with `## hippo deltas` — commands for main to check and run afterwards.
+  addressed to executors and one line saying hippo's task, directive and outcome
+  writes are main's unless its brief asks for one, and `PreCompact` asks the
+  compaction summary to end with `## hippo deltas` — commands for main to check
+  and run afterwards.
 - **clerks** (`clerks/*.md`) — headless prompts: `turn-scribe` digests a
   session into worklog + ledger events (Claude Code subagents and Workflow
   runs are recorded like codex lanes: launch, cost per model, your verdict —
-  no call needed), `distiller` regenerates `PRIORS.md`
+  no call needed; a task, directive or verdict a subagent wrote itself shows in
+  the next capsule as `worker wrote:` until you confirm or undo it), `distiller` regenerates `PRIORS.md`
   (the scribe runs it when the page is a week old and five new verdicts have
   landed; `hippo prior distill` runs it by hand).
 - **agent** (`agents/lane.md`, Claude Code) — `hippo:lane` runs one codex lane so it has a
