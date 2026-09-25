@@ -914,6 +914,11 @@ def directive_hygiene_notes(hp):
 IN_FLIGHT_WINDOW_H = 24
 
 
+def age_label(t, now):
+    mins = int((now - t).total_seconds()) // 60
+    return f"{mins // 60}h{mins % 60:02d}m"
+
+
 def in_flight(hp):
     """Delegations launched but not yet judged — the one part of "where was I" that is a fact.
 
@@ -943,9 +948,7 @@ def in_flight(hp):
         t = event_time(e)
         if not t or (now - t) > timedelta(hours=IN_FLIGHT_WINDOW_H):
             continue
-        mins = int((now - t).total_seconds()) // 60
-        age = f"{mins // 60}h{mins % 60:02d}m"
-        parts = [age]
+        parts = [age_label(t, now)]
         if claims.get(e.get("id")):
             parts.append(f"claims {claims[e.get('id')]}")
         tri = triages.get(e.get("id"))
@@ -1045,13 +1048,14 @@ def directive_lines(live):
     return out
 
 
-def status_lines(hp, compacted=False):
+def status_lines(hp, compacted=False, transcript=None):
     """DESIGN §6 resident surface (header + live directives + in flight + last).
 
     Audience (§9.4): inside a dispatched lane (HIPPO_DISPATCH set) the capsule carries the
     directives addressed to executors; everywhere else, the ones addressed to main. `all`
     (and absent, its default) reaches both. `compacted` is SessionStart's source=compact: main's
-    capsule then closes on the line that points at the summary's `## hippo deltas` (§3.4)."""
+    capsule then closes on the line that points at the summary's `## hippo deltas` (§3.4), and
+    its in-flight line adds the native runs main's `transcript` shows still out."""
     data = tasks_load(hp)
     n_open = sum(1 for t in data["tasks"] if t.get("status") in OPEN_STATUSES)
     reader = "executor" if os.environ.get("HIPPO_DISPATCH") else "main"
@@ -1074,6 +1078,8 @@ def status_lines(hp, compacted=False):
     lines += directive_lines(live)
     # Nothing flying → no line. The capsule only spends a line on a question that has an answer.
     flying = in_flight(hp)
+    if compacted and reader == "main":
+        flying += native_in_flight(transcript)
     if flying:
         lines.append(f"· in flight: {', '.join(flying)}")
     p = hp / "worklog.md"
@@ -1224,10 +1230,12 @@ def cmd_status(args):
         # The hook names its moment in HIPPO_INJECT — internal, never a flag (§3.4): SessionStart
         # passes its source, SubagentStart `subagent`, PreCompact `precompact`.
         moment = os.environ.get("HIPPO_INJECT", "")
-        # A subagent's own compaction reaches both compaction hooks as main's (§3.4): it is asked
+        transcript = os.environ.get("HIPPO_TRANSCRIPT")
+        # An agent's own compaction reaches both compaction hooks as main's (§3.4): it is asked
         # for no deltas, and once compacted gets what SubagentStart gave it — a fork too, since
         # the capsule it carried from main is what its compaction summarized away.
-        agent = (awaited_agent(os.environ.get("HIPPO_TRANSCRIPT"))
+        agent = (compaction_agent(transcript, os.environ.get("HIPPO_PROMPT"),
+                                  os.environ.get("HIPPO_TRIGGER"))
                  if moment in ("precompact", "compact") else None)
         if agent is not None:
             lines = ([] if moment == "precompact" or agent.get("agentType") == "hippo:lane"
@@ -1235,7 +1243,7 @@ def cmd_status(args):
         else:
             lines = (subagent_lines(hp) if moment == "subagent"
                      else precompact_lines(hp) if moment == "precompact"
-                     else status_lines(hp, compacted=moment == "compact"))
+                     else status_lines(hp, compacted=moment == "compact", transcript=transcript))
         if lines:
             print("\n".join(lines))
         return
@@ -4903,81 +4911,111 @@ def native_settled(run, since):
 
 
 TRANSCRIPT_FLUSH_WAIT = 0.25  # s; Claude Code writes a transcript on a 100ms flush (2.1.282)
+# A local command's own user lines in main's transcript; no model turn follows them (measured,
+# 2.1.282: /compact writes `<command-name>` and `<local-command-stdout>` and main sits idle).
+LOCAL_COMMAND_TAGS = ("<command-name>", "<local-command-stdout>")
 
 
-def awaited_agent(transcript):
-    """DESIGN §3.4: the meta.json of the foreground agent main is blocked on while that agent
-    is still working, or None. Main cannot compact while a foreground call of its own runs, so a
-    compaction then is the agent's — and the host fires it with main's session and transcript
-    and no agent_id (measured, 2.1.282), so this is how the compaction hooks tell it apart.
+def compaction_agent(transcript, prompt_id, trigger=None):
+    """DESIGN §3.4: whose compaction fired this hook → the compacting agent's meta.json ({} when
+    it has none), or None when it is main's or cannot be told apart.
 
-    Main's side: the Agent/Task calls in its transcript with no tool_result yet
-    (`_unanswered_calls`). The host writes each transcript on a 100ms flush, so main compacting
-    just after a foreground call returned still shows that call unanswered (10 of 11 at the
-    hook's start, measured); main's transcript is read again once that flush has passed, and a
-    call answered by then was main's, however its agent's own transcript ends — an agent
-    stopped at its maxTurns ends in a tool result, and one the host moved to the background
-    (main answered `async_launched`, its meta.json still foreground) is still working. The
-    agent's side is the other signal, read at the same time: its own transcript, working until
-    its last message is one with no tool call — the agent's answer is queued before main even
-    gets it (the host's code), and an agent that is compacting cannot answer in the meantime.
-    A background call is answered at launch, so its agent's own compaction is not caught: it
-    still gets main's text."""
-    if not transcript:
+    An agent's own compaction reaches PreCompact and SessionStart(compact) as main's: main's
+    session and transcript, no agent_id, and the prompt_id main is at — the host stamps one
+    prompt id per process, whoever writes (measured, 2.1.282). A compaction starts right after a
+    user line is appended (a prompt, a tool's result, a notification, a host message), and
+    nothing it writes lands before SessionStart and PostCompact have returned (measured), so at
+    both hooks the compacting side still ends in that user line. Main's side decides, read once
+    the host's 100ms flush has passed:
+
+    - the hook's prompt not in main's transcript yet is a prompt main just took — a manual
+      /compact gets one of its own (measured): main's;
+    - main at the hook's prompt and ending in a user line could be the one compacting: main's,
+      whatever the agents show — main losing its request is the worse error;
+    - main at the hook's prompt and ending in its own reply or tool call, or in a local
+      command's output (/compact, /context: no model turn follows), or already past that prompt
+      (compacting, it could not have moved on), is not compacting: the compaction is that of an
+      agent ending in a user line — any `agent-*.jsonl` under the session's subagents/, a
+      Workflow's agents included; the most recent one;
+    - a PreCompact with trigger `manual` is main's: only the user types /compact, into main.
+
+    Left as main's: an agent compacting while main, at the same prompt, waits on its reply, and
+    one compacting while main's own compaction runs."""
+    if trigger == "manual" or not transcript or not prompt_id:
         return None
     transcript = Path(transcript)
-    sub = transcript.with_suffix("") / "subagents"
-    if not sub.is_dir():
+    agents = sorted(transcript.with_suffix("").glob("subagents/**/agent-*.jsonl"))
+    if not agents:
         return None  # no agent ever launched, or not a Claude Code transcript
-    pending = _unanswered_calls(transcript)
-    foreground = []
-    for p in sub.glob("agent-*.meta.json") if pending else ():
-        meta = _read_json(p)
-        if meta.get("toolUseId") in pending and meta.get("requestShape") != "background":
-            foreground.append((p.with_name(p.name.replace(".meta.json", ".jsonl")), meta))
-    if not foreground:
-        return None
     time.sleep(TRANSCRIPT_FLUSH_WAIT)
-    pending = _unanswered_calls(transcript)
-    return next((meta for path, meta in foreground
-                 if meta["toolUseId"] in pending and not _agent_answered(path)), None)
+    prompts = _main_prompts(transcript)
+    if prompt_id not in prompts:
+        return None
+    if prompts[-1] == prompt_id:
+        main = _last_record(transcript)
+        content = (main.get("message") or {}).get("content") if main else None
+        local = isinstance(content, str) and content.lstrip().startswith(LOCAL_COMMAND_TAGS)
+        if main is None or (main["type"] == "user" and not local):
+            return None
+    at = [(rec.get("timestamp") or "", path) for path in agents
+          for rec in [_last_record(path, main=False)] if rec is not None and rec["type"] == "user"]
+    if not at:
+        return None
+    path = max(at)[1]
+    return _read_json(path.with_name(path.name.removesuffix(".jsonl") + ".meta.json"))
 
 
-def _unanswered_calls(transcript):
-    """The Agent/Task calls in main's transcript with no tool_result yet, a new prompt dropping
-    any left unanswered before it."""
-    pending = set()
-    # Until a call is pending only a line that can launch one matters; the rest is not parsed.
-    for rec in _records(transcript, lambda raw: bool(pending) or (
-            '"tool_use"' in raw and any(f'"{t}"' in raw for t in NATIVE_TOOLS))):
-        blocks = _blocks(rec)
-        if rec["type"] == "assistant":
-            pending |= {b.get("id") for b in blocks if b.get("type") == "tool_use"
-                        and b.get("name") in NATIVE_TOOLS and isinstance(b.get("id"), str)}
-        else:
-            answered = {b.get("tool_use_id") for b in blocks if b.get("type") == "tool_result"}
-            pending = pending - answered if answered else set()
-    return pending
+def native_in_flight(transcript):
+    """§6: main's native runs still out, for its capsule after a compaction → ["scope (executor
+    · age)"] — the summary can drop a launch, and main then does not know a result is owed.
+
+    Out: launched in the background (`async_launched`), with nothing back yet — no
+    notification, and no TaskStop of main's naming it. A run main stopped never notifies
+    (measured, mlx-vlm: 4 of 4 Workflow runs, their run files `killed`, none notified across two
+    later restarts); one that died with its process is notified `stopped` when the session
+    resumes (measured, 2.1.282). A foreground call is not here: main compacts only once it has
+    returned."""
+    if not transcript:
+        return []
+    transcript = Path(transcript)
+    launches, notes, _ = native_scan(transcript)
+    if not launches:
+        return []
+    back = {x for n in notes for x in (n.task, n.tuid) if x}
+    stopped = {b["input"].get("task_id") for rec in _main_calls(transcript, "TaskStop")
+               for b in _blocks(rec)
+               if b.get("name") == "TaskStop" and isinstance(b.get("input"), dict)}
+    now = datetime.now(timezone.utc)
+    out = []
+    for key, launch in launches.items():
+        task = launch["result"].get("taskId") if launch["tool"] == "Workflow" else key
+        if (launch["result"].get("status") != "async_launched"
+                or back & {task, launch["tuid"]} or task and task in stopped):
+            continue
+        run = native_run(launch, key, transcript.with_suffix(""))
+        if run["skip"]:
+            continue
+        age = f" · {age_label(run['t'], now)}" if run["t"] else ""
+        out.append(f"{one_line(run['scope'] or key, 44)} ({run['executor']}{age})")
+    return out
 
 
-def _records(path, keep, main=True):
-    """The user and assistant records of a Claude Code transcript whose raw line `keep` passes,
-    the host's meta messages left out — and, in main's, the sidechain lines older hosts wrote
-    there for a subagent (an agent's own transcript is all sidechain)."""
+def _main_calls(transcript, tool):
+    """Main's assistant records that call `tool`."""
     try:
-        f = path.open("r", encoding="utf-8", errors="replace")
+        f = transcript.open("r", encoding="utf-8", errors="replace")
     except OSError:
         return
     with f:
         for raw in f:
-            if not keep(raw):
+            if f'"{tool}"' not in raw or '"tool_use"' not in raw:
                 continue
             try:
                 rec = json.loads(raw)
             except ValueError:
                 continue
-            if (isinstance(rec, dict) and rec.get("type") in ("user", "assistant")
-                    and not rec.get("isMeta") and not (main and rec.get("isSidechain"))):
+            if (isinstance(rec, dict) and rec.get("type") == "assistant"
+                    and not rec.get("isSidechain")):
                 yield rec
 
 
@@ -4987,13 +5025,56 @@ def _blocks(rec):
     return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
 
 
-def _agent_answered(path):
-    """Whether an agent's own transcript ends in its answer: an assistant message with no tool
-    call. A transcript not written yet is an agent just starting."""
-    last = collections.deque(_records(path, lambda raw: '"user"' in raw or '"assistant"' in raw,
-                                      main=False), maxlen=1)
-    return bool(last) and last[0]["type"] == "assistant" and not any(
-        b.get("type") == "tool_use" for b in _blocks(last[0]))
+def _main_prompts(transcript):
+    """The promptIds of main's user lines, in the order main took them."""
+    prompts = {}
+    try:
+        f = transcript.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    with f:
+        for raw in f:
+            if '"promptId"' not in raw:
+                continue
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                continue
+            if (isinstance(rec, dict) and rec.get("type") == "user" and not rec.get("isSidechain")
+                    and isinstance(rec.get("promptId"), str)):
+                prompts[rec["promptId"]] = None
+    return list(prompts)
+
+
+def _tail_lines(path, keep, n=64):
+    """The last `n` raw lines of a file that `keep` passes — the whole file is streamed, only
+    they are held."""
+    tail = collections.deque(maxlen=n)
+    try:
+        f = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return tail
+    with f:
+        for raw in f:
+            if keep(raw):
+                tail.append(raw)
+    return tail
+
+
+def _last_record(path, main=True):
+    """The last user or assistant record of a Claude Code transcript, or None — the host's meta
+    messages included (a channel message arrives as one and starts a turn, measured), and in
+    main's the sidechain lines older hosts wrote there for a subagent left out (an agent's own
+    transcript is all sidechain). Only the tail is parsed."""
+    for raw in reversed(_tail_lines(path, lambda raw: '"user"' in raw or '"assistant"' in raw)):
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if (isinstance(rec, dict) and rec.get("type") in ("user", "assistant")
+                and not (main and rec.get("isSidechain"))):
+            return rec
+    return None
 
 
 def native_refs(rows, runs):

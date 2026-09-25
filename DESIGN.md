@@ -369,8 +369,8 @@ already broken the capsule once, below). The scripts share `hooks/lib.sh` — th
 stdin reader, the project walk, the CLI call and the JSON envelope — and tell the CLI which
 moment they inject for through `HIPPO_INJECT`, an internal env var rather than a flag: a
 SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads it); stdin's
-`transcript_path` rides along in `HIPPO_TRANSCRIPT`, which is how a compaction is told to be a
-subagent's own (PreCompact, below).
+`transcript_path`, `prompt_id` and `trigger` ride along in `HIPPO_TRANSCRIPT`, `HIPPO_PROMPT` and
+`HIPPO_TRIGGER`, which is how a compaction is told to be an agent's own (PreCompact, below).
 
 - **SessionStart** (startup, resume, clear, compact): `hooks/session_start.sh` → silent exit 0 with
   no `.hippo/`; otherwise `hippo status --inject` (the §6 format), wrapped as
@@ -385,8 +385,9 @@ subagent's own (PreCompact, below).
   audience slice plus the `report:` line, at start and after every compaction. The lane-side
   gap this closes is the same measured loss, unhandled: a long lane compacts and its brief's
   constraints evaporate. On source=compact main's capsule ends with the `compact:` line (§6),
-  which points at the summary's `## hippo deltas` (PreCompact, below). A subagent's own
-  compaction fires this hook as main's too; it gets the SubagentStart slice instead (below).
+  which points at the summary's `## hippo deltas` (PreCompact, below), and its in-flight line
+  names main's native runs still out (§6). An agent's own compaction fires this hook as main's
+  too; it gets the SubagentStart slice instead (below).
 - **SubagentStart** (Claude Code; matcher `*`): `hooks/subagent_start.sh` → silent exit 0 with no
   `.hippo/`, for agent type `fork` (it already carries main's context, capsule included) and for
   `hippo:lane` (it only watches a codex lane, whose capsule comes from codex's own SessionStart);
@@ -414,7 +415,7 @@ subagent's own (PreCompact, below).
   subagent quoted back exactly the executor slice, and a fork quoted main's capsule — its own
   context, with nothing injected.
 - **PreCompact** (Claude Code): `hooks/pre_compact.sh` → silent exit 0 with no `.hippo/`, and
-  for a subagent's own compaction (below); otherwise plain text with exit 0, which the host
+  for an agent's own compaction (below); otherwise plain text with exit 0, which the host
   appends to the compaction instructions: end the summary with `## hippo deltas`, one line per
   change the conversation made that hippo's lists do not show yet, each the exact command that
   records it (`hippo task done <id> --note '…'`, `hippo task set <id> notes '…'`, `hippo directive
@@ -437,51 +438,71 @@ subagent's own (PreCompact, below).
   context, which is what lets the capsule point at it. PreCompact can fire with no compaction
   following ("no assistant messages in summarize set, bailing"), which costs nothing — the text
   only asks. A manual `/compact` writes the text into the transcript main reads next (an auto
-  one does not), hence main's audience only (§9.4). A subagent's own compaction fires this
-  hook, SessionStart(compact) and PostCompact as main's (2.1.282, 2026-09-25: a foreground
-  general-purpose subagent paging a file past a small auto-compaction window,
-  `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000` + `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=25`): main's
-  `session_id` and `transcript_path`, no `agent_id` or `agent_type` (the bundled code builds
-  this input without the agent's context), the same `CLAUDE_*` env names. Unguarded, all three
-  of that subagent's summaries ended in `## hippo deltas` and SessionStart(compact) put main's
-  capsule, `compact:` line included, into the subagent — a worker whose summary proposed
-  `hippo task done` would have run it as main's verdict (src=cli). So the CLI tells the two apart
-  on disk, from `HIPPO_TRANSCRIPT`: main cannot compact while a foreground call of its own runs,
-  so a compaction while main's transcript holds an Agent/Task call with no result yet, whose
-  agent (`<session>/subagents/agent-<id>.meta.json` names the call's `toolUseId`; one with
-  `requestShape: background` is left out) has not answered in its own transcript either, is that
-  agent's — PreCompact then says nothing, and SessionStart(compact) hands the agent its
-  SubagentStart slice (a fork too: the capsule it carried from main is what its compaction
-  summarized away; `hippo:lane` nothing, as at its start). Both sides are read 0.25s on, past the
-  host's 100ms flush. The host writes each transcript on that flush, so main compacting mid-turn
-  shows its own last call unanswered — the rule "the file ends in an unanswered call" silenced
-  all three of main's compactions in one run — and when main compacts just after a foreground
-  agent returned, the call it shows unanswered is that Agent call (10 of 11 at the hook's start).
-  Main's side, read again, settles a call that came back without an answer in the agent's own
-  transcript: an agent stopped at its `maxTurns` ends in a tool result, and one the host moves to
-  the background (`CLAUDE_AUTO_BACKGROUND_TASKS`, 120s into the call) keeps working while main,
-  answered `async_launched`, goes on — its meta.json still says foreground. Read on the agent's
-  side alone, main's compaction right after either, its result not yet on disk, was taken for the
-  agent's and lost its request (both replayed from recorded runs). The agent's answer is the
-  other signal: the host's code queues it before main gets the result, yet a read tens of ms
-  after main's PreCompact fired still missed it, while an agent that is compacting cannot answer
-  in between. Measured on the recorded runs (2.1.282, 2026-09-25: 50 PreCompact in 11 sessions,
-  each one's owner read from the request that followed it in the debug log and from where its
-  boundary landed): in main's 11 auto compactions right after a foreground agent returned, main's
-  result was stamped 24–33ms before the hook started and on disk at its start once, and in the 4
-  probed — after an agent capped at maxTurns 1 — it was on disk by +50ms each time; in the
-  agents' own 16, main's result came 13–113s after the hook. The two signals together name the
-  right side in all 50: wherever main's second read decides, its result was on disk by then.
-  Measured live with the check's first cut, which read the agent at once: a subagent's 3
-  compactions got no request and the slice each time (no summary carried the section), and all 6
-  of main's PreCompacts right after an agent returned asked (its 5 completed summaries carried
-  the section). Still open: main's write lag is bounded directly only by those 4 probes, and a
-  result the host writes on a resume lags more (a killed call's "interrupted" result was not on
-  disk 247ms after its stamp) — one that misses the second read, for an agent whose transcript
-  does not end in its answer, reads as the agent's; no recorded run compacted after a call moved
-  to the background; and a background agent's own compaction (its call is answered at launch, and
-  main runs beside it), one moved to the background while it compacts, and one resumed by
-  SendMessage get main's text, as before.
+  one does not), hence main's audience only (§9.4). An agent's own compaction fires this hook,
+  SessionStart(compact) and PostCompact as main's: main's `session_id`, `transcript_path` and
+  `prompt_id`, no `agent_id` or `agent_type` (the bundled code builds this input without the
+  agent's context), the same `CLAUDE_*` env names — measured on 2.1.282 for a foreground, a
+  background and a Workflow agent, each paging a file past a small auto-compaction window
+  (`CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000` + `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=25`). The prompt
+  id is the host's one per process: every line an agent writes, its compaction's included,
+  carries the prompt main is at (a Workflow agent compacting during main's notification turn
+  carried that turn's id). Unguarded, such summaries ended in `## hippo deltas` and
+  SessionStart(compact) put main's capsule, `compact:` line included, into the agent — a worker
+  whose summary proposed `hippo task done` would have run it as main's verdict (src=cli). 1.15.1
+  caught only a foreground agent main was blocked on; with `CLAUDE_CODE_FORK_SUBAGENT=1` (this
+  user's setting) every Agent call runs in the background, and a Workflow's agents always do, so
+  that check never matched.
+
+  So the CLI reads main's side, from the hook's `transcript_path`, `prompt_id` and `trigger`
+  (`HIPPO_TRANSCRIPT`, `HIPPO_PROMPT`, `HIPPO_TRIGGER`), 0.25s on — past the host's 100ms
+  flush. A compaction starts right after a user line is appended (a prompt, a tool's result, a
+  notification, a host message: a channel doorbell arrives as a meta line and starts a turn),
+  stamped 25–51ms before the hook's process starts (37 of 38 measured); and nothing the
+  compaction writes lands before SessionStart and PostCompact have returned — its boundary is
+  stamped before them and written after (none of 27 SessionStart reads found it, at the hook's
+  start or 0.3s on). So at both hooks the compacting side still ends in its user line, and:
+
+  - PreCompact with `trigger: manual` is main's — only the user types /compact, into main;
+  - a `prompt_id` not yet in main's transcript is a prompt main just took (a manual /compact
+    takes one of its own, measured): main's;
+  - main at that prompt, ending in a user line, could be the one compacting: main's, whatever
+    the agents show — main losing its request is the worse error;
+  - otherwise main is idle, running a tool, writing its reply, sitting after a local command's
+    own lines (`<command-name>`, `<local-command-stdout>`: /compact, /context — no model turn
+    follows them) or already past the hook's prompt (compacting, it could not have moved on),
+    and the compaction is an agent's: one ending in a user line, anywhere under
+    `<session>/subagents/` (Workflow agents sit in `workflows/<runId>/`), the latest if several.
+    PreCompact then says nothing, and SessionStart(compact) hands the agent its SubagentStart
+    slice (a fork too: the capsule it carried from main is what its compaction summarized away;
+    `hippo:lane` nothing, as at its start).
+
+  Measured live (2.1.282, 2026-09-26, sonnet; each hook's owner read afterwards from where its
+  user line and boundary landed): fork mode on, a background Agent and a Workflow agent
+  compacting while main sat idle — 8 PreCompacts silent, 4 SessionStarts the slice, main's own
+  compaction in its notification turn asked and got its capsule, and no agent summary carried
+  the section; a manual /compact while a background agent read — main's request and capsule,
+  the agent's later compactions silent with the slice; main compacting mid-turn, once with a
+  Workflow of its own still out — 3 of 3 requests, each summary with the section; fork mode off,
+  a foreground agent compacting while main waited — every PreCompact silent, 3 of 3 slices; main
+  compacting right after a foreground agent returned — 2 of 2 requests. The 1.15.1 case is
+  inside the rule: main blocked on a foreground agent ends in its Agent call.
+
+  Still main's, so wrong: an agent compacting while main, at the same prompt, waits on its own
+  reply — main ends in a user line either way (measured: 3 requests and one capsule into an agent
+  while main wrote a long reply; each summary's section read `none`) — and one compacting while
+  main's own manual compaction runs, whose prompt is not on disk until it ends (2 measured).
+  Timing could split the first at PreCompact (main's own line is under a second old there), but
+  a threshold would rest on hook latency this project does not control, and SessionStart could
+  not follow: there both sides' lines are as old as the compaction. The other way round, a
+  user line of main's that misses the 0.25s read makes main's compaction an agent's if one ends
+  in a user line then: 1.15.1's measurement bounds that write (main's result was on disk by
+  +50ms in 4 probes) except for a result written on a resume (a killed call's "interrupted"
+  result was not on disk 247ms after its stamp), and an agent killed mid-call stays at a user
+  line, a candidate from then on. Scoping the two texts instead — the request telling a
+  conversation that began with another agent's brief to write `none`, the `compact:` line
+  saying it is main's — was weighed and left out: the summarizer would be judging whether its
+  own conversation began with a brief, and a user's first prompt can read as one, which costs
+  main its request, the worse error; what an agent does with either line was not measured.
 - **Stop**: `hooks/stop.sh` — parse `transcript_path`, `session_id` and `cwd` from the stdin JSON;
   silent exit 0 with no `.hippo/`; otherwise `setsid hippo scribe … >/dev/null 2>&1 &` and then
   **exit 0 immediately** (<100ms). Under `HIPPO_DISPATCH` it exits at once instead: the executor
@@ -1283,8 +1304,8 @@ with": the host appends its own paragraphs after the summary. The condition is t
 which fires SessionStart(compact) but gets no PreCompact. A native subagent gets none of this
 block: SubagentStart hands it the `[hippo] directives N live — the user's standing rules for
 this project` header and its executor-audience directive lines, nothing else, and so does the
-SessionStart(compact) of its own compaction, which the host fires as main's (§3.4 — a
-background agent's excepted).
+SessionStart(compact) of its own compaction, which the host fires as main's (§3.4 — except
+while main, at the same prompt, waits on its own reply).
 
 The `cli:` line is main's only (a lane has its `report:` line instead): the command grammar,
 because the capsule is what re-arrives after a compaction and that is exactly when the grammar
@@ -1324,6 +1345,17 @@ consuming project, this query returned exactly the three lanes that project was 
 while the same query over every writer returned 16 — scribe-inferred rows swamp it. With nothing
 flying the line is absent; a dispatch older than a day is not in flight but forgotten, and
 `prior distill` already reports those as open items.
+
+After a compaction the line also names main's native runs still out (§3.5.3c) —
+`build:parser (workflow · 0h12m)` — read from main's transcript, not the ledger: launched in the
+background with nothing back yet, neither a notification nor a TaskStop of main's naming it. The
+summary can drop a launch, and then main no longer knows a result is owed (measured: main
+compacting with a Workflow of its own still out got `wf-sleeper (workflow · 0h00m)`). A run
+main stopped never notifies (measured, mlx-vlm: 4 of 4 Workflow runs, their run files `killed`,
+none notified across two later restarts), so its TaskStop is what ends it; a run whose process
+ended is notified `stopped` when the session resumes (measured, 2.1.282, a process ended by
+SIGTERM). Only after a compaction: at startup nothing is out yet, and a resume notifies the old
+process's runs itself. A `hippo:lane` relay is left out: its lane is the ledger's own entry.
 
 Everything else such a file carries has a home already: the current phase is a directive,
 what shipped is the worklog, ordering is `task deps`, and a merge hazard belongs in the brief for

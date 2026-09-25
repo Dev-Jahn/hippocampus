@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 
 from conftest import REPO_ROOT
 
@@ -335,145 +336,210 @@ def test_pre_compact_is_silent_for_a_marked_subagent_and_outside_a_project(
         assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
 
 
-# A Claude Code session as the compaction hooks find it on disk: main's transcript t.jsonl and,
-# beside it, t/subagents/agent-<id>.meta.json and agent-<id>.jsonl (measured, 2.1.282).
+# A Claude Code session as the compaction hooks find it on disk (measured, 2.1.282): main's
+# transcript t.jsonl and, beside it, t/subagents/agent-<id>.jsonl (an Agent run) or
+# t/subagents/workflows/<runId>/agent-<id>.jsonl (a Workflow's agent), each with its .meta.json.
+# Every user line carries the promptId of the prompt main is at when it is written — one per
+# process, whoever writes — and the compaction hooks carry it too.
 def _rec(kind, content, **extra):
     return {"type": kind, "message": {"role": kind, "content": content}, **extra}
 
 
-def _call(tuid, name="Agent"):
-    return _rec("assistant", [{"type": "tool_use", "id": tuid, "name": name, "input": {}}])
+def _user(content, prompt="p1", **extra):
+    return _rec("user", content, promptId=prompt, **extra)
 
 
-def _answer(tuid):
-    return _rec("user", [{"type": "tool_result", "tool_use_id": tuid, "content": "report"}])
+def _call(tuid, name="Agent", **inp):
+    return _rec("assistant", [{"type": "tool_use", "id": tuid, "name": name, "input": inp}])
+
+
+def _answer(tuid, prompt="p1", **result):
+    extra = {"toolUseResult": result} if result else {}
+    return _user([{"type": "tool_result", "tool_use_id": tuid, "content": "report"}], prompt,
+                 **extra)
+
+
+def _said(text):
+    return _rec("assistant", [{"type": "text", "text": text}])
 
 
 def _lines(path, recs, mode="w"):
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open(mode, encoding="utf-8") as f:
-        f.writelines(json.dumps(r) + "\n" for r in recs)
+        f.writelines(json.dumps(r, separators=(",", ":")) + "\n" for r in recs)
 
 
-def _session(project, main, agents):
-    """agents: {agent_id: (toolUseId, requestShape, agent_type, the agent's own records)}"""
+def _session(project, main, agents=None):
+    """agents: {path under subagents/, no suffix: (agent_type, the agent's own records)}"""
+    shutil.rmtree(project / "t", ignore_errors=True)
     _lines(project / "t.jsonl", main)
-    sub = project / "t" / "subagents"
-    sub.mkdir(parents=True, exist_ok=True)
-    for key, (tuid, shape, atype, recs) in agents.items():
-        (sub / f"agent-{key}.meta.json").write_text(json.dumps(
-            {"agentType": atype, "toolUseId": tuid, "requestShape": shape}), encoding="utf-8")
-        _lines(sub / f"agent-{key}.jsonl", [{**r, "isSidechain": True} for r in recs])
-    return sub
+    for rel, (atype, recs) in (agents or {}).items():
+        path = project / "t" / "subagents" / f"{rel}.jsonl"
+        _lines(path, [{**r, "isSidechain": True} for r in recs])
+        path.with_name(path.name.replace(".jsonl", ".meta.json")).write_text(
+            json.dumps({"agentType": atype}), encoding="utf-8")
 
 
-# An agent mid-work at its own compaction: its last tool call answered, no answer of its own yet.
-WORKING = [_rec("user", "brief"), _call("toolu_r1", "Read"), _answer("toolu_r1")]
-ANSWERED = [*WORKING, _rec("assistant", [{"type": "text", "text": "done"}])]
+# An agent at a compaction point: its tool's result just appended. Nothing the compaction
+# writes is on disk before SessionStart(compact) returns (measured), so this is also how the
+# agent's file reads there. One running a tool has no user line to compact on.
+WORKING = [_user("brief"), _call("toolu_r1", "Read"), _answer("toolu_r1")]
+RUNNING = [_user("brief"), _call("toolu_r1", "Bash")]
+
+# Main, fork mode on: it launched in the background and ended its turn — or went on working.
+LAUNCHED = [_user("go"), _call("toolu_1"), _answer("toolu_1", status="async_launched",
+                                                    agentId="a1")]
+IDLE = [*LAUNCHED, _said("launched")]
+# A manual /compact takes a prompt id of its own and ends in its own output lines, after which
+# main sits idle; the agents' next lines carry that id (measured).
+AFTER_COMPACT = [*IDLE, _user("This session is being continued…", "p0", isCompactSummary=True),
+                 _user("<local-command-caveat>…", "p0", isMeta=True),
+                 _user("<command-name>/compact</command-name>", "p0"),
+                 _user("<local-command-stdout>Compacted</local-command-stdout>", "p0")]
 
 
-def _session_start(project, repo_root, source="compact"):
+def _pre_compact_at(project, repo_root, prompt="p1", **extra):
+    return _pre_compact(project, repo_root, prompt_id=prompt, **extra)
+
+
+def _session_start(project, repo_root, source="compact", prompt="p1"):
     payload = {"session_id": "s", "transcript_path": str(project / "t.jsonl"),
-               "cwd": str(project), "hook_event_name": "SessionStart", "source": source}
+               "cwd": str(project), "hook_event_name": "SessionStart", "source": source,
+               "prompt_id": prompt}
     proc = _run_hook(repo_root / "hooks" / "session_start.sh", payload, cwd=project)
     assert proc.returncode == 0, proc.stderr
     return _capsule(proc) if proc.stdout else ""
 
 
-def test_a_subagent_s_own_compaction_is_not_main_s(tmp_project, repo_root, run_hippo):
-    """On 2.1.282 a subagent's own compaction fires PreCompact and SessionStart(compact) with
-    main's session and transcript and no agent_id (measured, §3.4). Main cannot compact while a
-    foreground call of its own runs, so the foreground agent main waits on, still working, is
-    whose compaction it is: no deltas request (commands it ran would land as main's, src=cli),
-    and once compacted what SubagentStart gave it — never main's capsule with its `compact:` line."""
+def test_an_agent_s_own_compaction_is_not_main_s(tmp_project, repo_root, run_hippo):
+    """On 2.1.282 an agent's own compaction fires PreCompact and SessionStart(compact) with
+    main's session, transcript and prompt_id and no agent_id (measured, §3.4). Main is not
+    compacting while it sits idle (after its reply or a local command), runs a tool or has moved
+    past the hook's prompt, so then the agent at a compaction point is whose compaction it is:
+    no deltas request (commands it ran
+    would land as main's, src=cli), and once compacted what SubagentStart gave it — never main's
+    capsule with its `compact:` line. Background agents and Workflow agents too: with
+    CLAUDE_CODE_FORK_SUBAGENT=1 every Agent call is one of those."""
     _directives(tmp_project, run_hippo)
-    main = [_rec("user", "go"), _call("toolu_done"), _answer("toolu_done"), _call("toolu_w")]
-    _session(tmp_project, main, {"a1": ("toolu_done", "foreground", "general-purpose", ANSWERED),
-                                 "a2": ("toolu_w", "foreground", "general-purpose", WORKING)})
-    proc = _pre_compact(tmp_project, repo_root)
-    assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
-    lines = _session_start(tmp_project, repo_root).splitlines()
-    assert lines[0].startswith("[hippo] directives 2 live")
-    assert lines[1:] == ["· live: use GPUs 0 and 1 only", "· live: never push; main merges"]
+    cases = {
+        "a background agent, main idle": (IDLE, "agent-a1"),
+        "a Workflow agent, main idle": (IDLE, "workflows/wf_x-1/agent-a2"),
+        "a foreground agent main waits on": ([_user("go"), _call("toolu_1")], "agent-a1"),
+        "main running a tool beside it": ([*LAUNCHED, _call("toolu_b", "Bash")], "agent-a1"),
+        "main already past the hook's prompt": ([*IDLE, _user("<task-notification>…", "p2")],
+                                                "agent-a1"),
+        "main idle after a manual /compact": (AFTER_COMPACT, "agent-a1"),
+    }
+    for case, (main, rel) in cases.items():
+        prompt = "p0" if main is AFTER_COMPACT else "p1"
+        _session(tmp_project, main, {rel: ("general-purpose", WORKING)})
+        proc = _pre_compact_at(tmp_project, repo_root, prompt)
+        assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), case
+        lines = _session_start(tmp_project, repo_root, prompt=prompt).splitlines()
+        assert lines[0].startswith("[hippo] directives 2 live"), case
+        assert lines[1:] == ["· live: use GPUs 0 and 1 only", "· live: never push; main merges"]
     # A fork's compaction summarized away the capsule it carried from main, so it gets the slice
     # too; hippo:lane gets nothing, as at its start.
     for atype, first in (("fork", "[hippo] directives 2 live"), ("hippo:lane", "")):
-        _session(tmp_project, main, {"a2": ("toolu_w", "foreground", atype, WORKING)})
+        _session(tmp_project, IDLE, {"agent-a1": (atype, WORKING)})
         assert _session_start(tmp_project, repo_root).startswith(first), atype
-        assert _pre_compact(tmp_project, repo_root).stdout == "", atype
+        assert _pre_compact_at(tmp_project, repo_root).stdout == "", atype
 
 
 def test_main_s_own_compactions_keep_the_request(tmp_project, repo_root):
-    """Main compacts before its last tool result reaches the file (a 100ms flush, measured), so
-    the file can end in any unanswered call of main's own — a Read, or a foreground Agent call
-    whose agent already answered (10 of 11 such, measured on 2.1.282). Neither is a subagent
-    compacting, and neither is a background launch in that same window or a call a new prompt
-    abandoned."""
-    earlier = {"a0": ("toolu_old", "foreground", "general-purpose", ANSWERED)}
+    """Main losing its request is the worse error, so anything short of main shown not to be
+    compacting is main's: main at the hook's prompt ending in a user line (mid-turn, or waiting
+    on its reply beside an agent), a prompt main just took that is not on disk yet, a manual
+    /compact (only the user types it, into main), no agent at a compaction point, and a host
+    that sends no prompt_id."""
     cases = {
-        "a Read": ([_rec("user", "go"), _call("toolu_1", "Read")], earlier),
-        "an agent that answered": ([_rec("user", "go"), _call("toolu_1")],
-                                   {"a1": ("toolu_1", "foreground", "general-purpose", ANSWERED)}),
-        "a background launch": ([_rec("user", "go"), _call("toolu_1")],
-                                {"a1": ("toolu_1", "background", "general-purpose", WORKING)}),
-        "an abandoned call": ([_rec("user", "go"), _call("toolu_1"), _rec("user", "resumed")],
-                              {"a1": ("toolu_1", "foreground", "general-purpose", WORKING)}),
+        "mid-turn beside its own agent": ([*LAUNCHED, _call("toolu_b", "Read"),
+                                           _answer("toolu_b")], WORKING, "p1", None),
+        "waiting on its reply at a later prompt": ([*IDLE, _user("next", "p2")],
+                                                   [_user("brief"), _call("toolu_r1", "Read"),
+                                                    _answer("toolu_r1", "p2")], "p2", None),
+        "a new prompt not on disk yet": (IDLE, WORKING, "p2", None),
+        "a turn a host message started": ([*IDLE, _user("Another session sent a message", "p1",
+                                                         isMeta=True)], WORKING, "p1", None),
+        "a manual /compact": (IDLE, WORKING, "p1", "manual"),
+        "an agent running a tool": (IDLE, RUNNING, "p1", None),
+        "an agent that answered": ([_user("go"), _call("toolu_1"), _answer("toolu_1")],
+                                   [*WORKING, _said("done")], "p1", None),
+        "a host without prompt_id": (IDLE, WORKING, None, None),
     }
-    for case, (main, agents) in cases.items():
-        shutil.rmtree(tmp_project / "t", ignore_errors=True)
-        _session(tmp_project, main, agents)
-        proc = _pre_compact(tmp_project, repo_root)
+    for case, (main, agent, prompt, trigger) in cases.items():
+        _session(tmp_project, main, {"agent-a1": ("general-purpose", agent)})
+        extra = {"trigger": trigger} if trigger else {}
+        proc = _pre_compact_at(tmp_project, repo_root, prompt, **extra)
         assert proc.returncode == 0, proc.stderr
         assert "`## hippo deltas`" in proc.stdout, case
-        assert _session_start(tmp_project, repo_root).startswith("[hippo] tasks"), case
+        if trigger != "manual":  # SessionStart carries no trigger
+            assert _session_start(tmp_project, repo_root, prompt=prompt).startswith(
+                "[hippo] tasks"), case
 
 
-def test_a_call_main_got_back_in_the_flush_is_main_s_whatever_its_agent_shows(tmp_path,
-                                                                               monkeypatch):
-    """A foreground call can return to main while its agent's own transcript does not end in an
-    answer (measured, 2.1.282): an agent stopped at its maxTurns ends in a tool result, and one
-    the host moved to the background is still working — main got `async_launched`, the
-    meta.json still says foreground. Main compacting right after still shows the call
-    unanswered at the hook's start; its result lands within the flush, so main is read again
-    after the wait and the compaction is main's. Had it not landed, it would be the agent's."""
+def test_main_s_line_that_lands_in_the_flush_keeps_the_request(tmp_path, monkeypatch):
+    """The host writes each transcript on a 100ms flush, so main compacting right after its tool
+    returned can still end, on disk, in the call. Both sides are read once that flush has passed:
+    a result that lands in the wait makes the compaction main's."""
     sys.path.insert(0, str(REPO_ROOT / "cli"))
     import hippo_cli
 
-    capped = WORKING
-    backgrounded = [_rec("user", "brief"), _call("toolu_b1", "Bash")]
-    launched = {"toolUseResult": {"status": "async_launched", "agentId": "a1"}}
-    for case, recs, result in (("capped", capped, _answer("toolu_1")),
-                               ("backgrounded", backgrounded, {**_answer("toolu_1"), **launched})):
-        _session(tmp_path, [_rec("user", "go"), _call("toolu_1")],
-                 {"a1": ("toolu_1", "foreground", "general-purpose", recs)})
-        monkeypatch.setattr(hippo_cli.time, "sleep", lambda s: None)
-        assert hippo_cli.awaited_agent(str(tmp_path / "t.jsonl"))["toolUseId"] == "toolu_1", case
-        monkeypatch.setattr(hippo_cli.time, "sleep",
-                            lambda s: _lines(tmp_path / "t.jsonl", [result], "a"))
-        assert hippo_cli.awaited_agent(str(tmp_path / "t.jsonl")) is None, case
-
-
-def test_the_agent_is_read_after_the_host_s_flush(tmp_path, monkeypatch):
-    """Main compacting right after a foreground agent answered: the answer was queued before main
-    got it, but a read tens of ms after PreCompact fired still missed it (measured) — so the
-    agent's transcript is read once the host's 100ms flush has passed, not before."""
-    sys.path.insert(0, str(REPO_ROOT / "cli"))
-    import hippo_cli
-
-    sub = _session(tmp_path, [_rec("user", "go"), _call("toolu_1")],
-                   {"a1": ("toolu_1", "foreground", "general-purpose", WORKING)})
+    main = [*LAUNCHED, _call("toolu_b", "Read")]
+    _session(tmp_path, main, {"agent-a1": ("general-purpose", WORKING)})
     waits = []
 
-    def flush(s):  # the host's write lands while the hook waits
+    def flush(s):  # main's tool result lands while the hook waits
         waits.append(s)
-        _lines(sub / "agent-a1.jsonl", [{**ANSWERED[-1], "isSidechain": True}], "a")
+        _lines(tmp_path / "t.jsonl", [_answer("toolu_b")], "a")
 
     monkeypatch.setattr(hippo_cli.time, "sleep", flush)
-    assert hippo_cli.awaited_agent(str(tmp_path / "t.jsonl")) is None
+    assert hippo_cli.compaction_agent(str(tmp_path / "t.jsonl"), "p1") is None
     assert waits == [hippo_cli.TRANSCRIPT_FLUSH_WAIT] and waits[0] > 0.1
-    monkeypatch.setattr(hippo_cli.time, "sleep", lambda s: None)  # still working: it is the agent's
-    _session(tmp_path, [_rec("user", "go"), _call("toolu_1")],
-             {"a1": ("toolu_1", "foreground", "general-purpose", WORKING)})
-    assert hippo_cli.awaited_agent(str(tmp_path / "t.jsonl"))["toolUseId"] == "toolu_1"
+    monkeypatch.setattr(hippo_cli.time, "sleep", lambda s: None)  # still running: the agent's
+    _session(tmp_path, main, {"agent-a1": ("general-purpose", WORKING)})
+    assert hippo_cli.compaction_agent(str(tmp_path / "t.jsonl"), "p1") == {
+        "agentType": "general-purpose"}
+
+
+def _launch(tuid, prompt="p1", workflow=None, **result):
+    if workflow:
+        call = _call(tuid, "Workflow", script="phase('x')")
+        result = {"status": "async_launched", "runId": workflow[0], "taskId": workflow[1],
+                  "workflowName": workflow[2], **result}
+    else:
+        call = _call(tuid, "Agent", description=result.pop("description"), prompt="brief")
+        result = {"status": "async_launched", **result}
+    return [call, {**_answer(tuid, prompt, **result),
+                   "timestamp": datetime.now(timezone.utc).isoformat()}]
+
+
+def _note(task, status="completed"):
+    return _user(f"<task-notification>\n<task-id>{task}</task-id>\n<status>{status}</status>\n"
+                 "<summary>done</summary>\n<result>report</result>\n</task-notification>")
+
+
+def test_the_capsule_after_a_compaction_names_native_runs_still_out(tmp_project, repo_root):
+    """A summary can drop a launch; main's capsule after a compaction names each background run
+    with nothing back yet, beside the ledger's in-flight entries (§6). Not a run that notified —
+    one that died with an earlier process is notified `stopped` on resume (measured) — nor one
+    main stopped (a stopped run never notifies, measured), nor a hippo:lane relay (its lane is
+    the ledger's)."""
+    main = [_user("go"), *_launch("toolu_0", description="old process run", agentId="a0"),
+            _note("a0", "stopped"), _user("go on", "p2"),
+            *_launch("toolu_1", "p2", description="scan the parser", agentId="a1"),
+            *_launch("toolu_2", "p2", workflow=("wf_1-1", "w1", "wf-build")),
+            *_launch("toolu_3", "p2", description="done one", agentId="a3"), _note("a3"),
+            *_launch("toolu_4", "p2", workflow=("wf_2-2", "w2", "stopped one")),
+            _call("toolu_5", "TaskStop", task_id="w2"), _answer("toolu_5", "p2"),
+            *_launch("toolu_6", "p2", description="relay lane", agentId="a6"),
+            _said("waiting")]
+    _session(tmp_project, main, {"agent-a6": ("hippo:lane", WORKING)})
+    capsule = _session_start(tmp_project, repo_root, prompt="p3")
+    flying = [ln for ln in capsule.splitlines() if ln.startswith("· in flight:")]
+    assert flying == ["· in flight: scan the parser (subagent · 0h00m), "
+                      "wf-build (workflow · 0h00m)"], capsule
+    assert "in flight" not in _session_start(tmp_project, repo_root, source="startup")
 
 
 def test_the_capsule_after_a_compaction_points_at_the_deltas(tmp_project, repo_root):
