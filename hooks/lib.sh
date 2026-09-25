@@ -75,10 +75,15 @@ plugin_root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/de
 
 # inject <moment> <cwd>  -> the CLI's text for that moment. The moment travels in HIPPO_INJECT,
 # an internal env var rather than a flag (the surface stays what the skill documents): a
-# SessionStart source, `subagent` or `precompact`. The CLI runs from <cwd> because it re-derives
-# .hippo/ from its own working directory, which is not necessarily this hook's.
+# SessionStart source, `subagent` or `precompact`; HIPPO_TRANSCRIPT carries stdin's
+# transcript_path, which is how a compaction tells a subagent's own from main's (§3.4). The CLI
+# runs from <cwd> because it re-derives .hippo/ from its own working directory, which is not
+# necessarily this hook's.
 inject() {
-  (cd "$2" 2>/dev/null && HIPPO_INJECT="$1" "$plugin_root/bin/hippo" status --inject 2>/dev/null)
+  local transcript
+  transcript="$(json_get transcript_path)"
+  (cd "$2" 2>/dev/null && HIPPO_INJECT="$1" HIPPO_TRANSCRIPT="$transcript" \
+    "$plugin_root/bin/hippo" status --inject 2>/dev/null)
 }
 
 # context_json <event> <text>  -> the hookSpecificOutput envelope. It ships as JSON, not bare

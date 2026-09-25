@@ -1163,9 +1163,18 @@ def cmd_status(args):
         # The hook names its moment in HIPPO_INJECT — internal, never a flag (§3.4): SessionStart
         # passes its source, SubagentStart `subagent`, PreCompact `precompact`.
         moment = os.environ.get("HIPPO_INJECT", "")
-        lines = (subagent_lines(hp) if moment == "subagent"
-                 else precompact_lines(hp) if moment == "precompact"
-                 else status_lines(hp, compacted=moment == "compact"))
+        # A subagent's own compaction reaches both compaction hooks as main's (§3.4): it is asked
+        # for no deltas, and once compacted gets what SubagentStart gave it — a fork too, since
+        # the capsule it carried from main is what its compaction summarized away.
+        agent = (awaited_agent(os.environ.get("HIPPO_TRANSCRIPT"))
+                 if moment in ("precompact", "compact") else None)
+        if agent is not None:
+            lines = ([] if moment == "precompact" or agent.get("agentType") == "hippo:lane"
+                     else subagent_lines(hp))
+        else:
+            lines = (subagent_lines(hp) if moment == "subagent"
+                     else precompact_lines(hp) if moment == "precompact"
+                     else status_lines(hp, compacted=moment == "compact"))
         if lines:
             print("\n".join(lines))
         return
@@ -4659,6 +4668,87 @@ def native_index(transcript, since, end):
             if key in parents:
                 queue.append(run)
     return runs
+
+
+TRANSCRIPT_FLUSH_WAIT = 0.25  # s; Claude Code writes a transcript on a 100ms flush (2.1.282)
+
+
+def awaited_agent(transcript):
+    """DESIGN §3.4: the meta.json of the foreground agent main is blocked on while that agent
+    is still working, or None. Main cannot compact while a foreground call of its own runs, so a
+    compaction then is the agent's — and the host fires it with main's session and transcript
+    and no agent_id (measured, 2.1.282), so this is how the compaction hooks tell it apart.
+
+    Main's side: the Agent/Task calls in its transcript with no tool_result yet, a new prompt
+    dropping any left unanswered before it. That alone is not enough: the host writes each
+    transcript on a 100ms flush, so main compacting just after a foreground agent answered still
+    shows that call unanswered (measured). The agent's side settles it — its own transcript,
+    working until its last message is one with no tool call — read once that flush has passed:
+    the agent's answer is queued before main even gets it (the host's code), yet a read tens of
+    ms after main's PreCompact fired still missed it (measured), and an agent that is compacting
+    cannot answer in the meantime. A background call is answered at launch, so its agent's own
+    compaction is not caught: it still gets main's text."""
+    if not transcript:
+        return None
+    transcript = Path(transcript)
+    sub = transcript.with_suffix("") / "subagents"
+    if not sub.is_dir():
+        return None  # no agent ever launched, or not a Claude Code transcript
+    pending = set()
+    # Until a call is pending only a line that can launch one matters; the rest is not parsed.
+    for rec in _records(transcript, lambda raw: bool(pending) or (
+            '"tool_use"' in raw and any(f'"{t}"' in raw for t in NATIVE_TOOLS))):
+        blocks = _blocks(rec)
+        if rec["type"] == "assistant":
+            pending |= {b.get("id") for b in blocks if b.get("type") == "tool_use"
+                        and b.get("name") in NATIVE_TOOLS and isinstance(b.get("id"), str)}
+        else:
+            answered = {b.get("tool_use_id") for b in blocks if b.get("type") == "tool_result"}
+            pending = pending - answered if answered else set()
+    foreground = []
+    for p in sub.glob("agent-*.meta.json") if pending else ():
+        meta = _read_json(p)
+        if meta.get("toolUseId") in pending and meta.get("requestShape") != "background":
+            foreground.append((p.with_name(p.name.replace(".meta.json", ".jsonl")), meta))
+    if foreground:
+        time.sleep(TRANSCRIPT_FLUSH_WAIT)
+    return next((meta for path, meta in foreground if not _agent_answered(path)), None)
+
+
+def _records(path, keep, main=True):
+    """The user and assistant records of a Claude Code transcript whose raw line `keep` passes,
+    the host's meta messages left out — and, in main's, the sidechain lines older hosts wrote
+    there for a subagent (an agent's own transcript is all sidechain)."""
+    try:
+        f = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    with f:
+        for raw in f:
+            if not keep(raw):
+                continue
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                continue
+            if (isinstance(rec, dict) and rec.get("type") in ("user", "assistant")
+                    and not rec.get("isMeta") and not (main and rec.get("isSidechain"))):
+                yield rec
+
+
+def _blocks(rec):
+    msg = rec.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def _agent_answered(path):
+    """Whether an agent's own transcript ends in its answer: an assistant message with no tool
+    call. A transcript not written yet is an agent just starting."""
+    last = collections.deque(_records(path, lambda raw: '"user"' in raw or '"assistant"' in raw,
+                                      main=False), maxlen=1)
+    return bool(last) and last[0]["type"] == "assistant" and not any(
+        b.get("type") == "tool_use" for b in _blocks(last[0]))
 
 
 def native_refs(rows, runs):

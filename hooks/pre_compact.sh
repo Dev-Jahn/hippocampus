@@ -8,10 +8,10 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # A subagent compacting its own context is not main: commands it ran would land as main's
-# (src=cli). agent_id marks a subagent's events (SubagentStart, SubagentStop), but on 2.1.282 a
-# subagent's own compaction fires this hook with main's session_id and transcript_path and no
-# agent_id — nothing on stdin or in main's transcript tells it from main's (measured, §3.4) —
-# so today it gets the request too; the check holds for a host that sends the marker.
+# (src=cli). On 2.1.282 its compaction fires this hook as main's — main's session_id and
+# transcript_path, no agent_id (measured, §3.4) — so the CLI tells it apart on disk: the
+# foreground agent main is waiting on is still working. This check is for a host that marks
+# the event the way it marks SubagentStart and SubagentStop.
 [ -n "$(json_get agent_id)" ] && exit 0
 
 cwd="$(json_get cwd)"
