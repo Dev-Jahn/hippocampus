@@ -1,0 +1,39 @@
+# task-end: asked by the scribe once per window (one Stop) that passes the prefilter, when a task
+# is open (DESIGN §3.5.9) — its own request, never merged into the gate's, whose recall was
+# measured on a digest-only state (§3.5.3b). The state is one object the code assembles:
+# `digest`, the window's digest exactly as the gate reads it, and `tasks`, the open tasks
+# (pending|active) as tasks.yaml holds them (id, title, notes). Nothing numeric or temporal is
+# added by code: no ages, no counts. Code renders `done_{i}` once per task. An answer at or over
+# `recheck_at` is asked again with that one task alone beside the digest (`done`): the rest of
+# the roster is irrelevant material to that question, and irrelevant material costs accuracy
+# (§3.9). A recheck at or over `flag_at` becomes a flag, shown at session start and never
+# applied: the task stays open until main closes it or notes what is left (§6).
+questions:
+  # stage 1: every open task beside the digest, one question per task.
+  done_{i}:
+    type: noul
+    instructions: >-
+      Does `digest` show the work described by `tasks[{i}]` reaching its end in this window —
+      finished, merged, shipped, closed, or given up — rather than started, continued, or only
+      mentioned?
+    criteria: &done
+      "true": The digest shows this task's work finished or abandoned
+      "false": The digest shows this task's work under way, blocked, untouched, or only mentioned
+  # stage 2: the one task alone beside the digest. This is what a flag is allowed to rest on.
+  done:
+    type: noul
+    instructions: >-
+      Does `digest` show the work described by `task` reaching its end in this window —
+      finished, merged, shipped, closed, or given up — rather than started, continued, or only
+      mentioned?
+    criteria: *done
+policy:
+  # The two-stage shape and both bars are directive.yaml's, where a whole-set probe ranked
+  # unrelated pairs at 0.66-0.74. Measured on a replay of 592 windows (DESIGN §3.5.9): 6 wrong
+  # task flags in 5,635 stage-1 judgments (0.106%) — at about 2,000 judgments a day, ~2 wrong
+  # flags against 5-15 real closures; wrong would outnumber right only from 0.25-0.75%. The
+  # bars jitter: an identical state re-asked moved a stage-1 answer by up to 0.09 and a recheck
+  # by up to 0.03, and 4 task rechecks sat in [0.68, 0.72] — so they are not retuned on that
+  # data.
+  recheck_at: 0.5
+  flag_at: 0.7

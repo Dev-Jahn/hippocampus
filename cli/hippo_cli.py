@@ -622,6 +622,23 @@ def dump_failure(hp, kind, text):
     return p
 
 
+def load_json_object(hp, name, kind):
+    """A JSON object hippo generated under .hippo/: an unreadable one is dumped as a `kind`
+    failure and read as empty — its writer writes it whole again."""
+    p = hp / name
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError) as ex:
+        dump_failure(hp, kind, f"{type(ex).__name__}: {ex}\n")
+        return {}
+    if not isinstance(data, dict):
+        dump_failure(hp, kind, f"{name} is not an object: {data!r}\n")
+        return {}
+    return data
+
+
 def extract_json(text):
     """Lenient JSON object extraction: tolerates surrounding noise and code fences."""
     dec = json.JSONDecoder()
@@ -968,6 +985,42 @@ def scribe_failing(hp):
     return f"· scribe: the last {n} runs failed{cause} (.hippo/failures/)"
 
 
+TASK_FLAGS = "task-flags.json"  # generated: open tasks the judge read as ended (§3.5.9)
+
+
+def task_flags(hp):
+    """task id → {t, p}: the open tasks a window's digest read as finished or abandoned, `t`
+    being when the scribe read the task (§3.5.9). Only the scribe writes it, under its lock;
+    what shows is derived from it and tasks.yaml at every read (`task_flag_shows`). An
+    unreadable file is dumped and read as empty — the next judged window writes it whole again."""
+    return load_json_object(hp, TASK_FLAGS, "task-flags")
+
+
+def task_flag_shows(task, flag):
+    """A flag shows while its task is open and untouched since the scribe read it. Every task
+    write — `set`, `done`, `drop` — moves `updated`, so a later stamp is main having looked:
+    the flag goes quiet by itself, and nobody deletes it by hand."""
+    t = _iso_time(flag.get("t")) if isinstance(flag, dict) else None
+    if task is None or t is None or task.get("status") not in OPEN_STATUSES:
+        return False
+    u = _iso_time(task["updated"]) if task.get("updated") else None
+    return u is None or u <= t
+
+
+def task_check(hp, tasks):
+    """The capsule's `check:` line, or None (§6, main's capsule only): the flags that still
+    show, in tasks.yaml order. Closing a task is main's call, so the line asks and never acts."""
+    flags = task_flags(hp)
+    ids = [t["id"] for t in tasks
+           if isinstance(t.get("id"), str) and task_flag_shows(t, flags.get(t["id"]))]
+    if not ids:
+        return None
+    if len(ids) == 1:
+        return f"· check: {ids[0]} looks finished or abandoned — close it, or note what is left"
+    return (f"· check: {', '.join(ids)} look finished or abandoned — close them, "
+            "or note what is left")
+
+
 def live_directives(hp, reader):
     """The active directives addressed to `reader` (§9.4): `all`, and absent, reach both."""
     return [d for d in directives(hp).values() if d.get("state") == "active"
@@ -1061,6 +1114,9 @@ def status_lines(hp, compacted=False):
             "long runs go to background — never poll with a foreground sleep"
         )
     else:
+        check = task_check(hp, data["tasks"])
+        if check:
+            lines.append(check)
         failing = scribe_failing(hp)
         if failing:
             lines.append(failing)
@@ -2127,18 +2183,7 @@ def worklog_append(hp, text):
 
 def load_cursors(hp):
     """A failed read beats losing every cursor — dump the original and start empty."""
-    p = hp / "cursors.json"
-    if not p.exists():
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError) as ex:
-        dump_failure(hp, "cursors", f"{type(ex).__name__}: {ex}\n")
-        return {}
-    if not isinstance(data, dict):
-        dump_failure(hp, "cursors", f"cursors.json is not an object: {data!r}\n")
-        return {}
-    return data
+    return load_json_object(hp, "cursors.json", "cursors")
 
 
 def save_cursors(hp, cursors):
@@ -5329,6 +5374,59 @@ def native_guard(hp, fn, *a):
         return None
 
 
+def task_ends(hp, digest):
+    """Step 9 (judge on only): does this window's digest show an open task's work finished or
+    abandoned? One request over every open task, then that one task alone beside the digest for
+    each answer at or over `recheck_at`; a recheck at or over `flag_at` is a flag, shown by the
+    capsule and never applied (§3.5.9, §6). Its own requests, never the gate's: the gate's
+    recall was measured on a digest-only state.
+
+    Only the scribe writes the file, and its caller holds scribe.lock: the file is read, merged
+    with this window's flags, pruned of every flag that no longer shows, and written whole —
+    two sessions' scribes never lose each other's flags. A request that fails is metered, named
+    on stderr and flags nothing; the clerk has already run."""
+    if jev_backend(hp) == "off":
+        return
+    tasks = [t for t in tasks_load(hp)["tasks"]
+             if t.get("status") in OPEN_STATUSES and isinstance(t.get("id"), str)]
+    if not tasks:
+        return
+    read_at = now_iso()  # a flag is about the tasks as read now: any later write supersedes it
+    policy = jev_policy("task-end")
+    recheck_at, flag_at = float(policy.get("recheck_at", 1.0)), float(policy.get("flag_at", 1.0))
+
+    def as_state(t):
+        return {"id": t["id"], "title": t.get("title") or "", "notes": t.get("notes") or []}
+
+    def ask(state, questions):
+        answers, meta = judge(hp, "task-end", state, questions)
+        append_event(hp, {"ev": "clerk", "name": "jev-task-end", "ok": meta["ok"],
+                          "ms": meta["ms"], "tokens": meta["tokens"]}, src="scribe")
+        if answers is None:
+            print(f"jev-task-end: {meta['reason']}", file=sys.stderr)
+        return answers
+
+    first = ask({"digest": digest, "tasks": [as_state(t) for t in tasks]},
+                {f"done_{i}": jev_questions("task-end", i=i)[f"done_{i}"]
+                 for i in range(len(tasks))})
+    if first is None:
+        return
+    recheck = {"done": jev_questions("task-end")["done"]}
+    flags = {}
+    for i, t in enumerate(tasks):
+        p1 = jev_noul(first, f"done_{i}")
+        if p1 is None or p1 < recheck_at:
+            continue
+        p2 = jev_noul(ask({"digest": digest, "task": as_state(t)}, recheck), "done")
+        if p2 is not None and p2 >= flag_at:
+            flags[t["id"]] = {"t": read_at, "p": p2}
+    by_id = {t["id"]: t for t in tasks_load(hp)["tasks"] if isinstance(t.get("id"), str)}
+    kept = {tid: f for tid, f in {**task_flags(hp), **flags}.items()
+            if task_flag_shows(by_id.get(tid), f)}
+    if kept or (hp / TASK_FLAGS).exists():
+        write_durable(hp / TASK_FLAGS, json.dumps(kept, ensure_ascii=False, indent=2) + "\n")
+
+
 def cmd_scribe(args):
     hp = args.hp
     lock = (hp / "scribe.lock").open("w")
@@ -5451,6 +5549,7 @@ def cmd_scribe(args):
         save_cursor()
         append_event(hp, {**meter, "ok": False}, src="scribe")
         auto_distill(hp)
+        task_ends(hp, digest)
         die(f"scribe failed: {reason} — dump: {p}")
 
     if rc != 0:
@@ -5503,6 +5602,9 @@ def cmd_scribe(args):
     save_cursor()
     append_event(hp, {**meter, "ok": True}, src="scribe")
     auto_distill(hp)
+    # 9. Open tasks that look ended (DESIGN §3.5.9) — last, on both paths: it reads nothing
+    # the scribe wrote (the clerk never writes tasks.yaml) and nothing waits on it.
+    task_ends(hp, digest)
 
 
 # --- argparse -----------------------------------------------------------------
