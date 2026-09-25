@@ -324,11 +324,11 @@ def test_a_workflow_run_is_one_row_over_all_its_agents(tmp_project, run_hippo, t
 
 
 def test_a_workflow_result_over_budget_is_trimmed_by_its_structure(tmp_project, monkeypatch,
-                                                                   tmp_path):
+                                                                   tmp_path, capsys):
     """Measured: 2 of 23 Workflow results were over the judge's budget (226,811 and 129,195
     chars). Every key and item stays, every long string keeps its head, the state fits, and the
-    triage row names what was cut. A report no cut down to TRIAGE_LEAF_MIN rescues stays whole
-    and the judge refuses it."""
+    triage row names what was cut. A report no cut down to TRIAGE_LEAF_MIN rescues stays whole,
+    the judge refuses it, and the reason is on stderr."""
     findings = [{"claim": f"finding {i}: " + "evidence " * 60, "confidence": "measured"}
                 for i in range(300)]
     result = {"designs": findings, "verdict": "Recommend the minimal design. " + "why " * 9000}
@@ -361,6 +361,12 @@ def test_a_workflow_result_over_budget_is_trimmed_by_its_structure(tmp_project, 
     items = {"items": [str(i) * 5 for i in range(30000)]}  # no string is long: nothing to cut
     state = {"brief": "b", "report": items}
     assert hippo_cli.fit_triage_state(state) == [] and state["report"] is items
+    run["summary"].write_text(json.dumps({"result": json.dumps(items)}), encoding="utf-8")
+    capsys.readouterr()
+    assert hippo_cli.native_triage(tmp_project / ".hippo", run, "ag-wf", "impl") is True
+    assert ("native: ag-wf no triage — the judge did not answer (state exceeds jev budget"
+            in capsys.readouterr().err)
+    assert len(_rows(tmp_project, "triage")) == 1
 
 
 T0 = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=2)
@@ -373,12 +379,14 @@ def _at(minutes, line):
     return {**line, "timestamp": stamp}
 
 
-def _watcher(agent, report_at, resumes=(), tool="Monitor", task="m1"):
-    """An agent that armed a 20-minute watcher (or started a background command) at minute 1
-    and reported at `report_at`; `resumes` are the lines it wrote when it was woken again."""
+def _watcher(agent, report_at, resumes=(), tool="Monitor", task="m1", persistent=False):
+    """An agent that armed a 20-minute watcher (a persistent one, on hosts 2.1.246-258: no
+    deadline) or started a background command at minute 1 and reported at `report_at`;
+    `resumes` are the lines it wrote when it was woken again."""
     inp = ({"command": "tail -f run.log | grep --line-buffered DONE", "timeout_ms": 1_200_000}
            if tool == "Monitor" else {"command": "sleep 3600", "run_in_background": True})
-    tur = {"taskId": task} if tool == "Monitor" else {"backgroundTaskId": task}
+    tur = ({"taskId": task, "timeoutMs": 0 if persistent else 1_200_000, "persistent": persistent}
+           if tool == "Monitor" else {"backgroundTaskId": task})
     return [_at(0, {"type": "user", "message": {"role": "user", "content": BRIEF}}),
             _at(1, _assistant({"type": "tool_use", "id": WATCH_TUID, "name": tool,
                                "input": inp})),
@@ -457,6 +465,54 @@ def test_an_answer_waits_for_work_without_a_deadline_and_ends_at_a_sendmessage(t
     runs = hippo_cli.native_index(path, 8, 9)
     assert [n.report for n in runs["ag-" + bash]["answer"]] == ["bench: 3.1x faster"]
     assert (runs["ag-" + bash]["first_now"], runs["ag-" + sent]["first_now"]) == (True, False)
+
+
+def _event(task, text):
+    """A Monitor's event: a notification with no status, its expiry included."""
+    return (f"<task-notification>\n<task-id>{task}</task-id>\n<summary>Monitor event: "
+            f"\"watch\"</summary>\n<event>{text}</event>\n</task-notification>")
+
+
+def test_a_monitor_ends_when_its_notice_reaches_the_agent_else_at_its_deadline(tmp_path):
+    """Measured: the host delivers a Monitor's expiry from 0.40s before its deadline to 0.27s
+    after. An expiry that wakes the agent just after the deadline ends the Monitor there, so
+    the run is not settled at the deadline and the final report it resumed to send is its
+    answer. Events before the agent's report are a live Monitor's, not its end; with no
+    notice after it, the Monitor ends at its deadline. A persistent one has none."""
+    late, evts, pers = "alate000000000000", "aevts000000000000", "apers000000000000"
+    tl, te, tp = ("toolu_01LateLateLateLateLate", "toolu_01EvtsEvtsEvtsEvtsEvts",
+                  "toolu_01PersPersPersPersPers")
+    session = tmp_path / "t"
+    expiry = "[Monitor expired after 20m with 0 events delivered.]"
+    _write(session / "subagents" / f"agent-{late}.jsonl", _watcher(late, 15, [
+        _at(21.02, _user(_event("m1", expiry))),
+        _at(24.9, _assistant({"type": "text", "text": "FINAL: e2e actually failed."}))]))
+    watched = _watcher(evts, 15)
+    watched[3:3] = [_at(5, _queued(_event("m1", "step 1 ok"))),
+                    _at(9, _queued(_event("m1", "step 2 ok")))]
+    _write(session / "subagents" / f"agent-{evts}.jsonl", watched)
+    _write(session / "subagents" / f"agent-{pers}.jsonl", _watcher(pers, 15, persistent=True))
+    lines = [_call(tl, desc="late"), _at(0, _launched(tl, late, "late")),               # 1, 2
+             _call(te, desc="evts"), _at(0, _launched(te, evts, "evts")),               # 3, 4
+             _call(tp, desc="pers"), _at(0, _launched(tp, pers, "pers")),               # 5, 6
+             *(_at(15, _user(_note(a, u, interim=True)))
+               for a, u in ((late, tl), (evts, te), (pers, tp))),                       # 7-9
+             _at(18, _user("main works on")),                                           # 10
+             _at(22, _user("main keeps working")),                                      # 11
+             _at(25, _user(_note(late, None, result="FINAL: e2e actually failed."))),   # 12
+             _at(200, _user("much later"))]                                             # 13
+    path = _write(tmp_path / "t.jsonl", lines)
+
+    def answers(since, end):
+        runs = hippo_cli.native_index(path, since, end)
+        return {a: (runs["ag-" + a]["answer"] and [n.line for n in runs["ag-" + a]["answer"]],
+                    runs["ag-" + a]["first_now"]) for a in (late, evts, pers)}
+
+    none = (None, False)
+    assert answers(9, 10) == {late: none, evts: none, pers: none}, "no deadline has passed"
+    assert answers(10, 11) == {late: none, evts: ([8], True), pers: none}
+    assert answers(11, 12)[late] == ([12], True)
+    assert answers(12, 13)[pers] == none
 
 
 def test_a_restated_launch_keeps_main_s_verdict(tmp_project, run_hippo, tmp_path):

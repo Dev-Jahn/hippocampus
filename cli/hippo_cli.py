@@ -4500,9 +4500,6 @@ TASK_STATUS_RE = re.compile(r"<status>([^<]*)</status>")
 # note and notifies again when it is done (measured, 43 on this machine): an interim result.
 TASK_INTERIM_RE = re.compile(r"<note>[^<]*background work of its own still running")
 TaskNote = collections.namedtuple("TaskNote", "line task tuid status report interim t")
-# The host kills every Monitor at its `timeout_ms`: 5 minutes unless set, 30 at most (the
-# tool's own description, Claude Code 2.1.280).
-MONITOR_TIMEOUT_MS = (300_000, 1_800_000)
 
 
 def _message_texts(content):
@@ -4770,11 +4767,15 @@ def native_settled(run, since):
     by which every piece of background work it had started ended, with no user or assistant
     line after `since` before then (it was not resumed, by a message or by that work). None
     when that never happened, when `since` is unknown, or when the transcript cannot be read.
-    A task ends with its own notification (one with a status) or the agent's TaskStop; a
-    Monitor at its deadline at the latest, since the host kills each at its `timeout_ms`.
-    Anything else — a background Bash command, an agent or a workflow of its own — has no
-    deadline: it runs until it says it ended. A fixed moment, so a window that finds the run
-    settled is never contradicted by a later one."""
+    A task ends with its own notification (one with a status) or the agent's TaskStop. After
+    `since` any notice of it counts — a Monitor's expiry is an event with no status, and one
+    that reaches the idle agent wakes it, so the run is not settled before it (measured, an
+    agent gets its expiry from 0.40s before the deadline to 0.27s after). A Monitor no notice
+    of which reached the agent ends at its deadline: the host kills it at the `timeoutMs` its
+    launch result states, whatever the call asked for — 0 for a `persistent` one, which has
+    none (hosts 2.1.246-258 ran those). Anything else — a background Bash command, an agent or
+    a workflow of its own — has no deadline: it runs until it says it ended. A fixed moment,
+    so a window that finds the run settled is never contradicted by a later one."""
     memo = run.setdefault("settled", {})
     if since is None or since in memo:
         return memo.get(since)
@@ -4802,25 +4803,25 @@ def native_settled(run, since):
                     continue
                 inp = b.get("input") if isinstance(b.get("input"), dict) else {}
                 if kind == "assistant" and b.get("type") == "tool_use":
-                    pending[b.get("id")] = (b.get("name"), inp)
+                    pending[b.get("id")] = b.get("name")
                     if b.get("name") == "TaskStop" and isinstance(inp.get("task_id"), str):
                         ended.setdefault(inp["task_id"], t)
                 if not (kind == "user" and b.get("type") == "tool_result" and t <= since
                         and b.get("tool_use_id") in pending and isinstance(tur, dict)):
                     continue
-                name, call = pending.pop(b["tool_use_id"])
+                name = pending.pop(b["tool_use_id"])
                 tid = tur.get("backgroundTaskId") or tur.get("taskId") or (
                     tur.get("agentId") if tur.get("status") == "async_launched" else None)
                 if isinstance(tid, str):
-                    ms = min(_num(call.get("timeout_ms")) or MONITOR_TIMEOUT_MS[0],
-                             MONITOR_TIMEOUT_MS[1])
-                    work[tid] = t + timedelta(milliseconds=ms) if name == "Monitor" else None
+                    ms = _num(tur.get("timeoutMs")) if name == "Monitor" else None
+                    work[tid] = t + timedelta(milliseconds=ms) if ms else None
             for text in _note_texts(rec):
-                for n in task_notes(text, 0):
-                    ended.setdefault(n.task, t)
-    # Each task's end: its own notice or its deadline, whichever came first; None: still running.
-    ends = [min(filter(None, (ended.get(tid), deadline)), default=None)
-            for tid, deadline in work.items()]
+                # Before `since` a notice with no status is a live Monitor's event, not its end.
+                for tid in ([m.group(1).strip() for m in TASK_NOTE_RE.finditer(text)] if t > since
+                            else [n.task for n in task_notes(text, 0)]):
+                    ended.setdefault(tid, t)
+    # Each task's end: its own notice, else its deadline; None: still running.
+    ends = [ended.get(tid, deadline) for tid, deadline in work.items()]
     done = None if None in ends else max([since, *ends])
     memo[since] = done if done is not None and (resumed is None or done < resumed) else None
     return memo[since]
@@ -5129,7 +5130,8 @@ def native_triage(hp, run, ref, kind):
     answer's <result> — its final notification's, or its interim ones' in order when no final
     one came (`native_answer`) — or a Workflow's whole result; rc 0 only when it completed,
     and the changes from the run's own transcript or worktree. A state over the judge's
-    budget is fitted like any lane's (`fit_triage_state`)."""
+    budget is fitted like any lane's (`fit_triage_state`). When the judge does not answer — it
+    refuses a state no fitting rescued as over budget — its reason goes to stderr."""
     answer = run["answer"]
     ex = {"rc": 0 if answer[-1].status == "completed" else 1, "check_rc": None}
     if run["executor"] == "workflow":
@@ -5141,7 +5143,10 @@ def native_triage(hp, run, ref, kind):
         return False
     state = triage_state(run["scope"], kind, run["brief"], ex, None, report, None, None, None)
     state["changes"] = native_changes(hp, run)
-    triage(hp, state, ex, ref, src="scribe")
+    t = triage(hp, state, ex, ref, src="scribe")
+    if t["route"] is None:
+        print(f"native: {ref} no triage — the judge did not answer ({t['jev']['reason']})",
+              file=sys.stderr)
     return True
 
 

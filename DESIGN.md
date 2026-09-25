@@ -522,18 +522,23 @@ SessionStart source, `subagent` or `precompact` (`hippo status --inject` reads i
    completes it only where the host's final one cannot be waited for: once the agent has
    answered a SendMessage (main moved on from the interim report), or once the agent's own
    transcript shows it idle since its last report with all the work it had started ended — a
-   Bash command, an agent or a workflow of its own by its own notification or a TaskStop, a
-   Monitor by its deadline at the latest, since the host kills each at its `timeout_ms` (30
-   minutes at most). That moment is fixed in the agent's transcript, so the window that
-   finds it is the only one; the interim reports, in order, are the report. Measured
-   (mlx-vlm, 2026-09-23): 3 of 14 agent runs sent only interim notifications. In each the
-   work left was a `tail -f` Monitor that expired 5–11 minutes after the agent's last report;
-   the host queued the expiry in main's transcript and never delivered it to the idle agent,
-   so it never resumed and no final notification came in the two days the session ran on —
-   and each interim report was the agent's whole report. A fourth's only final notification
-   answered its second SendMessage; its answer to the brief is its first, interim report. What
-   stays open is a background command whose end never reaches the agent's transcript: that
-   run is read when it ends, or never.
+   Bash command, an agent or a workflow of its own by its own notification or a TaskStop; a
+   Monitor also by any notice of it after that report, its expiry included (an event with no
+   status): one that reaches the idle agent wakes it, so the run is not settled before it, and
+   an agent gets its expiry from 0.40s before the deadline to 0.27s after. With no such notice
+   a Monitor ends at its deadline, the `timeoutMs` its launch result states whatever the call
+   asked for — 0, none, for a `persistent` one, which hosts 2.1.246–258 ran. That moment is
+   fixed in the agent's transcript, so the window that finds it is the only one; the interim
+   reports, in order, are the report. Measured (mlx-vlm, 2026-09-23): 3 of 14 agent runs sent
+   only interim notifications. In each the work left was a `tail -f` Monitor that expired 5–11
+   minutes after the agent's last report; the host queued the expiry in main's transcript and
+   never delivered it to the idle agent, so it never resumed and no final notification came in
+   the two days the session ran on — and each interim report was the agent's whole report. A
+   fourth's only final notification answered its second SendMessage; its answer to the brief is
+   its first, interim report. What stays open is a background command whose end never reaches
+   the agent's transcript — that run is read when it ends, or never — and a Stop in the
+   fraction of a second between a Monitor's deadline and an expiry that reaches the agent after
+   it, which reads the run as settled.
    brief = the call's prompt (a Workflow's script); report = the answer's `<result>`s (a
    Workflow's whole result from `workflows/<runId>.json` — the notification's copy is cut at
    ~8k — handed to the judge as the JSON structure it is, not as a string of it whose every
@@ -897,7 +902,8 @@ structured report (a Workflow's JSON result, §3.5.3c) is never cut through the 
 key and item stays, and every string in it is cut to the one longest length that fits,
 keeping its head, where a finding or a field states its point. Below `TRIAGE_LEAF_MIN` (120
 characters, about a sentence per item) it no longer says what the result said, so such a
-report is left whole and the judge refuses it as over budget.
+report is left whole, the judge refuses it as over budget, and the caller prints that reason
+on stderr (single dispatch and the scribe alike).
 
 **The harvest.** Every run ends with it, on stdout above the summary line (which stays last).
 Each exited entry is read — the triage its latest attempt already carries, or a fresh one where
