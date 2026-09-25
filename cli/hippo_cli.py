@@ -5731,7 +5731,11 @@ def cmd_scribe(args):
         return 0 if isinstance(e.get("id"), str) and e["id"] in listed else 1
 
     events = sorted(obj.get("events", []), key=order)
-    alias = {}  # a restated dispatch id → the native run's row (native_take)
+    # An id an outcome may name a native run by → the row that records the run: its own `ag-`
+    # id when main's row is its record (native_refs) — the skills teach main that id, so main
+    # judges the run by it — and a restated dispatch id (native_take).
+    alias = {r["id"]: r["ref"] for r in native["runs"].values()
+             if r["ref"] and r["ref"] != r["id"]} if native else {}
     for e in events:
         # lifetime is retired (§3.2) and the prompt no longer asks for it; a clerk that still
         # says `turn` must not make its directive invisible to the view.

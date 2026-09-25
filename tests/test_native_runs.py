@@ -440,22 +440,25 @@ def test_main_s_bare_run_id_row_is_the_record(tmp_project, run_hippo, tmp_path):
     """Main logged the Workflow at launch under the Run ID the tool printed, its scope in its
     own words (measured, mlx-vlm: 15 of 17 runs had such a row beside the scribe's `ag-` twin,
     main's verdict on one and the cost on the other). That row is the run's record: nothing is
-    listed, the cost lands on it, and PRIORS joins main's verdict to that cost."""
+    listed, the cost lands on it, and a verdict main typed under the `ag-` id the skills teach
+    lands on it too, so PRIORS joins that verdict to that cost."""
     assert run_hippo(["log", "dispatch", "--id", WF, "--kind", "impl", "--exec",
                       "workflow/opus/xhigh", "--scope", "parser port"],
                      cwd=tmp_project).returncode == 0
     _wf_agent(tmp_project, "a1", [_msg("w1")])
     _wf_file(tmp_project, status="completed", taskId=WF_TASK, result="ported")
     _write(tmp_project / "transcript.jsonl",
-           [_user("port it"), *_wf_launch(), _user(_note(task=WF_TASK, tuid=WF_TUID))])
+           [_user("port it"), *_wf_launch(), _user(_note(task=WF_TASK, tuid=WF_TUID)),
+            _assistant({"type": "text", "text": f"{WF_ID} is accepted; merged."})])
     capture = tmp_path / "clerk.txt"
-    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w"), capture=capture)
-    assert run_hippo(["log", "outcome", "--ref", WF, "--result", "accepted"],
-                     cwd=tmp_project).returncode == 0
+    verdict = {"ev": "outcome", "ref": WF_ID, "result": "accepted", "note": "merged"}
+    _scribe(run_hippo, tmp_project, _clerk(tmp_path, "w", [verdict]), capture=capture)
 
     assert "# native runs to record" not in _payload(capture)
     assert [d["id"] for d in _rows(tmp_project, "dispatch")] == [WF]
     assert [u["ref"] for u in _rows(tmp_project, "usage")] == [WF]
+    assert [(o["ref"], o["src"]) for o in _rows(tmp_project, "outcome")] == [(WF, "scribe")]
+    assert not _dumps(tmp_project)
     [cell] = hippo_cli.prior_cells(read_ledger(tmp_project)).values()
     assert cell["judged"] == 1 and cell["tokens"] == 1160
 

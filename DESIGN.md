@@ -588,11 +588,15 @@ subagent's own (PreCompact, below).
    guess would cost runs their rows (6b measured those). Main does paraphrase: all 4 of its
    `log dispatch` rows for Agent runs in this repo's ledger did ("Jev judge layer + scribe
    gate (wave 1)" for "Jev wave 1: client + scribe gate"), which is why the skills now say no
-   call is needed. `hippo log outcome --ref ag-…` for a run with no row yet says so, and that
-   the verdict is read off the turn — only for a ref that can be a run id (`ag-a…`,
-   `ag-wf_…`): a Workflow launch prints its Task ID first, and a ref built from that is told
-   it names no run rather than "no call needed", which would drop the verdict; a ref whose
-   bare id main logged itself is pointed at that row. **Usage** (code): at every end — a
+   call is needed. When main's row is a run's record, a clerk outcome naming the run's own
+   `ag-` id lands on that row: the skills teach main that id, so main judges the run by it, and
+   an outcome checked against the ledger alone would be dumped in exactly the twin case this
+   closes (replayed: main's bare `wf_…` row, "ag-wf_… is accepted" in the turn, and the
+   verdict reached only failures/). `hippo log outcome --ref ag-…` for a run with no row yet
+   says so, and that the verdict is read off the turn — only for a ref that can be a run id
+   (`ag-a…`, `ag-wf_…`): a Workflow launch prints its Task ID first, and a ref built from that
+   is told it names no run rather than "no call needed", which would drop the verdict; a ref
+   whose bare id main logged itself is pointed at that row. **Usage** (code): at every end — a
    notification, or a stop with none — and for a run whose row landed after its end, the
    run's own transcript(s) are summed per model — one API message once, though it spans
    several lines as it streams (49 of 59 messages in one agent); nothing before the first user
