@@ -1,6 +1,7 @@
-# harvest: asked once over every finished lane — at lane exit, by `hippo dispatch` and by each
-# `hippo dispatch --batch` lane, and by a batch harvest for an exited lane that has none yet
-# (DESIGN §3.6). The state is one object the code assembles:
+# harvest: asked once over every finished run — a codex lane at exit, by `hippo dispatch` and by
+# each `hippo dispatch --batch` lane, and by a batch harvest for an exited lane that has none yet
+# (DESIGN §3.6); a Claude Code subagent or Workflow run by the scribe once its answer is complete
+# (DESIGN §3.5.3c). The state is one object the code assembles:
 # scope, kind, brief, exit, claim, report, stderr_tail, check_output, changes. Every question is
 # one literal judgment over it; the route, the verify hint and the cause filter are computed in
 # code from the thresholds under `policy`. The judge answers, the policy decides, main judges.
@@ -16,11 +17,11 @@ questions:
   reports_blocked:
     type: noul
     instructions: >-
-      Does `report` say the lane could not proceed — a premise in `brief` did not hold, it is
+      Does `report` say the run could not proceed — a premise in `brief` did not hold, it is
       reporting no-go, it hit a blocker, or it was asked to stop?
     criteria:
-      "true": The report says the lane stopped because it could not proceed
-      "false": The report shows the lane proceeding, whatever it ended up producing
+      "true": The report says the run stopped because it could not proceed
+      "false": The report shows the run proceeding, whatever it ended up producing
   needs_decision:
     type: noul
     instructions: >-
@@ -65,7 +66,7 @@ questions:
   cause:
     type: choice
     instructions: >-
-      Why did this lane fail, according to `report`, `stderr_tail` and `check_output`?
+      Why did this run fail, according to `report`, `stderr_tail` and `check_output`?
     criteria:
       capability: It attempted the work and produced a wrong or incomplete result
       spec: The brief it was given was wrong, ambiguous, or contradictory
@@ -81,7 +82,7 @@ policy:
   blocked_below: 0.2
   decision_below: 0.3
   creep_below: 0.3
-  # The verify hint (dispatch skill §4) — a suggestion that this lane deserves a verification
+  # The verify hint (dispatch skill §4) — a suggestion that this run deserves a verification
   # lane, never a gate. risk is the 0-3 ladder above, so 2.0 is "shared interfaces or wider".
   verify_risk_at: 2.0
   evidence_below: 0.3

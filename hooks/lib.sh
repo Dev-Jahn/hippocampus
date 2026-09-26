@@ -42,8 +42,9 @@ else:
 # project_root <cwd> [through]  -> prints the project that owns <cwd>, or nothing (every hook
 # is then a silent no-op, §3.1). Walks up looking for .hippo/, capped at the git root
 # (inclusive) and at $HOME (never adopt a project from above the user's home). `through` crosses
-# a linked worktree's .git file (SubagentStart: the host isolates a subagent in its own worktree
-# under the project's .claude/worktrees/, and that subagent is still the project's worker).
+# a linked worktree's .git file (SubagentStart, and SessionStart for a compaction: the host
+# isolates a subagent in its own worktree under the project's .claude/worktrees/, and that
+# subagent is still the project's worker).
 project_root() {
   local dir="$1" through="${2:-}" parent
   [ -n "$dir" ] && [ -d "$dir" ] || return 1
@@ -75,14 +76,17 @@ plugin_root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/de
 
 # inject <moment> <cwd>  -> the CLI's text for that moment. The moment travels in HIPPO_INJECT,
 # an internal env var rather than a flag (the surface stays what the skill documents): a
-# SessionStart source, `subagent` or `precompact`; HIPPO_TRANSCRIPT carries stdin's
-# transcript_path, which is how a compaction tells a subagent's own from main's (§3.4). The CLI
-# runs from <cwd> because it re-derives .hippo/ from its own working directory, which is not
-# necessarily this hook's.
+# SessionStart source, `subagent` or `precompact`; stdin's transcript_path, prompt_id and
+# trigger ride in HIPPO_TRANSCRIPT, HIPPO_PROMPT and HIPPO_TRIGGER, which is how a compaction
+# tells an agent's own from main's (§3.4). The CLI runs from <cwd> because it re-derives .hippo/
+# from its own working directory, which is not necessarily this hook's.
 inject() {
-  local transcript
+  local transcript prompt trigger
   transcript="$(json_get transcript_path)"
+  prompt="$(json_get prompt_id)"
+  trigger="$(json_get trigger)"
   (cd "$2" 2>/dev/null && HIPPO_INJECT="$1" HIPPO_TRANSCRIPT="$transcript" \
+    HIPPO_PROMPT="$prompt" HIPPO_TRIGGER="$trigger" \
     "$plugin_root/bin/hippo" status --inject 2>/dev/null)
 }
 
