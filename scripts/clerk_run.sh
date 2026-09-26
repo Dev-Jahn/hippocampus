@@ -183,6 +183,10 @@ case "$BACKEND" in
     #   --strict-mcp-config   with no --mcp-config given, this loads no MCP servers.
     #   --setting-sources ""  load no user/project/local settings → no hooks,
     #                         no plugins of the host project inside the clerk.
+    #   --no-session-persistence  save no session (verified 2026-09-27, 2.1.282):
+    #                         without it every run was a transcript in the host project's
+    #                         folder — 534 of 537 in one project, 506 in another — filling
+    #                         --resume.
     # Default model is sonnet at low effort — the same tier as codex's gpt-6-luna at low above:
     # hippo's cheap tier is luna-low where codex exists and sonnet-low where it does not, and
     # never haiku. Haiku was demoted after a measured A/B (2026-07-31): it invented
@@ -197,6 +201,7 @@ case "$BACKEND" in
       --tools "" \
       --strict-mcp-config \
       --setting-sources "" \
+      --no-session-persistence \
       "$COMBINED" \
       < /dev/null 2>"${ERR_FILE:-/dev/null}"
     rc=$?
