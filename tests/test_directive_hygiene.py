@@ -199,6 +199,25 @@ def test_crowded_directive_set_warns_but_still_records(tmp_project, run_hippo):
     assert len(live) == 8
 
 
+def test_main_s_capsule_names_the_volume_past_the_total_mark(tmp_project, run_hippo):
+    """The stderr notes were discarded (`>/dev/null 2>&1` on every add, measured) while two sets
+    grew past 7.8k chars. Past the total mark main's capsule says so; a count alone is not the
+    cost, and neither a lane's capsule nor a subagent's slice carries it."""
+    def volume(**env):
+        out = run_hippo(["status", "--inject"], cwd=tmp_project, env=env).stdout.splitlines()
+        return [ln for ln in out if ln.startswith("· directives:")]
+
+    for i in range(9):
+        _add(run_hippo, tmp_project, f"directive number {i}", f"d-{i}")
+    assert volume() == []  # nine live, 162 chars
+    _add(run_hippo, tmp_project, "x" * 1500, "long-01")
+    assert volume() == ["· directives: 1662 chars ride into every session and subagent — "
+                        "/hippo:checkup's directive pass tidies them"]
+    assert volume(HIPPO_DISPATCH="d1") == [] and volume(HIPPO_INJECT="subagent") == []
+    run_hippo(["directive", "withdraw", "long-01"], cwd=tmp_project)
+    assert volume() == []
+
+
 # --------------------------------------------------------------------------
 # staleness — shown, never resolved (DESIGN §6)
 # --------------------------------------------------------------------------

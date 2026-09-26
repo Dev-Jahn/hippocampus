@@ -117,7 +117,11 @@ enforcement:      none
 ```
 
 In a directory with no `.hippo/`, every hook and every CLI command is a **completely silent no-op**
-(zero contamination of other projects).
+(zero contamination of other projects) — except a write, whose caller expects a record: it says
+on stderr that nothing was recorded, to run it again from the project root (or with `HIPPO_DIR`),
+and `hippo init` only for a new project. The way back leads because the measured cause is a `cd`
+into another tree in the same shell call (2026-09-26: main's `task set` was lost that way), and
+an `init` offered first would make a stray project there.
 
 Every file hippo rewrites (tasks, worklog, PRIORS, cursors, task flags, worker writes, lane records) is replaced whole: written to a tmp file
 beside it, fsync'd, then renamed over it (`write_durable`). The ledger is only ever appended to.
@@ -454,10 +458,16 @@ an agent's own (PreCompact, below).
   withdraw <id>` only if the user said so, `hippo directive add --id <id> --text '…'` when the
   user changed one, `edit <file>: '<old>' → '<new>'` for a memory or doc line now false), or
   `none`; then the open tasks (most recently updated first: id — title — the first 80 chars of
-  notes) and main's live directives (id — the first 80 chars), 3,000 chars at most with the cut
-  items counted. The reason: a compaction is the one moment the summarizer still sees everything
-  the conversation changed, and the capsule that follows it re-injects hippo's *records* — the
-  very state that went stale when a task shipped or a ruling moved without a call. Measured on
+  notes) and main's live directives (newest first: id — the first 80 chars), 3,000 chars at
+  most. Tasks, which most deltas are about, keep two thirds of the room whatever the directives
+  need; what does not fit whole is listed by id on one `also …` line, and only what does not fit
+  even so is cut and counted. Measured (mlx-vlm, 2026-09-27): with directives filling the budget
+  first in ledger order, 32 live ones left the summarizer none of 18 open tasks, and it proposed
+  re-adding the newest directive, recorded two minutes earlier and cut; over the same ledger the
+  lists now carry 4 tasks whole and 14 by id, the newest directive whole and 31 by id, nothing cut
+  (2,899 chars). The reason: a compaction is the one moment the summarizer still sees everything the
+  conversation changed, and the capsule that follows it re-injects hippo's *records* — the very
+  state that went stale when a task shipped or a ruling moved without a call. Measured on
   2.1.281 (2026-09-24, manual and auto): the summary followed the appended request — a
   `## hippo deltas` section with the right statuses, updated again on a second compaction — but
   its formatting drifted (bullets added, a `task ` prefix dropped), so every line is a command
@@ -829,7 +839,10 @@ an agent's own (PreCompact, below).
 4. Resolve the backend: `config.yaml > $HIPPO_CLERK_BACKEND > automatic (codex/gpt-6-luna/low when
    codex exists, otherwise claude -p sonnet at low effort) > mock` (for tests). That pair is hippo's
    one cheap tier (the lane agent, §3.6, is its sonnet-low half); hippo runs no haiku (the A/B note
-   in clerk_run.sh). 120s timeout. `$HIPPO_CLERK_MODEL`
+   in clerk_run.sh). 120s timeout. The claude backend saves no session
+   (`--no-session-persistence`): measured (2026-09-27), without it every clerk run was a
+   transcript in the host project's folder — 534 of 537 in mlx-vlm, 506 (85MB) in a Windows
+   project — and filled `claude --resume`. `$HIPPO_CLERK_MODEL`
    overrides the model on whichever backend is resolved; it is one variable for both, so pin the
    backend when you set it — a model id for one backend is invalid on the other.
 5. Prompt = `clerks/turn-scribe.md` + the live directive roster + the recent dispatch roster + the
@@ -1377,8 +1390,9 @@ the sheet, and shipping 300 JSONL lines only offers something to recompute from,
   verdict; mlx-vlm linked 1 of 17.
 - **`hippo:checkup`** (~5KB) — a `/doctor`-style project diagnosis. It reads the ledger, PRIORS,
   failures, cursor gaps, recent transcripts and CLAUDE.md/memory, then reports waste patterns
-  (retry loops, limit stalls, orphan dispatches), directive hygiene (stale or contradictory
-  directives versus the documents, from the notes `directive list` prints) and clerk health (gaps,
+  (retry loops, limit stalls, orphan dispatches), directive hygiene (stale, contradictory or
+  costly directives versus the documents, from the notes `directive list` prints — the pass the
+  capsule's `directives:` line points at, §6) and clerk health (gaps,
   failures, overhead, and why PRIORS is stale when auto-distill has not fired). Proposals are
   recommend-first, at most two AskUserQuestion rounds, with reversibility stated. Nothing is
   applied automatically.
@@ -1528,7 +1542,7 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 · live: use GPUs 0 and 1 only
 · in flight: NVFP4 factor-rebasing 6-part (0h42m), r2 UNCERTAIN 4건 (0h12m)
 · last: merged the v2 Pareto duo, full gate green (1421)
-· cli: task add|set|done|list · log dispatch|outcome|review|review-status · directive add|withdraw · prior · dispatch [--batch] — /hippo:hippo has the flags
+· cli: task add|set|done|list · log outcome|review|review-status|dispatch (subagent/Workflow runs: recorded, no call) · directive add|withdraw · prior · dispatch [--batch] — /hippo:hippo has the flags
 ```
 
 After a compaction (SessionStart source=compact) main's capsule closes on one more line —
@@ -1547,7 +1561,23 @@ runs its own manual compaction).
 The `cli:` line is main's only (a lane has its `report:` line instead): the command grammar,
 because the capsule is what re-arrives after a compaction and that is exactly when the grammar
 was being re-read — measured, 405 `--help` calls across 19 projects, and 59 of Codex's 96 (61%)
-came within 30 tool calls of a compaction.
+came within 30 tool calls of a compaction. `log dispatch` carries its one caveat, because offered
+bare it read as the way to record every launch: measured (mlx-vlm, 2026-09-27), main logged 8 of
+8 Workflow runs by hand though the scribe records them (§3.5.3c), split one run into two ids
+(its cost landed on one) and wrote model aliases (`workflow/opus/high` beside the scribe's
+`workflow/claude-opus-5-5/high`) that split PRIORS rows. The call is for work hippo cannot see.
+
+A `directives:` line (main's only) appears while the live directives' text, every audience
+together, reaches 1600 characters — the volume notes' total mark (below) —
+`· directives: 8422 chars ride into every session and subagent — /hippo:checkup's directive pass
+tidies them` — and is absent below it. The notes go to stderr at `directive add|list`, and main
+discarded them: measured (2026-09-27), every `directive add` in mlx-vlm ran with `>/dev/null
+2>&1` while two projects grew to 32 and 33 live directives (8.4k and 7.8k chars), their capsules
+from 0.5-3.8k to 8.4-9.2k chars, and every Workflow agent took ~8k of them. Characters, not the
+count, because they are what every reader pays: this repo's 11 short directives (670 chars) pass
+the count mark and cost less than three long ones. Over this machine's ten projects only mlx-vlm
+shows it. Like the notes it names a cost and asks nothing of the text: the pass is the user's
+call (propose, confirm, apply), and neither a lane's capsule nor a subagent's slice carries it.
 
 A `check:` line (main's only) names the open tasks whose flag still shows (§3.5.9) —
 `· check: feat/x, fix/y look finished or abandoned — close them, or note what is left` — at
@@ -1656,7 +1686,9 @@ Four rules govern the directive block:
   The notes describe the **whole live set, not the text just written**, and both `directive add`
   and `directive list` emit them. Warning only at write time is the failure this fixes: the
   expensive directives are usually the ones already resident, so the one moment they were
-  mentionable had already passed and every session went on paying in silence.
+  mentionable had already passed and every session went on paying in silence. Past the 1600
+  mark main's capsule says so too (the `directives:` line above): a note on stderr can be
+  discarded, and was.
 - **Staleness is shown, never resolved.** A directive lives until it is withdrawn, so its age is
   the one thing about it that changes: every live line carries its age from 14 days
   (`live(23d): …`), and the volume notes name every directive 30 days or older with the one

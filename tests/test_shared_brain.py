@@ -227,6 +227,17 @@ def test_a_git_directory_is_still_a_hard_boundary(tmp_project, run_hippo):
     assert not any(e.get("id") == "dnope" for e in read_ledger(tmp_project))
 
 
+def test_a_write_outside_every_project_points_back_before_init(uninitialized_dir, run_hippo):
+    """Measured: main `cd`'d into another tree in the same call and its `task set` was refused.
+    The refusal leads with the way back; `init` first would make a stray project there."""
+    proc = run_hippo(["task", "set", "feat/x", "notes", "stage 2 done"], cwd=uninitialized_dir)
+    assert proc.returncode == 0
+    err = proc.stderr
+    assert "nothing was recorded" in err
+    assert err.index("project root") < err.index("HIPPO_DIR") < err.index("hippo init")
+    assert not (uninitialized_dir / ".hippo").exists()
+
+
 # --------------------------------------------------------------------------
 # deterministic usage injection (1.8.1) — capsule report line + COMMON seed
 # --------------------------------------------------------------------------
@@ -245,9 +256,10 @@ def test_main_capsule_ends_with_the_grammar_and_a_lane_capsule_does_not(tmp_proj
     One line, last, for main only — a lane has its report line instead."""
     main_view = run_hippo(["status", "--inject"], cwd=tmp_project).stdout.splitlines()
     assert main_view[-1] == (
-        "· cli: task add|set|done|list · log dispatch|outcome|review|review-status "
-        "· directive add|withdraw · prior · dispatch [--batch] — /hippo:hippo has the flags")
-    assert len(main_view[-1]) < 160
+        "· cli: task add|set|done|list · log outcome|review|review-status|dispatch "
+        "(subagent/Workflow runs: recorded, no call) · directive add|withdraw · prior "
+        "· dispatch [--batch] — /hippo:hippo has the flags")
+    assert len(main_view[-1]) <= 200
     lane = run_hippo(["status", "--inject"], cwd=tmp_project,
                      env={"HIPPO_DISPATCH": "dlane1"}).stdout
     assert "· cli:" not in lane

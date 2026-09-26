@@ -61,6 +61,7 @@ def test_auto_falls_back_to_claude(tmp_path):
     assert argv[argv.index("--effort") + 1] == "low"
     assert "--strict-mcp-config" in argv
     assert "--setting-sources" in argv
+    assert "--no-session-persistence" in argv  # a clerk run is no session to resume
     # --tools "" — the empty argument really is empty, not dropped.
     assert argv[argv.index("--tools") + 1] == ""
 

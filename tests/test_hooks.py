@@ -326,17 +326,66 @@ def test_pre_compact_asks_for_hippo_deltas_over_main_s_lists(tmp_project, repo_r
     assert "worker-rule" not in text  # main's audience: a manual /compact shows this to main
 
 
-def test_pre_compact_is_capped_and_counts_what_it_cut(tmp_project, repo_root, run_hippo):
-    tasks = tmp_project / ".hippo" / "tasks.yaml"
-    tasks.write_text("tasks:\n" + "".join(
-        f"- {{id: feat/t{i:02d}, title: task number {i}, status: pending, notes: ['{'n' * 90}']}}\n"
-        for i in range(40)), encoding="utf-8")
+def _write_tasks(project, n, notes="n" * 90):
+    (project / ".hippo" / "tasks.yaml").write_text("tasks:\n" + "".join(
+        f"- {{id: feat/t{i:03d}, title: task number {i}, status: pending, "
+        f"updated: '2026-09-{1 + i % 28:02d}T00:00:{i % 60:02d}Z', notes: ['{notes}']}}\n"
+        for i in range(n)), encoding="utf-8")
+
+
+def _listed(text, head):
+    """(ids on whole lines, ids on the `- also … (id only):` line) under one list header."""
+    body = text.split(head + "\n", 1)[1].split("\n")
+    whole, by_id = [], []
+    for ln in body:
+        if ln.startswith("- also ") and " (id only): " in ln:
+            by_id = ln.split(" (id only): ", 1)[1].split(", ")
+        elif ln.startswith("- "):
+            whole.append(ln[2:].split(" — ", 1)[0])
+        else:
+            break
+    return whole, by_id
+
+
+def test_pre_compact_is_capped_and_lists_by_id_what_does_not_fit_whole(
+        tmp_project, repo_root, run_hippo):
+    _write_tasks(tmp_project, 40)
     proc = _pre_compact(tmp_project, repo_root)
     assert proc.returncode == 0, proc.stderr
     assert len(proc.stdout) <= 3000
-    shown = proc.stdout.count("- feat/t")
-    assert 0 < shown < 40
-    assert f"({40 - shown} more not shown" in proc.stdout
+    whole, by_id = _listed(proc.stdout, "open tasks (id — title — notes):")
+    assert 0 < len(whole) < 40 and len(whole) + len(by_id) == 40
+    assert "more not shown" not in proc.stdout
+    # Past even the ids, the least recently updated are cut and counted.
+    _write_tasks(tmp_project, 400)
+    proc = _pre_compact(tmp_project, repo_root)
+    assert len(proc.stdout) <= 3000
+    whole, by_id = _listed(proc.stdout, "open tasks (id — title — notes):")
+    assert f"({400 - len(whole) - len(by_id)} more not shown" in proc.stdout
+
+
+def test_pre_compact_keeps_tasks_in_view_past_many_directives(tmp_project, repo_root):
+    """Measured (mlx-vlm): 32 live directives filled the whole budget, the summarizer saw none of
+    18 open tasks and proposed re-adding the newest directive, which the oldest-first cut had
+    dropped. Tasks keep their share; directives run newest first, the rest by id."""
+    _write_tasks(tmp_project, 18, notes="stage 2 merged, stage 3 profiling on the worker")
+    with (tmp_project / ".hippo" / "ledger.jsonl").open("a", encoding="utf-8") as f:
+        for i in range(34):
+            f.write(json.dumps({
+                "t": f"2026-09-2{i // 10}T00:00:{i % 10:02d}Z", "ev": "directive",
+                "id": f"rule-{i:02d}", "state": "active", "src": "cli",
+                "text": f"rule {i}: " + "a durable user ruling in a full sentence " * 5}) + "\n")
+    proc = _pre_compact(tmp_project, repo_root)
+    assert proc.returncode == 0, proc.stderr
+    assert len(proc.stdout) <= 3000
+    t_whole, t_ids = _listed(proc.stdout, "open tasks (id — title — notes):")
+    assert len(t_whole) >= 3 and len(t_whole) + len(t_ids) == 18  # every open task in view
+    d_whole, d_ids = _listed(proc.stdout, "live directives (id — text):")
+    shown = d_whole + d_ids
+    assert shown[:3] == ["rule-33", "rule-32", "rule-31"]  # newest first
+    assert shown == [f"rule-{i:02d}" for i in range(33, 33 - len(shown), -1)]
+    cut = 34 - len(shown)
+    assert (f"({cut} more not shown" in proc.stdout) == (cut > 0)
 
 
 def test_pre_compact_is_silent_for_a_marked_subagent_and_outside_a_project(

@@ -97,10 +97,12 @@ That creates `.hippo/` and nothing else.
 
 ### The clerk backend
 
-The clerks resolve their backend automatically (codex if installed, else headless claude). When
-a project needs a different one, set `clerk: {backend: codex|claude}` in `.hippo/config.yaml`, or
-export `$HIPPO_CLERK_BACKEND` / `$HIPPO_CLERK_MODEL` (pin the backend when you pin the model —
-a model id for one backend is invalid on the other).
+The clerks resolve their backend automatically: codex (gpt-6-luna, low effort) if installed, else
+headless claude (sonnet, low effort; it saves no session, so clerk runs stay out of
+`claude --resume`). When a project needs a different one, set `clerk: {backend: codex|claude}` in
+`.hippo/config.yaml` — it outranks the variable and the automatic choice until removed — or export
+`$HIPPO_CLERK_BACKEND` / `$HIPPO_CLERK_MODEL` (pin the backend when you pin the model — a model id
+for one backend is invalid on the other).
 
 ### The judge (opt-in by key)
 

@@ -744,6 +744,22 @@ def directive_volume_notes(hp):
     return notes
 
 
+def directive_volume_line(hp):
+    """Main's capsule line while the live set's text passes DIRECTIVE_TOTAL_NUDGE (§6), or None.
+
+    The notes above go to stderr at `directive add|list`, where main discarded them (measured,
+    2026-09-27: `>/dev/null 2>&1` on every add in mlx-vlm) while two projects grew to 32 and 33
+    live directives, 8.4k and 7.8k chars: capsules of 8.4-9.2k chars, ~8k into every Workflow
+    agent. Characters, not the count, since they are what every reader pays — a project's 11
+    short directives (670 chars) are not the problem three long ones are."""
+    total = sum(len(one_line(d.get("text", ""))) for d in directives(hp).values()
+                if d.get("state") == "active")
+    if total < DIRECTIVE_TOTAL_NUDGE:
+        return None
+    return (f"· directives: {total} chars ride into every session and subagent — "
+            "/hippo:checkup's directive pass tidies them")
+
+
 # --- what the judge reads in the directives themselves (DESIGN §6, fourth rule) ------------
 # The volume notes above count characters; nothing counted the *content* of the set. These do,
 # and they stay on the same side of the line: a note on stderr after a write that already landed
@@ -1081,9 +1097,10 @@ def directive_lines(live):
 
     Every active directive appears whole: a directive that is invisible at session start is
     effectively not there (principle 9, read backwards), and that is as true of the ninth one as
-    of the first. Volume is handled by warning the author at `directive add` time, not by
-    dropping text here. Age is the whole staleness mechanism (nothing expires by itself — the
-    verdict stays with main and the user), so it is shown only once it is worth a glance."""
+    of the first. Volume is handled by warning the author at `directive add` time and, past
+    the total mark, in main's capsule (directive_volume_line) — never by dropping text here.
+    Age is the whole staleness mechanism (nothing expires by itself — the verdict stays with
+    main and the user), so it is shown only once it is worth a glance."""
     now = datetime.now(timezone.utc)
     out = []
     for d in live:
@@ -1175,12 +1192,18 @@ def status_lines(hp, compacted=False, transcript=None):
         failing = scribe_failing(hp)
         if failing:
             lines.append(failing)
+        volume = directive_volume_line(hp)
+        if volume:
+            lines.append(volume)
         # The grammar, where main re-reads after a compaction. Measured: 405 `--help` calls in
         # 19 projects, 59 of Codex's 96 within 30 tool calls of a compaction — the moment this
-        # capsule re-arrives. A lane has its `report:` line instead.
+        # capsule re-arrives. A lane has its `report:` line instead. `log dispatch` carries its
+        # one caveat: offered bare, main logged 8 of 8 Workflow runs by hand in mlx-vlm, split
+        # one run into two ids and wrote model aliases that split PRIORS rows (2026-09-27).
         lines.append(
-            "· cli: task add|set|done|list · log dispatch|outcome|review|review-status "
-            "· directive add|withdraw · prior · dispatch [--batch] — /hippo:hippo has the flags"
+            "· cli: task add|set|done|list · log outcome|review|review-status|dispatch "
+            "(subagent/Workflow runs: recorded, no call) · directive add|withdraw · prior "
+            "· dispatch [--batch] — /hippo:hippo has the flags"
         )
         if compacted:
             # The summary lands in main's context before this capsule does (measured), so the
@@ -1240,8 +1263,12 @@ def precompact_lines(hp):
     section held the three commands the conversation called for, and main, resumed, ran them.
 
     Main's audience only (§9.4): a manual /compact writes this text into the transcript main
-    reads next. Open tasks run most-recently-updated first, the ones this conversation most
-    likely touched; past the cap, items are cut from the ends of the lists and counted."""
+    reads next. Open tasks run most-recently-updated first and directives newest first, the ones
+    this conversation most likely touched. Tasks, which most deltas are about, keep two thirds of
+    the room whatever the directives need: measured (mlx-vlm, 2026-09-27), 32 live directives
+    filled all of it, the summarizer saw none of 18 open tasks, and it proposed re-adding a
+    directive recorded two minutes earlier — the newest, cut by the old oldest-first order. What
+    does not fit whole is listed by id; only what does not fit even so is cut and counted."""
     head = [
         "hippo: end the summary with a section headed exactly `## hippo deltas`: one line per "
         "change this conversation made that hippo's lists below do not show yet, each written as "
@@ -1259,27 +1286,39 @@ def precompact_lines(hp):
         n = t.get("notes") or []
         return " / ".join(map(str, n)) if isinstance(n, list) else str(n)
 
+    def size(lines):
+        return sum(len(ln) + 1 for ln in lines)
+
+    def fit(whole, ids, room, also):
+        """The first `whole` lines that fit in `room`, the rest on one `also` line by id (the
+        last ids dropped when not even those fit), and how many are left out altogether."""
+        def listed(k, rest):
+            return [*whole[:k], *([also + ", ".join(rest)] if rest else [])]
+
+        k = len(whole)
+        while k and size(listed(k, ids[k:])) > room:
+            k -= 1
+        rest = ids[k:]
+        while rest and size(listed(k, rest)) > room:
+            rest = rest[:-1]
+        return listed(k, rest), len(ids) - k - len(rest)
+
     tasks = sorted((t for t in tasks_load(hp)["tasks"] if t.get("status") in OPEN_STATUSES),
                    key=lambda t: str(t.get("updated") or ""), reverse=True)
     t_items = [" — ".join(filter(None, (f"- {t.get('id')}", one_line(t.get("title", ""), 100),
                                         one_line(notes_of(t), PRECOMPACT_ITEM))))
                for t in tasks]
-    d_items = [f"- {d['id']} — {one_line(d.get('text', ''), PRECOMPACT_ITEM)}"
-               for d in live_directives(hp, "main")]
-    t_head, d_head = "open tasks (id — title — notes):", "live directives (id — text):"
-    # Directives first into the budget: a handful at most, and never folded away elsewhere (§6).
-    room = PRECOMPACT_CAP - len("\n".join([*head, t_head, d_head])) - 60  # 60: the cut line
-    kept = {}
-    for name, items in (("d", d_items), ("t", t_items)):
-        kept[name] = []
-        for it in items:
-            if len(it) + 1 > room:
-                break
-            kept[name].append(it)
-            room -= len(it) + 1
-    lines = [*head, t_head, *(kept["t"] if t_items else ["(none open)"]),
-             d_head, *(kept["d"] if d_items else ["(none live)"])]
-    cut = len(t_items) - len(kept["t"]) + len(d_items) - len(kept["d"])
+    live = sorted(live_directives(hp, "main"), key=lambda d: str(d.get("t") or ""), reverse=True)
+    d_items = [f"- {d['id']} — {one_line(d.get('text', ''), PRECOMPACT_ITEM)}" for d in live]
+    t_head = ["open tasks (id — title — notes):", *([] if t_items else ["(none open)"])]
+    d_head = ["live directives (id — text):", *([] if d_items else ["(none live)"])]
+    room = PRECOMPACT_CAP - size([*head, *t_head, *d_head]) - 66  # 66: the cut line, 4-digit count
+    t_kept, t_cut = fit(t_items, [str(t.get("id")) for t in tasks],
+                        max(room * 2 // 3, room - size(d_items)), "- also open (id only): ")
+    d_kept, d_cut = fit(d_items, [d["id"] for d in live], room - size(t_kept),
+                        "- also live (id only): ")
+    lines = [*head, *t_head, *t_kept, *d_head, *d_kept]
+    cut = t_cut + d_cut
     if cut:
         lines.append(f"({cut} more not shown: `hippo task list` / `hippo directive list`)")
     return lines
@@ -6594,11 +6633,14 @@ def main():
         if hp is None:
             # Reads stay completely silent outside a project (§3.1). A *write* does not: the
             # caller typed it expecting a record, and silence reads as success. (Worktrees are
-            # no longer the usual cause — find_hippo walks through their .git file, §9.1.)
+            # no longer the usual cause — find_hippo walks through their .git file, §9.1.) A `cd`
+            # into another tree in the same shell call is (measured, 2026-09-26: main's `task
+            # set` after one was lost), so the way back leads: `init` first makes a stray one.
             if getattr(args, "writes", False):
                 print(
-                    "hippo: no .hippo/ found from here — nothing was recorded. "
-                    "Run `hippo init` at the project root, or check your cwd.",
+                    "hippo: no .hippo/ found from here — nothing was recorded. Run it again from "
+                    "the project root (or with HIPPO_DIR=<root>/.hippo); `hippo init` only for a "
+                    "new project.",
                     file=sys.stderr,
                 )
             sys.exit(0)
