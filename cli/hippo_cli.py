@@ -745,19 +745,21 @@ def directive_volume_notes(hp):
 
 
 def directive_volume_line(hp):
-    """Main's capsule line while the live set's text passes DIRECTIVE_TOTAL_NUDGE (§6), or None.
+    """Main's capsule line once one reader carries DIRECTIVE_TOTAL_NUDGE chars (§6), or None.
 
     The notes above go to stderr at `directive add|list`, where main discarded them (measured,
     2026-09-27: `>/dev/null 2>&1` on every add in mlx-vlm) while two projects grew to 32 and 33
     live directives, 8.4k and 7.8k chars: capsules of 8.4-9.2k chars, ~8k into every Workflow
     agent. Characters, not the count, since they are what every reader pays — a project's 11
-    short directives (670 chars) are not the problem three long ones are."""
-    total = sum(len(one_line(d.get("text", ""))) for d in directives(hp).values()
-                if d.get("state") == "active")
-    if total < DIRECTIVE_TOTAL_NUDGE:
+    short directives (670 chars) are not the problem three long ones are. Counted per reader,
+    main's session and a subagent apart (live_directives), because that is what an audience
+    moves: a rule re-scoped to `main` leaves main's figure and lowers the subagents'."""
+    session, worker = (sum(len(one_line(d.get("text", ""))) for d in live_directives(hp, reader))
+                       for reader in ("main", "executor"))
+    if max(session, worker) < DIRECTIVE_TOTAL_NUDGE:
         return None
-    return (f"· directives: {total} chars ride into every session and subagent — "
-            "/hippo:checkup's directive pass tidies them")
+    return (f"· directives: {session} chars ride into every session, {worker} into every "
+            "subagent — /hippo:checkup's directive pass tidies them")
 
 
 # --- what the judge reads in the directives themselves (DESIGN §6, fourth rule) ------------
@@ -1268,7 +1270,8 @@ def precompact_lines(hp):
     the room whatever the directives need: measured (mlx-vlm, 2026-09-27), 32 live directives
     filled all of it, the summarizer saw none of 18 open tasks, and it proposed re-adding a
     directive recorded two minutes earlier — the newest, cut by the old oldest-first order. What
-    does not fit whole is listed by id; only what does not fit even so is cut and counted."""
+    does not fit whole is listed by id, a whole line giving way only when that brings every id
+    in; what does not fit even so is cut, oldest first, and counted."""
     head = [
         "hippo: end the summary with a section headed exactly `## hippo deltas`: one line per "
         "change this conversation made that hippo's lists below do not show yet, each written as "
@@ -1291,12 +1294,17 @@ def precompact_lines(hp):
 
     def fit(whole, ids, room, also):
         """The first `whole` lines that fit in `room`, the rest on one `also` line by id (the
-        last ids dropped when not even those fit), and how many are left out altogether."""
+        last ids dropped when not even those fit), and how many are left out altogether.
+
+        A whole line gives way to ids only when that brings every id in: when not even the ids
+        alone fit, trading would strip the newest items of their text and cut the oldest ids
+        anyway, so the whole lines keep what room one more id leaves them."""
         def listed(k, rest):
             return [*whole[:k], *([also + ", ".join(rest)] if rest else [])]
 
+        every_id = size(listed(0, ids)) <= room
         k = len(whole)
-        while k and size(listed(k, ids[k:])) > room:
+        while k and size(listed(k, ids[k:] if every_id else ids[k:k + 1])) > room:
             k -= 1
         rest = ids[k:]
         while rest and size(listed(k, rest)) > room:

@@ -460,12 +460,14 @@ an agent's own (PreCompact, below).
   `none`; then the open tasks (most recently updated first: id — title — the first 80 chars of
   notes) and main's live directives (newest first: id — the first 80 chars), 3,000 chars at
   most. Tasks, which most deltas are about, keep two thirds of the room whatever the directives
-  need; what does not fit whole is listed by id on one `also …` line, and only what does not fit
-  even so is cut and counted. Measured (mlx-vlm, 2026-09-27): with directives filling the budget
-  first in ledger order, 32 live ones left the summarizer none of 18 open tasks, and it proposed
-  re-adding the newest directive, recorded two minutes earlier and cut; over the same ledger the
-  lists now carry 4 tasks whole and 14 by id, the newest directive whole and 31 by id, nothing cut
-  (2,899 chars). The reason: a compaction is the one moment the summarizer still sees everything the
+  need; what does not fit whole is listed by id on one `also …` line, a whole line giving way only
+  when that brings every id in (past that, trading would strip the newest items of their text and
+  still cut the oldest ids), and what does not fit even so is cut, oldest first, and counted.
+  Measured (mlx-vlm, 2026-09-27): with directives filling the budget first in ledger order, 32
+  live ones left the summarizer none of 18 open tasks, and it proposed re-adding the newest
+  directive, recorded two minutes earlier and cut; over the same ledger the lists now carry 4
+  tasks whole and 14 by id, the newest directive whole and 31 by id, nothing cut (2,899 chars).
+  The reason: a compaction is the one moment the summarizer still sees everything the
   conversation changed, and the capsule that follows it re-injects hippo's *records* — the very
   state that went stale when a task shipped or a ruling moved without a call. Measured on
   2.1.281 (2026-09-24, manual and auto): the summary followed the appended request — a
@@ -1567,17 +1569,21 @@ bare it read as the way to record every launch: measured (mlx-vlm, 2026-09-27), 
 (its cost landed on one) and wrote model aliases (`workflow/opus/high` beside the scribe's
 `workflow/claude-opus-5-5/high`) that split PRIORS rows. The call is for work hippo cannot see.
 
-A `directives:` line (main's only) appears while the live directives' text, every audience
-together, reaches 1600 characters — the volume notes' total mark (below) —
-`· directives: 8422 chars ride into every session and subagent — /hippo:checkup's directive pass
-tidies them` — and is absent below it. The notes go to stderr at `directive add|list`, and main
-discarded them: measured (2026-09-27), every `directive add` in mlx-vlm ran with `>/dev/null
-2>&1` while two projects grew to 32 and 33 live directives (8.4k and 7.8k chars), their capsules
-from 0.5-3.8k to 8.4-9.2k chars, and every Workflow agent took ~8k of them. Characters, not the
-count, because they are what every reader pays: this repo's 11 short directives (670 chars) pass
-the count mark and cost less than three long ones. Over this machine's ten projects only mlx-vlm
-shows it. Like the notes it names a cost and asks nothing of the text: the pass is the user's
-call (propose, confirm, apply), and neither a lane's capsule nor a subagent's slice carries it.
+A `directives:` line (main's only) appears while the directives one reader carries reach 1600
+characters of text — the volume notes' total mark (below), per reader — and names both readers'
+share: main's session carries its `main` and `all` directives, every subagent its `executor`
+and `all` ones (§9.4) — `· directives: 8422 chars ride into every session, 8137 into every
+subagent — /hippo:checkup's directive pass tidies them` — and is absent below it. The notes go
+to stderr at `directive add|list`, and main discarded them: measured (2026-09-27), every
+`directive add` in mlx-vlm ran with `>/dev/null 2>&1` while two projects grew to 32 and 33 live
+directives (8.4k and 7.8k chars), their capsules from 0.5-3.8k to 8.4-9.2k chars, and every
+Workflow agent took ~8k of them. Characters, not the count, because they are what every reader
+pays: this repo's 11 short directives (670 chars) pass the count mark and cost less than three
+long ones. Per reader, not the sum, because that is what an audience moves: a rule re-scoped to
+`main` lowers the subagent figure and leaves main's, which one total would hide. Over this
+machine's ten projects only mlx-vlm shows it. Like the notes it names a cost and asks nothing of
+the text: the pass is the user's call (propose, confirm, apply), and neither a lane's capsule nor
+a subagent's slice carries it.
 
 A `check:` line (main's only) names the open tasks whose flag still shows (§3.5.9) —
 `· check: feat/x, fix/y look finished or abandoned — close them, or note what is left` — at
@@ -1686,9 +1692,9 @@ Four rules govern the directive block:
   The notes describe the **whole live set, not the text just written**, and both `directive add`
   and `directive list` emit them. Warning only at write time is the failure this fixes: the
   expensive directives are usually the ones already resident, so the one moment they were
-  mentionable had already passed and every session went on paying in silence. Past the 1600
-  mark main's capsule says so too (the `directives:` line above): a note on stderr can be
-  discarded, and was.
+  mentionable had already passed and every session went on paying in silence. Once one reader
+  carries 1600 characters, main's capsule says so too (the `directives:` line above): a note on
+  stderr can be discarded, and was.
 - **Staleness is shown, never resolved.** A directive lives until it is withdrawn, so its age is
   the one thing about it that changes: every live line carries its age from 14 days
   (`live(23d): …`), and the volume notes name every directive 30 days or older with the one

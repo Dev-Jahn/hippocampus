@@ -46,9 +46,10 @@ Code) or `~/.codex/sessions/` in dated subdirectories (Codex) — take the newes
 - List the active directives from `hippo directive list` oldest first: a directive 30 days or
   older is a candidate — "is this still true; keep or withdraw?".
 - Volume: `hippo directive list` prints on stderr the directives over 200 chars and the live
-  set's total — keep stderr. Every character rides into every session, and an `all` directive
-  into every subagent. Propose compressing the long ones (re-add under the same `--id`), merging
-  overlaps, and `--audience main` for rules a worker never needs.
+  set's total — keep stderr. A `main` or `all` directive rides into every session, an `executor`
+  or `all` one into every subagent (the capsule's `directives:` line counts both). Propose
+  compressing the long ones (re-add under the same `--id`), merging overlaps, and
+  `--audience main` for rules a worker never needs.
 - Read the notes `hippo directive list` prints (with `TYPESAFE_API_KEY` set) before proposing any
   withdrawal or merge: the judge reads the live set for probable conflicts and for an audience that
   disagrees with the stored one, and a note is evidence to weigh, never a verdict.

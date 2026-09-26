@@ -201,20 +201,34 @@ def test_crowded_directive_set_warns_but_still_records(tmp_project, run_hippo):
 
 def test_main_s_capsule_names_the_volume_past_the_total_mark(tmp_project, run_hippo):
     """The stderr notes were discarded (`>/dev/null 2>&1` on every add, measured) while two sets
-    grew past 7.8k chars. Past the total mark main's capsule says so; a count alone is not the
-    cost, and neither a lane's capsule nor a subagent's slice carries it."""
+    grew past 7.8k chars. Once one reader carries the total mark main's capsule says so; a count
+    alone is not the cost, and neither a lane's capsule nor a subagent's slice carries it."""
     def volume(**env):
         out = run_hippo(["status", "--inject"], cwd=tmp_project, env=env).stdout.splitlines()
         return [ln for ln in out if ln.startswith("· directives:")]
+
+    def line(session, worker):
+        return [f"· directives: {session} chars ride into every session, {worker} into every "
+                "subagent — /hippo:checkup's directive pass tidies them"]
+
+    def scoped(did, text, audience):
+        run_hippo(["directive", "add", "--id", did, "--text", text, "--audience", audience],
+                  cwd=tmp_project)
 
     for i in range(9):
         _add(run_hippo, tmp_project, f"directive number {i}", f"d-{i}")
     assert volume() == []  # nine live, 162 chars
     _add(run_hippo, tmp_project, "x" * 1500, "long-01")
-    assert volume() == ["· directives: 1662 chars ride into every session and subagent — "
-                        "/hippo:checkup's directive pass tidies them"]
+    assert volume() == line(1662, 1662)
     assert volume(HIPPO_DISPATCH="d1") == [] and volume(HIPPO_INJECT="subagent") == []
-    run_hippo(["directive", "withdraw", "long-01"], cwd=tmp_project)
+    # Per reader, since that is what an audience moves: re-scoped, one figure drops.
+    scoped("long-01", "x" * 1500, "main")
+    assert volume() == line(1662, 162)
+    scoped("long-01", "x" * 1500, "executor")
+    assert volume() == line(162, 1662)
+    # 1762 in all, but 962 to each reader: under the mark.
+    scoped("long-01", "x" * 800, "executor")
+    scoped("long-02", "y" * 800, "main")
     assert volume() == []
 
 

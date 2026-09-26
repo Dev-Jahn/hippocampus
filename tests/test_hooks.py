@@ -356,11 +356,13 @@ def test_pre_compact_is_capped_and_lists_by_id_what_does_not_fit_whole(
     whole, by_id = _listed(proc.stdout, "open tasks (id — title — notes):")
     assert 0 < len(whole) < 40 and len(whole) + len(by_id) == 40
     assert "more not shown" not in proc.stdout
-    # Past even the ids, the least recently updated are cut and counted.
+    # Past even the ids, the least recently updated are cut and counted, and the most recent keep
+    # their text: trading it for ids that do not all fit anyway gains nothing.
     _write_tasks(tmp_project, 400)
     proc = _pre_compact(tmp_project, repo_root)
     assert len(proc.stdout) <= 3000
     whole, by_id = _listed(proc.stdout, "open tasks (id — title — notes):")
+    assert whole and by_id
     assert f"({400 - len(whole) - len(by_id)} more not shown" in proc.stdout
 
 
