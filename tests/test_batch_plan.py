@@ -101,7 +101,7 @@ def _seed(project, kind, ex, n, accepted):
 
 @pytest.mark.parametrize("answers, tier, model, effort", [
     (HARD, "top", "gpt-6-astra", "high"),
-    (MIDDLING, "mid", "gpt-6-sol", "medium"),
+    (MIDDLING, "mid", "gpt-6.1-sol", "medium"),
     (EASY, "cheap", "gpt-6-luna", "medium"),
 ])
 def test_difficulty_picks_the_tier_and_the_effort(tmp_project, tmp_path, run_hippo,
@@ -135,7 +135,7 @@ def test_the_ladder_is_printed_once_from_the_price_sheet(tmp_project, tmp_path, 
     proc = _plan(run_hippo, tmp_project, manifest,
                  _mock(tmp_path, {"answers": EASY, "default": DEFAULT}))
     ladders = [ln for ln in proc.stdout.splitlines() if ln.startswith("ladder ")]
-    assert ladders == ["ladder codex: cheap gpt-6-luna · mid gpt-6-sol · top gpt-6-astra"]
+    assert ladders == ["ladder codex: cheap gpt-6-luna · mid gpt-6.1-sol · top gpt-6-astra"]
     assert _row(proc, "other")[6] == "codex/gpt-6-luna/medium"
 
 
@@ -212,7 +212,7 @@ def test_a_tier_this_kind_keeps_failing_at_is_bumped_one_step(tmp_project, tmp_p
     assert proc.returncode == 0, proc.stderr
 
     row = _row(proc, "solo")
-    assert row[6] == "codex/gpt-6-sol/medium", "cheap scored 1/5 — one tier up"
+    assert row[6] == "codex/gpt-6.1-sol/medium", "cheap scored 1/5 — one tier up"
     assert row[7] == "no evidence", "the evidence column follows the suggestion"
     assert _notes(proc, "solo") == [
         "cheap → mid: priors impl×codex/gpt-6-luna/medium 1/5 is under 0.50 first-pass"]

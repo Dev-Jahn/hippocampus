@@ -10,13 +10,16 @@
 # bump `as_of` — PRIORS prints it, so a stale sheet is visible instead of silently
 # wrong. Sources: https://developers.openai.com/api/docs/pricing ,
 # https://platform.claude.com/docs/en/about-claude/pricing
-as_of: "2026-09-25"
+as_of: "2026-09-30"
 models:
   # OpenAI, standard tier, short context (the page prices long context at 2x, batch at 0.5x,
   # and the fast tier separately).
-  gpt-6-astra: {input: 10.00, cached: 1.00, output: 50.00}
-  gpt-6-sol:   {input: 2.00, cached: 0.20, output: 10.00}
-  gpt-6-luna:  {input: 0.10, cached: 0.01, output: 0.50}
+  gpt-6-astra:   {input: 10.00, cached: 1.00, output: 50.00}
+  # GPT-6.1 Sol sits at GPT-6 Sol's price level and is listed first, so the ladder's `mid`
+  # names it; GPT-6 Sol stays routable (vendor page and codex both still list it).
+  gpt-6.1-sol:   {input: 2.00, cached: 0.10, output: 10.00}
+  gpt-6-sol:     {input: 2.00, cached: 0.20, output: 10.00}
+  gpt-6-luna:    {input: 0.10, cached: 0.01, output: 0.50}
   # GPT-5.6, replaced by GPT-6: lanes were recorded on it, and dropping these rows on
   # 2026-09-23 turned that history unpriced. Restored 2026-09-25 as legacy; the vendor page
   # still lists all three (5.6 Sol at a promotional price, held at least through 2026-11-21).
