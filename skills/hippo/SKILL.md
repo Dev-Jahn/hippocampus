@@ -36,7 +36,7 @@ hippo directive withdraw <id>
 hippo prior show
 hippo prior distill [--days N]
 hippo dispatch --kind K --scope S [--task T] [--depth N] [--fast] [--] <codex exec args…>
-hippo dispatch --batch <manifest.yaml> [--dry-run | --entry <id>]
+hippo dispatch --batch <manifest.yaml> [--dry-run | --entry <id>]  # --entry: the Workflow face's call, never typed
 hippo dispatch --watch <dispatch-id|batch-id> [--for SECONDS]
 # a bare noun reads: task → list, log → tail, directive → list, prior → show
 ```

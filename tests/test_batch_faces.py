@@ -138,7 +138,7 @@ def test_entry_processes_of_one_manifest_share_its_journal(tmp_project, tmp_path
     for kid in kids:
         _, err = kid.communicate(timeout=60)
         assert kid.returncode == 0, err
-    journal = _journal(manifest)  # every line parses: no append landed inside another
+    journal = _journal(manifest)
     assert sorted((r["event"], r["id"], r["attempt"]) for r in journal) == [
         ("exit", "one", 1), ("exit", "two", 1), ("launch", "one", 1), ("launch", "two", 1)]
 
@@ -147,30 +147,67 @@ def test_entry_processes_of_one_manifest_share_its_journal(tmp_project, tmp_path
     assert full.returncode == 0, full.stderr
     summary = json.loads(full.stdout.splitlines()[-1])
     assert (summary["launched"], summary["skipped"], summary["harvested"]) == (0, 2, 2)
+    rec = _record(tmp_project, full.stdout.splitlines()[0].removeprefix("batch:"))
+    assert (rec["total"], rec["todo"], rec["skipped"]) == (2, 0, 2)
 
 
 def test_the_manifest_lock_holds_across_processes(tmp_project):
     manifest = _manifest(tmp_project, "lock.yaml", TWO)
     journal = _journal_path(manifest)
+    # The child says it is about to append, so the wait below measures the lock, not its start.
     append = (f"import sys, pathlib; sys.path.insert(0, {str(REPO_ROOT / 'cli')!r}); "
-              "import hippo_cli; m, j, n, size = sys.argv[1:5]; "
-              "[hippo_cli.journal_append(pathlib.Path(m), pathlib.Path(j), "
-              "{'event': 'x', 'n': n, 'k': k, 'pad': 'y' * int(size)}) for k in range(30)]")
-
-    def writer(n, size):
-        return subprocess.Popen([sys.executable, "-c", append, str(manifest), str(journal),
-                                 str(n), str(size)])
-
+              "import hippo_cli; m, j = sys.argv[1:3]; print('ready', flush=True); "
+              "hippo_cli.journal_append(pathlib.Path(m), pathlib.Path(j), {'event': 'x'})")
     with hippo_cli.batch_lock(manifest):
-        held = writer("held", 10)
-        time.sleep(1.5)
+        held = subprocess.Popen([sys.executable, "-c", append, str(manifest), str(journal)],
+                                stdout=subprocess.PIPE, text=True)
+        assert held.stdout.readline() == "ready\n"
+        time.sleep(0.5)
         assert held.poll() is None, "an append went through another process's lock"
+        assert not journal.exists()
     assert held.wait(timeout=30) == 0
+    assert _journal(manifest) == [{"event": "x"}]
 
-    big = [writer(n, 100_000) for n in range(4)]
-    assert [w.wait(timeout=60) for w in big] == [0] * 4
-    recs = _journal(manifest)
-    assert len(recs) == 30 + 4 * 30 and all(len(r["pad"]) in (10, 100_000) for r in recs)
+
+def test_the_latest_exit_and_triage_are_read_off_the_attempt(tmp_path):
+    """Several processes append to one journal, so attempt 2 can land before attempt 1."""
+    journal = tmp_path / "m.journal.jsonl"
+    journal.write_text("".join(json.dumps(r) + "\n" for r in (
+        {"event": "launch", "id": "x", "attempt": 2, "dispatch": "d2"},
+        {"event": "exit", "id": "x", "attempt": 2, "dispatch": "d2", "rc": 0, "check_rc": None},
+        {"event": "triage", "id": "x", "attempt": 2, "route": "accept-candidate"},
+        {"event": "launch", "id": "x", "attempt": 1, "dispatch": "d1"},
+        {"event": "exit", "id": "x", "attempt": 1, "dispatch": "d1", "rc": 1, "check_rc": None},
+        {"event": "triage", "id": "x", "attempt": 1, "route": "failed"})), encoding="utf-8")
+    attempts, done, exits, triages = hippo_cli.journal_state(journal)
+    assert (attempts, done) == ({"x": 2}, {"x"})
+    assert (exits["x"]["dispatch"], triages["x"]["route"]) == ("d2", "accept-candidate")
+    assert hippo_cli.journal_launches(journal)["x"]["dispatch"] == "d2"
+
+
+@pytest.mark.parametrize("args, says", [
+    (["--dry-run", "--entry", "one"], "usage: hippo dispatch --batch"),
+    (["--entry", "nope"], "no entry 'nope'"),
+])
+def test_an_entry_call_that_names_no_one_entry_dies(tmp_project, tmp_path, args, says):
+    manifest = _manifest(tmp_project, "wf.yaml", TWO)
+    launched = tmp_path / "launched.txt"
+    proc = _hippo(tmp_project, _env(tmp_path, LAUNCHED=launched), "--batch", str(manifest),
+                  *args)
+    assert proc.returncode == 2 and says in proc.stderr, proc.stderr
+    assert not _launched(launched) and not _journal_path(manifest).exists()
+    assert not (tmp_project / "wf.workflow.js").exists()
+
+
+def test_an_id_that_would_break_its_command_is_refused(tmp_project, tmp_path):
+    manifest = _manifest(tmp_project, "wf.yaml", """\
+        defaults: {kind: impl, executor: codex, model: gpt-6-luna, effort: low}
+        entries:
+          - {id: "a3\\n", scope: x, prompt: hi}
+        """)
+    proc = _hippo(tmp_project, _env(tmp_path), "--batch", str(manifest), "--dry-run")
+    assert proc.returncode == 2 and "id must be" in proc.stderr, proc.stderr
+    assert not (tmp_project / "wf.workflow.js").exists()
 
 
 def test_a_done_entry_launches_nothing_and_prints_its_final_lines(tmp_project, tmp_path):
@@ -191,6 +228,14 @@ def test_a_done_entry_launches_nothing_and_prints_its_final_lines(tmp_project, t
                          f"raw log: {_outdir(manifest) / 'one.err'}"]
     assert _launched(launched) == ["gpt-6-luna first brief"], "never relaunched"
     assert [r["event"] for r in _journal(manifest)] == ["launch", "exit", "skip"]
+
+    # Its lane record pruned (a week on), the journal still answers — with no lane to watch.
+    (_lanes(tmp_project) / f"{did}.json").unlink()
+    pruned = _entry(tmp_project, env, manifest, "one")
+    assert pruned.returncode == 0, pruned.stderr
+    assert pruned.stdout.splitlines() == [
+        f"dispatch:{did}", f"entry one done · attempt 1 · {did} rc=0 · check -",
+        f"report: {_outdir(manifest) / 'one.out'}"]
 
 
 def _seed_failure(manifest, eid, cause):
@@ -281,6 +326,18 @@ def test_an_unrouted_entry_takes_the_routing_its_dry_run_recorded(tmp_project, t
     assert bare.stdout == "" and len(_launched(launched)) == 1, "never launched unrouted"
 
 
+def test_the_dry_run_names_entries_their_relays_could_not_route(tmp_project, tmp_path):
+    manifest = _manifest(tmp_project, "wf.yaml", UNROUTED)
+    (tmp_project / "wf.plan.jsonl").write_text(json.dumps(
+        {"id": "routed", "suggested": {"model": "gpt-6.1-sol", "effort": "high"}}) + "\n",
+        encoding="utf-8")
+    proc = _hippo(tmp_project, _env(tmp_path), "--batch", str(manifest), "--dry-run")
+    assert proc.returncode == 0, proc.stderr
+    (line,) = [ln for ln in proc.stderr.splitlines() if "no model for" in ln]
+    assert line.startswith("dispatch --batch: no model for bare — no plan record routes them "
+                           "and the judge is off"), line
+
+
 def test_an_unrouted_entry_with_no_plan_record_is_planned_alone(tmp_project, tmp_path):
     from test_batch_plan import DEFAULT, EASY, _mock
     manifest = _manifest(tmp_project, "wf.yaml", UNROUTED)
@@ -318,10 +375,125 @@ def test_an_entry_running_elsewhere_is_not_launched_twice(tmp_project, tmp_path)
         full = _hippo(tmp_project, env, "--batch", str(manifest))
         assert full.returncode == 0, full.stderr
         assert "still running in another process: slow" in full.stderr
+        # Its latest exit would be stale — none here — so the harvest names it instead.
+        assert "not in the table — running in another process: slow" in full.stdout
         assert len(_launched(launched)) == 1
     finally:
         child.communicate(timeout=30)
     assert child.returncode == 0
+
+
+def test_entries_started_together_launch_once(tmp_project, tmp_path):
+    """The decision and the launch line are one locked region: three relays of one entry
+    started at the same moment, with no journal yet, run one lane and all watch it."""
+    manifest = _manifest(tmp_project, "wf.yaml", """\
+        defaults: {kind: impl, executor: codex, model: gpt-6-luna, effort: low}
+        entries:
+          - {id: slow, scope: "slow lane", prompt: "take your time"}
+        """)
+    launched = tmp_path / "launched.txt"
+    env = _env(tmp_path, LAUNCHED=launched, SLOW=1)
+    kids = [_popen(tmp_project, env, "--batch", str(manifest), "--entry", "slow")
+            for _ in range(3)]
+    outs = [kid.communicate(timeout=60) for kid in kids]
+    assert [kid.returncode for kid in kids] == [0, 0, 0], [err for _, err in outs]
+    assert len(_launched(launched)) == 1, "one codex run"
+    (launch,) = [r for r in _journal(manifest) if r["event"] == "launch"]
+    assert launch["attempt"] == 1 and isinstance(launch["pid"], int)
+    assert {out.splitlines()[0] for out, _ in outs} == {f"dispatch:{launch['dispatch']}"}
+
+
+def test_a_full_run_leaves_alone_what_an_entry_launched_meanwhile(tmp_project, tmp_path):
+    """A full run's queued entry is decided again at its launch: the Workflow face's relay got
+    there first, so the full run counts it skipped and its harvest leaves it out."""
+    manifest = _manifest(tmp_project, "wf.yaml", """\
+        concurrency: 1
+        defaults: {kind: impl, executor: codex, model: gpt-6-luna, effort: low}
+        entries:
+          - {id: one, scope: "lane one", prompt: "first brief"}
+          - {id: two, scope: "lane two", prompt: "second brief"}
+        """)
+    launched = tmp_path / "launched.txt"
+    full = _popen(tmp_project, _env(tmp_path, LAUNCHED=launched, SLOW=1), "--batch",
+                  str(manifest))
+    try:
+        bid = _first_id(full, "batch")
+        _until(lambda: _record(tmp_project, bid)["running"] == 1, "lane one never started")
+        relay = _entry(tmp_project, _env(tmp_path, LAUNCHED=launched, SLOW=4), manifest, "two")
+        out, err = full.communicate(timeout=60)
+    finally:
+        full.kill()
+    assert relay.returncode == 0 and full.returncode == 0, (relay.stderr, err)
+    assert sorted(_launched(launched)) == ["gpt-6-luna first brief", "gpt-6-luna second brief"]
+    assert [r["dispatch"] for r in _journal(manifest) if r["event"] == "launch"
+            and r["id"] == "two"] == [relay.stdout.splitlines()[0].removeprefix("dispatch:")]
+    assert "dispatch --batch: two not launched — running in another process since" in err
+    assert "not in the table — running in another process: two" in out
+    summary = json.loads(out.splitlines()[-1])
+    assert (summary["launched"], summary["skipped"], summary["harvested"]) == (1, 1, 1)
+    rec = _record(tmp_project, bid)
+    assert (rec["todo"], rec["skipped"], rec["done"], rec["status"]) == (1, 1, 1, "exited")
+
+
+def test_an_entry_that_failed_exits_nonzero_and_says_how(tmp_project, tmp_path):
+    manifest = _manifest(tmp_project, "wf.yaml", """\
+        defaults: {kind: impl, executor: codex, model: gpt-6-luna, effort: low}
+        entries:
+          - {id: red, scope: "red check", prompt: go, check: "echo nope; exit 3"}
+        """)
+    proc = _entry(tmp_project, _env(tmp_path), manifest, "red")
+    assert proc.returncode == 1, "the relay passes this on to the Workflow"
+    did = proc.stdout.splitlines()[0].removeprefix("dispatch:")
+    lines = _hippo(tmp_project, os.environ, "--watch", did).stdout.splitlines()
+    check = _outdir(manifest) / "red.check"
+    assert lines[1] == f"check: fail rc=3 · {check.absolute()}"
+    assert check.read_text(encoding="utf-8") == "nope\n"
+
+
+def test_entry_processes_meet_the_breaker_one_at_a_time(tmp_project, tmp_path):
+    """The breaker's admit-then-record region holds the manifest's flock, so four relays of a
+    lane's batch, started at once, are priced one after another: a budget that fits two luna
+    children admits exactly two."""
+    reserve = hippo_cli._reserve_usd("gpt-6-luna", hippo_cli.load_prices())
+    (tmp_project / ".hippo" / "config.yaml").write_text(
+        f"dispatch:\n  max_wave_usd: {2.5 * reserve}\n", encoding="utf-8")
+    manifest = _manifest(tmp_project, "wf.yaml", """\
+        defaults: {kind: impl, executor: codex, model: gpt-6-luna, effort: low}
+        entries:
+          - {id: e1, scope: "lane 1", prompt: go}
+          - {id: e2, scope: "lane 2", prompt: go}
+          - {id: e3, scope: "lane 3", prompt: go}
+          - {id: e4, scope: "lane 4", prompt: go}
+        """)
+    launched = tmp_path / "launched.txt"
+    env = _env(tmp_path, LAUNCHED=launched, SLOW=2, HIPPO_DISPATCH="dorch")
+    kids = [_popen(tmp_project, env, "--batch", str(manifest), "--entry", f"e{i}")
+            for i in range(1, 5)]
+    outs = [kid.communicate(timeout=60) for kid in kids]
+    rcs = sorted(kid.returncode for kid in kids)
+    assert rcs == [0, 0, 2, 2], [err for _, err in outs]
+    for kid, (out, err) in zip(kids, outs):
+        if kid.returncode == 2:  # stopped: no lane, so no id — the reason is on stderr
+            assert out == "" and "budget" in err
+    rows = [e for e in read_ledger(tmp_project) if e.get("ev") == "dispatch"]
+    assert len(rows) == 2 and len(_launched(launched)) == 2
+    assert len([r for r in _journal(manifest) if r["event"] == "stopped"]) == 2
+
+
+def test_an_entrys_lane_is_triaged_at_its_exit(tmp_project, tmp_path):
+    from test_batch_harvest import ACCEPT, DEFAULT, _mock as _jev_mock
+    manifest = _manifest(tmp_project, "wf.yaml", TWO)
+    env = _env(tmp_path, HIPPO_JEV_BACKEND="mock",
+               HIPPO_JEV_MOCK_OUTPUT=_jev_mock(tmp_path, {"answers": ACCEPT, "default": DEFAULT}))
+    proc = _entry(tmp_project, env, manifest, "one")
+    assert proc.returncode == 0, proc.stderr
+    did = proc.stdout.splitlines()[0].removeprefix("dispatch:")
+    (tri,) = [r for r in _journal(manifest) if r["event"] == "triage"]
+    assert (tri["id"], tri["dispatch"], tri["route"]) == ("one", did, "accept-candidate")
+    rec = _record(tmp_project, did)
+    assert "accept-candidate" in rec["triage"]
+    lines = _hippo(tmp_project, os.environ, "--watch", did).stdout.splitlines()
+    assert rec["triage"] in lines, "the relay's reply carries the triage"
 
 
 # --------------------------------------------------------------------------
@@ -370,6 +542,8 @@ def test_the_dry_run_writes_a_workflow_face_main_can_run(tmp_project, tmp_path):
         assert shlex.split(lane["cmd"]) == ["hippo", "dispatch", "--batch",
                                             str(manifest.resolve()), "--entry", lane["id"]]
     assert "agentType: 'hippo:lane', label: lane.label, phase: lane.phase" in text
+    # What the node run below measures, kept checkable where there is no node.
+    assert "Math.min(CONCURRENCY, LANES.length)" in text
     for banned in ("Date.now", "Math.random", "new Date(", "require(", "import ", "process.",
                    "${", "`"):
         assert banned not in text, banned
@@ -459,6 +633,7 @@ def _timed_watch(capsys, *argv):
 
 def test_the_watch_window_is_the_records_unless_for_says(tmp_project, monkeypatch, capsys):
     monkeypatch.chdir(tmp_project)
+    assert (hippo_cli.WATCH_FOR, hippo_cli.WATCH_FOR_WORKFLOW) == (540, 60)
     monkeypatch.setattr(hippo_cli, "WATCH_FOR", 30)
     monkeypatch.setattr(hippo_cli, "WATCH_FOR_WORKFLOW", 0.5)
     _running_record(tmp_project, "dface", face="workflow")
@@ -542,6 +717,46 @@ def test_the_batch_record_follows_its_lanes(tmp_project, tmp_path):
     assert _record(tmp_project, did)["scope"] == "lane one"
     assert re.fullmatch(r"batch wf running · \d+s · 1 running · 0/2 done · 0 failed · "
                         r"last: lane one: (started|exec: pytest -q)", watched or ""), watched
+
+
+def test_an_ended_batch_says_how_it_ended(tmp_path):
+    rec = {"id": "bx", "stem": "wide", "pid": 0, "started": "2026-10-02T00:00:00Z",
+           "last_at": "2026-10-02T00:01:00Z", "todo": 4, "done": 1, "running": 2, "failed": 0,
+           "launched": 3, "ok": 1, "skipped": 0, "harvest": None,
+           "manifest": "/w/wide.yaml", "journal": "/w/wide.journal.jsonl"}
+    assert hippo_cli.watch_state(rec) == "lost", "no end on record, and its process is gone"
+    assert hippo_cli.batch_watch_lines(rec, "lost", tmp_path) == [
+        "batch wide lost — its process (pid 0) is gone and recorded no end · 2 running · "
+        "1/4 done · 0 failed", "journal: /w/wide.journal.jsonl"]
+    killed = {**rec, "status": "killed", "signal": "SIGTERM", "rc": 143,
+              "ended": "2026-10-02T00:02:00Z", "error": "RuntimeError: boom"}
+    assert hippo_cli.batch_watch_lines(killed, "ended", tmp_path) == [
+        "batch wide killed by SIGTERM rc=143 after 2m00s · 3 launched · 1 ok · 0 failed · "
+        "0 skipped", "error: RuntimeError: boom",
+        "the journal holds every exit; `hippo dispatch --batch /w/wide.yaml` resumes",
+        "journal: /w/wide.journal.jsonl"]
+
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    import lane_status
+    counts = "2 running · 1/4 done · 0 failed"
+    assert lane_status.batch_row(rec, tmp_path) == \
+        f"codex batch · wide · lost, its process is gone · 1m00s · {counts}"
+    assert lane_status.batch_row(killed, tmp_path) == \
+        f"codex batch · wide · killed by SIGTERM rc=143 · 2m00s · {counts}"
+
+
+def test_a_batch_reads_only_the_lanes_it_names_as_running(tmp_path):
+    lane, decoy = "d" + "ab" * 16, "d" + "cd" * 16
+    (tmp_path / f"{lane}.json").write_text(json.dumps(
+        {"id": lane, "scope": "its lane", "last": "exec: pytest -q",
+         "last_at": "2026-10-02T00:05:00Z"}), encoding="utf-8")
+    (tmp_path / f"{decoy}.json").write_text(json.dumps(
+        {"id": decoy, "scope": "someone else", "last": "exec: rm",
+         "last_at": "2099-01-01T00:00:00Z"}), encoding="utf-8")
+    rec = {"last": "lane a: started", "last_at": "2026-10-02T00:00:00Z", "running_ids": [lane]}
+    assert hippo_cli.batch_last(rec, tmp_path) == "its lane: exec: pytest -q"
+    assert hippo_cli.batch_last({**rec, "last_at": "2026-10-02T00:09:00Z"}, tmp_path) == \
+        "lane a: started", "the newest event wins, the batch's own included"
 
 
 def test_a_long_harvest_is_named_by_path(tmp_path):

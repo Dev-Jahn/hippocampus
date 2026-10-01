@@ -3257,9 +3257,10 @@ BATCH_USAGE = (
     "       <manifest>.journal.jsonl. stdout's first line is batch:<id> (watch it with --watch)\n"
     "       --dry-run launches nothing: it prints the plan (difficulty, suggested exec, notes)\n"
     "       and writes <manifest>.workflow.js, the Workflow face — one hippo:lane per entry\n"
-    "       --entry <id>: that one entry, as the Workflow face launches it; prints dispatch:<id>\n"
-    "       first; launches nothing when the entry is done (exit 0) or held (exit 5: its last\n"
-    "       triage named capability or spec)"
+    "       --entry <id>: that one entry, as the Workflow face launches it — never typed. Its\n"
+    "       lane's dispatch:<id> comes first; done or running elsewhere, it launches nothing and\n"
+    "       names the lane that did or does (exit 0); held — its last triage named capability\n"
+    "       or spec — or stopped by the breaker, it says why with no id (exit 5, or 2)"
 )
 # Retired in 1.14.0 with zero measured calls across 28 projects (DESIGN §4): named so a caller
 # typing one learns what replaced it instead of reading a bare usage line.
@@ -3284,7 +3285,8 @@ CHECK_TIMEOUT = 600
 # validate — the slug alphabet plus the separators an author would reasonably type — and an
 # unbounded one must not either: past the filesystem's 255-byte name cap the launch OSErrors
 # mid-batch, after the dispatch row already landed.
-ENTRY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# fullmatch, never match: `$` would let a trailing newline through, into a shell command.
+ENTRY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 ENTRY_ID_MAX = 100
 
 # append_event was written for one writer per process; batch is the one multi-writer surface.
@@ -3424,7 +3426,7 @@ def load_manifest(mp, plan=False):
             eid = re.sub(r"[^a-z0-9]+", "-", scope.lower()).strip("-")
             if scope and not eid:
                 problems.append(f"{where}: scope slugs to nothing — an explicit id is required")
-        elif not isinstance(eid, str) or not ENTRY_ID_RE.match(eid):
+        elif not isinstance(eid, str) or not ENTRY_ID_RE.fullmatch(eid):
             problems.append(f"{where}: id must be [A-Za-z0-9._-] and start with an "
                             f"alphanumeric: {eid!r}")
             eid = ""
@@ -3578,7 +3580,7 @@ def journal_state(journal):
 
 
 def journal_launches(journal):
-    """Each entry's latest launch → (attempt, dispatch id) — what an exit may still be owed by."""
+    """Each entry's latest launch record, by attempt — what an exit may still be owed by."""
     out = {}
     for line in journal.read_text(encoding="utf-8").splitlines():
         try:
@@ -3586,8 +3588,8 @@ def journal_launches(journal):
         except json.JSONDecodeError:
             continue
         if rec.get("event") == "launch" and isinstance(rec.get("attempt"), int):
-            if rec["attempt"] >= out.get(rec.get("id"), (0, None))[0]:
-                out[rec.get("id")] = (rec["attempt"], rec.get("dispatch"))
+            if rec["attempt"] >= (out.get(rec.get("id")) or {}).get("attempt", 0):
+                out[rec.get("id")] = rec
     return out
 
 
@@ -4112,7 +4114,12 @@ def run_harvest(mp, entries, journal, outdir, hp, fresh=()):
               file=sys.stderr)
     cwd = Path.cwd()
     with batch_lock(mp):
-        _, _, exits, triages = journal_state(journal)
+        state, launches = journal_state(journal), journal_launches(journal)
+    _, _, exits, triages = state
+    # A newer attempt live in another process (the Workflow face) makes the latest exit stale:
+    # read now, it would be triaged and counted as a failure a rerun relaunches.
+    running = [en["id"] for en in entries
+               if entry_decision(state, launches, en["id"])[0] == "running"]
     claims = executor_claims(read_ledger(hp)) if hp is not None else {}
 
     def jrnl(rec):
@@ -4121,8 +4128,8 @@ def run_harvest(mp, entries, journal, outdir, hp, fresh=()):
     rows, failed = [], []
     for en in entries:
         ex = exits.get(en["id"])
-        if ex is None:
-            continue  # never exited: there is nothing to read yet
+        if ex is None or en["id"] in running:
+            continue  # never exited, or running again: there is nothing to read yet
         r = {"en": en, "ex": ex, "claim": claims.get(ex.get("dispatch")),
              "route": None, "verify": None, "answers": {}, "findings": []}
         rec = triages.get(en["id"])
@@ -4162,6 +4169,8 @@ def run_harvest(mp, entries, journal, outdir, hp, fresh=()):
         # one read, and the ranking is next to the lane it is about.
         for f in r["findings"][:top]:
             print(finding_line(f))
+    if running:
+        print(f"not in the table — running in another process: {', '.join(running)}")
 
     counts = collections.Counter(r["route"] or "-" for r in rows)
     verdicts = mp.parent / f"{mp.stem}.verdicts.jsonl"
@@ -4509,7 +4518,8 @@ def workflow_face(mp, concurrency, entries):
             "phases": [{"title": k} for k in kinds]}
     lanes = [{"id": en["id"], "label": one_line(en["scope"], LANE_SCOPE_CHARS),
               "phase": en["kind"],
-              "cmd": f"hippo dispatch --batch {shlex.quote(str(mp))} --entry {en['id']}"}
+              "cmd": f"hippo dispatch --batch {shlex.quote(str(mp))} --entry "
+                     f"{shlex.quote(en['id'])}"}
              for en in entries]
     path = mp.parent / f"{mp.stem}.workflow.js"
     path.write_text(
@@ -4542,6 +4552,17 @@ def run_dry(mp, entries, hp, concurrency):
               file=sys.stderr)
     rows = plan_pass(mp, entries, hp, sys.stdout)
     face = workflow_face(mp, concurrency, entries)
+    # What `--entry` would route each model-less entry by (route_one), read off the plan file
+    # this dry run just wrote — or, with the judge off, one an earlier dry run left.
+    plan = plan_records(mp)
+    bare = [en["id"] for en in entries if en["model"] is None
+            and not ((plan.get(en["id"]) or {}).get("suggested") or {}).get("model")]
+    if bare:
+        why = ("the judge suggested none" if on else
+               "no plan record routes them and the judge is off (no TYPESAFE_API_KEY)")
+        print(f"dispatch --batch: no model for {', '.join(bare)} — {why}: their relays would "
+              "stop at `model is required`; set model in defaults or the entry, then dry-run "
+              "again", file=sys.stderr)
     print(f"dispatch --batch: Workflow face written — run it as Workflow({{scriptPath: "
           f"{json.dumps(str(face), ensure_ascii=False)}}}), then `hippo dispatch --batch "
           f"{shlex.quote(str(mp))}` for the harvest", file=sys.stderr)
@@ -4561,45 +4582,60 @@ def held_cause(triage):
     return cause if cause in CAUSES and cause not in RELAUNCHABLE_CAUSES else None
 
 
-def running_elsewhere(hp, journal, ids):
-    """Entries whose latest launch has no exit yet and whose lane still runs → {id: dispatch
-    id}. The Workflow face runs every entry in a process of its own, so a run of the same
-    manifest can start while another's lanes are live; relaunching one would run it twice."""
-    if hp is None:
-        return {}
-    _, _, exits, _ = journal_state(journal)
-    out = {}
-    for eid, (attempt, did) in journal_launches(journal).items():
-        if eid not in ids or not isinstance(did, str) or not SAFE_ID_RE.fullmatch(did):
-            continue
-        if (exits.get(eid) or {}).get("attempt", 0) >= attempt:
-            continue
-        rec = read_record(hp / "lanes" / f"{did}.json")
-        if rec is not None and watch_state(rec) == "running":
-            out[eid] = did
-    return out
+def entry_decision(state, launches, eid):
+    """What the journal says to do with one entry → (what, detail):
+
+    - `done` and its exit record: the latest exit and its check passed;
+    - `running` and that lane's dispatch id: the latest launch has no exit yet, and the process
+      that launched it still runs — another process's lane, live (the Workflow face runs each
+      entry in a process of its own, beside any full run);
+    - `held` and the cause: the latest triage named one a relaunch cannot clear — `capability`
+      or `spec` needs a different brief, and running it unchanged buys the same failure twice;
+    - `launch` and the attempt it would be. No triage, or a triage that named no cause,
+      relaunches: a filter that cannot read the cause must not be the reason a lane is dropped,
+      and a launch whose process died before its exit line (SIGKILLed) relaunches too."""
+    attempts, done, exits, triages = state
+    if eid in done:
+        return "done", exits[eid]
+    launch = launches.get(eid)
+    if (launch is not None and isinstance(launch.get("dispatch"), str)
+            and (exits.get(eid) or {}).get("attempt", 0) < launch["attempt"]
+            and pid_alive(launch.get("pid"))):
+        return "running", launch["dispatch"]
+    cause = held_cause(triages.get(eid))
+    if cause:
+        return "held", cause
+    return "launch", attempts.get(eid, 0) + 1
 
 
-def resume_split(entries, journal, hp=None):
-    """What a run over an existing journal relaunches → (attempts, done, todo, held, running).
+def journal_decisions(journal, ids):
+    """{id: entry_decision} off one read of the journal; with none yet, every id launches as
+    attempt 1. Read under the batch lock — and before a launch, in the very region that appends
+    the launch line (BatchRun.run_entry), so no two processes launch one entry, and an attempt
+    number names one launch."""
+    if not journal.exists():
+        return {eid: ("launch", 1) for eid in ids}
+    state, launches = journal_state(journal), journal_launches(journal)
+    return {eid: entry_decision(state, launches, eid) for eid in ids}
 
-    Done entries (last exit and check passed) stay done. The rest relaunch unless their latest
-    triage named a cause a relaunch cannot clear — `capability` or `spec` needs a different
-    brief, and running it unchanged buys the same failure twice — or their lane is still
-    running in another process. No triage, or a triage that named no cause, relaunches: a
-    filter that cannot read the cause must not be the reason a lane is dropped."""
-    attempts, done, _, triages = journal_state(journal)
-    running = running_elsewhere(hp, journal, {en["id"] for en in entries} - done)
-    todo, held = [], []
+
+def resume_split(entries, journal):
+    """What a run over an existing journal relaunches → (done, todo, held, running): the
+    entries in entry_decision's four answers — done ids, entries to launch, (entry, cause)
+    pairs and {id: dispatch id of the live lane}."""
+    ids = journal_decisions(journal, [en["id"] for en in entries])
+    done, todo, held, running = set(), [], [], {}
     for en in entries:
-        if en["id"] in done or en["id"] in running:
-            continue
-        cause = held_cause(triages.get(en["id"]))
-        if cause:
-            held.append((en, cause))
+        what, detail = ids[en["id"]]
+        if what == "done":
+            done.add(en["id"])
+        elif what == "running":
+            running[en["id"]] = detail
+        elif what == "held":
+            held.append((en, detail))
         else:
             todo.append(en)
-    return attempts, done, todo, held, running
+    return done, todo, held, running
 
 
 class BatchRecord:
@@ -4677,6 +4713,7 @@ class BatchRun:
         self.state = {"launched": 0, "ok": 0, "failed": 0, "done": 0, "warned": False,
                       "stopped": False}
         self.running, self.signaled = set(), []
+        self.refused = {}  # id → (what, detail): the journal said no at the launch (run_entry)
         self.lanes_phase = False
 
     def jrnl(self, rec):
@@ -4703,13 +4740,33 @@ class BatchRun:
             return
         with BATCH_LOCK:
             ids = [lane.rec["id"] for lane in sorted(self.running, key=lambda lane: lane.t0)]
-            self.record.event(text, {"running": len(ids), "running_ids": ids,
+            todo = self.n - len(self.refused)
+            self.record.event(text, {"running": len(ids), "running_ids": ids, "todo": todo,
+                                     "skipped": self.record.rec["total"] - todo,
                                      **{k: self.state[k] for k in
                                         ("launched", "ok", "failed", "done")}})
 
-    def run_entry(self, en, attempt):
-        """One entry's lane, start to finish: breaker, ledger row, journal, launch, check,
-        usage, triage — the deterministic half of one delegation."""
+    def refuse(self, en, what, detail):
+        """An entry the journal says not to launch: done or held is journaled as a skip, as at
+        a run's start. A full run says so on stderr; an `--entry` run's caller answers the
+        relay (entry_answer)."""
+        if what in ("done", "held"):
+            self.jrnl({"t": now_iso(), "event": "skip", "id": en["id"],
+                       **({"why": f"cause {detail}"} if what == "held" else {})})
+        with BATCH_LOCK:
+            self.refused[en["id"]] = (what, detail)
+        if self.face:
+            return
+        why = {"done": "another process finished it meanwhile",
+               "running": f"running in another process since, as lane {detail} — a later "
+                          "harvest reads it",
+               "held": f"its latest triage named cause {detail} meanwhile"}[what]
+        print(f"dispatch --batch: {en['id']} not launched — {why}", file=sys.stderr)
+        self.note(f"{one_line(en['scope'], LANE_SCOPE_CHARS)}: not launched ({what})")
+
+    def run_entry(self, en):
+        """One entry's lane, start to finish: the launch decision, breaker, ledger row,
+        journal, launch, check, usage, triage — the deterministic half of one delegation."""
         if self.stop.is_set():
             return
         hp = self.hp
@@ -4722,12 +4779,20 @@ class BatchRun:
         if self.parent:
             e["parent"] = self.parent
         bad = validate_event(e)
-        # Verdict and dispatch record are ONE locked region: the verdict prices the batch from
-        # the ledger, so each admitted child's row must land before the next verdict reads.
-        # Priced outside the lock, every worker admits against the pre-batch total (measured:
-        # 4 sol children through a $20 budget). The lock spans processes, so the Workflow
-        # face's one-entry processes are admitted one at a time too.
+        # Decision, verdict, dispatch record and launch line are ONE locked region. The verdict
+        # prices the batch from the ledger, so each admitted child's row must land before the
+        # next verdict reads — priced outside the lock, every worker admits against the
+        # pre-batch total (measured: 4 sol children through a $20 budget). And the journal is
+        # read again here: what this process read before — at a full run's start, before an
+        # `--entry` was routed — may be stale, since other processes run this manifest's
+        # entries too (the Workflow face). The lock spans processes, so a decision and its
+        # launch line can never be split by another process's launch.
         with batch_lock(self.mp):
+            what, detail = journal_decisions(self.journal, [en["id"]])[en["id"]]
+            if what != "launch":
+                self.refuse(en, what, detail)
+                return
+            attempt = detail
             verdict, msg = fanout_verdict(hp, self.parent, en["model"])
             if verdict == "stop":
                 first = not self.state["stopped"]
@@ -4750,8 +4815,9 @@ class BatchRun:
                            "dispatch": did, "reason": bad})
             elif hp is not None:
                 append_event(hp, e, src="wrapper")
+            # `pid`: while that process runs and no exit line follows, the launch is live.
             self.jrnl({"t": now_iso(), "event": "launch", "id": en["id"], "attempt": attempt,
-                       "dispatch": did})
+                       "dispatch": did, "pid": os.getpid()})
         with BATCH_LOCK:
             self.state["launched"] += 1
         out_p, err_p = self.outdir / f"{en['id']}.out", self.outdir / f"{en['id']}.err"
@@ -4845,12 +4911,11 @@ class BatchRun:
         self.note(f"{lane.label}: {how}"
                   + (f" · check {check_mark(check_rc)}" if en["check"] else ""))
 
-    def run_all(self, todo, attempts, concurrency):
+    def run_all(self, todo, concurrency):
         """The fan-out. The main thread wakes twice a second, so a signal is on the batch
         record within 0.5s, as it is on each lane's."""
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-            pending = {pool.submit(self.run_entry, en, attempts.get(en["id"], 0) + 1)
-                       for en in todo}
+            pending = {pool.submit(self.run_entry, en) for en in todo}
             while pending:
                 finished, pending = concurrent.futures.wait(pending, timeout=0.5)
                 for f in finished:
@@ -4861,7 +4926,7 @@ class BatchRun:
     def full(self, entries, split, concurrency, resumed):
         """A full run: the resume decision said, the plan ahead of the launch, the lanes, and
         the harvest → (rc, the harvest as printed)."""
-        attempts, done_ids, todo, held, running = split
+        done_ids, todo, held, running = split
         mp = self.mp
         if resumed and (todo or held):
             print(f"resuming {mp}: {len(todo)} to relaunch, {len(held)} skipped",
@@ -4874,7 +4939,7 @@ class BatchRun:
                   "then a new entry", file=sys.stderr)
         if running:
             print(f"left alone {len(running)} still running in another process: "
-                  f"{', '.join(running)} — the harvest reads them once they exit",
+                  f"{', '.join(running)} — a later harvest reads them",
                   file=sys.stderr)
 
         if todo and self.on:
@@ -4906,7 +4971,7 @@ class BatchRun:
         if todo:
             self.lanes_phase = True
             try:
-                self.run_all(todo, attempts, concurrency)
+                self.run_all(todo, concurrency)
             finally:
                 self.lanes_phase = False
         if self.signaled:
@@ -4920,10 +4985,11 @@ class BatchRun:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             harvest = run_harvest(mp, entries, self.journal, self.outdir, self.hp,
-                                  {en["id"] for en in todo})
+                                  {en["id"] for en in todo} - set(self.refused))
         total = len(entries)
         summary = {"total": total, "launched": self.state["launched"], "ok": self.state["ok"],
-                   "failed": self.state["failed"], "skipped": total - len(todo),
+                   "failed": self.state["failed"],
+                   "skipped": total - len(todo) + len(self.refused),
                    "stopped": self.state["stopped"], **harvest, "journal": str(self.journal),
                    "outdir": str(self.outdir)}
         text = buf.getvalue() + json.dumps(summary, ensure_ascii=False) + "\n"
@@ -4940,15 +5006,15 @@ def run_full(mp, hp, on, concurrency, entries):
     it and watches the batch record, so a batch of any width is one agent row."""
     journal = mp.parent / f"{mp.stem}.journal.jsonl"
     resumed = journal.exists()
-    split = ({}, set(), entries, [], {})
+    split = (set(), entries, [], {})
     if resumed:
         with batch_lock(mp):
-            split = resume_split(entries, journal, hp)
+            split = resume_split(entries, journal)
     ld = lanes_dir_or_note(hp) if hp is not None else None
     bid = "b" + os.urandom(16).hex()
-    record = BatchRecord(bid, ld, mp, journal, len(entries), len(split[2]))
+    record = BatchRecord(bid, ld, mp, journal, len(entries), len(split[1]))
     print(f"batch:{bid}", flush=True)
-    run = BatchRun(mp, hp, on, len(split[2]), ld, record)
+    run = BatchRun(mp, hp, on, len(split[1]), ld, record)
     prev = {s: signal.signal(s, run.on_signal) for s in LANE_SIGNALS}
     try:
         rc, harvest = run.full(entries, split, concurrency, resumed)
@@ -4988,65 +5054,71 @@ def route_one(mp, hp, on, en):
     en["model"], en["effort"] = suggested["model"], suggested.get("effort") or en["effort"]
 
 
+def entry_answer(hp, outdir, eid, what, detail):
+    """What `--entry` prints when the journal says not to launch → its exit status. A done or
+    running entry names its lane first, as `dispatch:<id>`, so its relay watches that lane —
+    ended, its final lines at once. A held entry has no lane to watch: it says why on stdout,
+    and its relay, finding no id, passes the text on (agents/lane.md step 4)."""
+    if what == "held":
+        print(f"entry {eid} held — its last triage named cause {detail}: a relaunch buys the "
+              "same failure; a different brief, then a new entry")
+        return BATCH_HELD
+    if what == "running":
+        print(f"dispatch:{detail}")
+        print(f"entry {eid} is running already, launched by another process — nothing "
+              f"launched; its lane is {detail}")
+        return 0
+    did = detail.get("dispatch")
+    did = did if isinstance(did, str) and SAFE_ID_RE.fullmatch(did) else None
+    print(f"dispatch --batch: {eid} is done (attempt {detail.get('attempt')}) — nothing "
+          "launched", file=sys.stderr)
+    rec = read_record(hp / "lanes" / f"{did}.json") if hp is not None and did else None
+    if did:
+        print(f"dispatch:{did}")
+    print("\n".join(watch_lines(rec, watch_state(rec)) if rec else [
+        f"entry {eid} done · attempt {detail.get('attempt')} · {did or 'no dispatch id'} rc=0 · "
+        f"check {check_mark(detail.get('check_rc'))}",
+        f"report: {(outdir / f'{eid}.out').absolute()}"]))
+    return 0
+
+
 def run_one(mp, hp, on, entries, eid):
     """`hippo dispatch --batch <manifest> --entry <id>`: the Workflow face's call — one entry
     through the batch machinery, in a process of its own, beside the other entries' processes.
-    stdout's first line is `dispatch:<id>`, as a single dispatch prints it. The journal decides
-    as it does for a full run: a done entry launches nothing and prints its final lines (exit
-    0), a held one launches nothing and says why (exit BATCH_HELD), one running in another
-    process launches nothing and names that lane (exit 0)."""
+    When a lane runs, stdout's first line is its `dispatch:<id>`, as a single dispatch prints
+    it. The journal decides as it does for a full run: a done entry launches nothing and prints
+    its lane's final lines (exit 0), a held one launches nothing and says why (exit
+    BATCH_HELD), one running in another process launches nothing and names that lane (exit 0).
+    Read here first, so a done entry is never routed, and again where the launch line is
+    written (run_entry), so a process that launched it meanwhile is never doubled."""
     en = next((e for e in entries if e["id"] == eid), None)
     if en is None:
         die(f"dispatch --batch: {mp}: no entry {eid!r}\n{BATCH_USAGE}", 2)
-    journal = mp.parent / f"{mp.stem}.journal.jsonl"
-    outdir = mp.parent / f"{mp.stem}.out"
-    attempts, done, exits, triages, other = {}, set(), {}, {}, None
-    if journal.exists():
-        with batch_lock(mp):
-            attempts, done, exits, triages = journal_state(journal)
-            other = running_elsewhere(hp, journal, {eid} - done).get(eid)
-    if eid in done:
-        ex = exits[eid]
-        did = ex.get("dispatch")
-        journal_append(mp, journal, {"t": now_iso(), "event": "skip", "id": eid})
-        print(f"dispatch --batch: {eid} is done (attempt {ex.get('attempt')}) — nothing "
-              "launched", file=sys.stderr)
-        rec = (read_record(hp / "lanes" / f"{did}.json")
-               if hp is not None and isinstance(did, str) and SAFE_ID_RE.fullmatch(did) else None)
-        print(f"dispatch:{did}")
-        print("\n".join(watch_lines(rec, watch_state(rec)) if rec else [
-            f"entry {eid} done · attempt {ex.get('attempt')} · {did} rc=0 · check "
-            f"{check_mark(ex.get('check_rc'))}", f"report: {(outdir / f'{eid}.out').absolute()}"]))
-        sys.exit(0)
-    if other:
-        print(f"dispatch:{other}")
-        print(f"entry {eid} is running already, launched by another process — nothing "
-              f"launched; its lane is {other}")
-        sys.exit(0)
-    cause = held_cause(triages.get(eid))
-    if cause:
-        journal_append(mp, journal, {"t": now_iso(), "event": "skip", "id": eid,
-                                     "why": f"cause {cause}"})
-        print(f"entry {eid} held — its last triage named cause {cause}: a relaunch buys the same "
-              "failure; a different brief, then a new entry")
-        sys.exit(BATCH_HELD)
-    if en["model"] is None:
-        route_one(mp, hp, on, en)
-    outdir.mkdir(parents=True, exist_ok=True)
     run = BatchRun(mp, hp, on, 1, lanes_dir_or_note(hp) if hp is not None else None,
                    face="workflow")
-    # Only while the lane can run, as for a single dispatch: a signal during the plan above
-    # took its default action.
-    run.lanes_phase = True
-    prev = {s: signal.signal(s, run.on_signal) for s in LANE_SIGNALS}
-    try:
-        run.run_entry(en, attempts.get(eid, 0) + 1)
-    finally:
-        for s, handler in prev.items():
-            signal.signal(s, handler)
-    if run.signaled:
-        sys.exit(128 + run.signaled[0])
-    sys.exit(2 if run.state["stopped"] else (1 if run.state["failed"] else 0))
+    with batch_lock(mp):
+        what, detail = journal_decisions(run.journal, [eid])[eid]
+    if what == "launch":
+        if en["model"] is None:
+            route_one(mp, hp, on, en)
+        run.outdir.mkdir(parents=True, exist_ok=True)
+        # Only while the lane can run, as for a single dispatch: a signal during the plan above
+        # took its default action.
+        run.lanes_phase = True
+        prev = {s: signal.signal(s, run.on_signal) for s in LANE_SIGNALS}
+        try:
+            run.run_entry(en)
+        finally:
+            for s, handler in prev.items():
+                signal.signal(s, handler)
+        if run.signaled:
+            sys.exit(128 + run.signaled[0])
+        if eid not in run.refused:
+            sys.exit(2 if run.state["stopped"] else (1 if run.state["failed"] else 0))
+        what, detail = run.refused[eid]  # another process launched it while this one routed
+    else:
+        run.refuse(en, what, detail)
+    sys.exit(entry_answer(hp, run.outdir, eid, what, detail))
 
 
 def run_batch(argv):

@@ -334,7 +334,7 @@ hippo directive withdraw <id>
 hippo prior show
 hippo prior distill [--days N]
 hippo dispatch --kind K --scope S [--task T] [--depth N] [--fast] [--] <codex exec args…>
-hippo dispatch --batch <manifest.yaml> [--dry-run | --entry <id>]
+hippo dispatch --batch <manifest.yaml> [--dry-run | --entry <id>]  # --entry: the Workflow face's call, never typed
 hippo dispatch --watch <dispatch-id|batch-id> [--for SECONDS]
 # a bare noun reads: task → list, log → tail, directive → list, prior → show
 hippo scribe --transcript P --session S   # internal: the Stop hook calls it detached
@@ -1463,9 +1463,9 @@ with their price:
   prompt: "hippo dispatch --batch <manifest>")`. A full run prints `batch:<bid>` (`b` + 32 hex)
   first on stdout and keeps `.hippo/lanes/<bid>.json` — `id manifest stem pid started total
   todo skipped launched running ok failed done running_ids last last_at journal harvest`, then
-  `status` (`exited|killed`), `signal`, `rc`, `error` when the run died before its lanes, and
-  `ended` last — rewritten whole by the batch process alone, at every lane start and exit and
-  at the end. The relay takes whichever of `batch:<id>` and `dispatch:<id>` comes first in its
+  `status` (`exited|killed`), `signal`, `rc`, `error` when the run died (an unrouted entry, a
+  wrapper exception), and `ended` last — rewritten whole by the batch process alone, at every
+  lane start and exit and at the end. The relay takes whichever of `batch:<id>` and `dispatch:<id>` comes first in its
   output, and `--watch <bid>` reads the record: running, one line — `batch <stem> running ·
   <elapsed> · <r> running · <d>/<t> done · <f> failed · last: <scope>: <event>`, the newest of
   the batch's own events (a lane started, exited) and its running lanes' — and exit 3; ended,
@@ -1485,20 +1485,33 @@ Codex has no agent panel and keeps the plain Bash form of both.
 **One entry** (`--entry <id>`) is the Workflow face's call — its generated script makes it, and
 main never types it (§4). It runs exactly one entry through the batch machinery: manifest
 validation, the journal and its resume decision for that entry, the breaker, `check`, parent
-stamping, usage, triage, the kill trap — and prints `dispatch:<id>` first, as a single dispatch
-does, for the relay to grep. The journal decides as it does for a full run. A done entry
-launches nothing and prints `dispatch:<the lane that did it>` with that lane's final lines
-(exit 0), so its relay's watch ends at once on the same lines. A held entry — its latest triage
-named `capability` or `spec` — launches nothing and says so (exit 5). An entry whose latest
-launch has no exit while its lane still runs launches nothing and names that lane (exit 0), and
-a full run leaves such an entry alone too: two faces can now overlap on one journal. An entry
-with no `model` takes the routing its dry run recorded in `<manifest>.plan.jsonl`, or, with no
-record, is planned alone as a full run would plan it and its record merged into the file; with
-neither it stops before the launch (`model is required`). Several entry processes append to one
-journal, so every journal write — and every read a launch decision rests on, and the breaker's
-admit-then-record region — holds an `flock` on the manifest file beside the in-process lock: the
-manifest always exists, and locking it creates nothing the journal logic would read. Which exit
-or triage is an entry's latest is read off its attempt, never its place in the file.
+stamping, usage, triage, the kill trap — and when a lane runs, prints its `dispatch:<id>` first,
+as a single dispatch does, for the relay to grep. The journal decides as it does for a full
+run. A done entry launches nothing and prints `dispatch:<the lane that did it>` with that
+lane's final lines (exit 0), so its relay's watch ends at once on the same lines. An entry
+whose latest launch has no exit while the process that launched it still runs — the launch
+line carries that `pid` — launches nothing and names that lane (exit 0). A held entry — its
+latest triage named `capability` or `spec` — launches nothing and says why (exit 5), and a
+breaker stop says why on stderr (exit 2): neither has a lane, so neither prints an id, and the
+relay passes the text on from its output file (lane.md step 4). An entry with no `model` takes
+the routing its dry run recorded in `<manifest>.plan.jsonl`, or, with no record, is planned
+alone as a full run would plan it and its record merged into the file; with neither it stops
+before the launch (`model is required`), and the dry run names such entries when it writes
+the face.
+
+Two faces can overlap on one journal — main runs the harvest while the Workflow's relays still
+launch — so a launch decision is read twice: once up front (a full run's resume split; an
+`--entry` before it is routed), and again in the locked region that appends the launch line,
+where an entry another process launched, finished or held meanwhile is not launched after all
+(a full run says so on stderr and counts it skipped; `--entry` answers as above). One read and
+one launch line under one lock: no entry runs twice, and an attempt number names one launch —
+measured before this, two `--entry` processes started together both launched attempt 1. The
+harvest leaves out an entry whose newer attempt runs in another process and names it under
+the table: its latest exit is stale. Several processes append to one journal, so every journal
+write — and every read a launch decision rests on, and the breaker's admit-then-record region
+— holds an `flock` on the manifest file beside the in-process lock: the manifest always
+exists, and locking it creates nothing the journal logic would read. Which exit or triage is
+an entry's latest is read off its attempt, never its place in the file.
 
 ### 3.6b The distiller split — the clerk writes the page, the code does the sums
 

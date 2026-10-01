@@ -29,8 +29,8 @@ models:
   # Anthropic (cached = cache-read rate: 0.1x input; 0.025x on Fable 5.1, 0.05x on Opus 5.5).
   claude-fable-5-1: {input: 10.00, cached: 0.25, output: 50.00}
   claude-opus-5-5:  {input: 4.00, cached: 0.20, output: 20.00}
-  # Sonnet 5.5 is what `sonnet` resolves to for the hippo:lane relay since 2026-10; its usage was
-  # unpriced until this row. (Its 5m cache write, $2.50, has no column here.)
+  # Sonnet 5.5 is what `sonnet` resolves to since 2026-10 (native runs the scribe records); its
+  # usage was unpriced until this row. (Its 5m cache write, $2.50, has no column here.)
   claude-sonnet-5-5: {input: 2.00, cached: 0.20, output: 10.00}
   # Sonnet 5 launch pricing became the standard price; the 2026-09-01 increase was cancelled.
   claude-sonnet-5:  {input: 2.00, cached: 0.20, output: 10.00}

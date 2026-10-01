@@ -431,6 +431,11 @@ def test_an_unrouted_entry_the_judge_cannot_route_launches_nothing(tmp_project, 
     assert "model is required — the judge suggested none for solo" in proc.stderr
     assert not capture.exists()
     assert not (tmp_project / "wave.journal.jsonl").exists()
+    # The batch record already existed: it says why the run died, for --watch and the row.
+    bid = proc.stdout.splitlines()[0].removeprefix("batch:")
+    rec = json.loads((tmp_project / ".hippo" / "lanes" / f"{bid}.json").read_text("utf-8"))
+    assert (rec["status"], rec["rc"]) == ("exited", 2)
+    assert "the judge suggested none for solo" in rec["error"]
 
 
 def test_a_routed_entry_two_tiers_from_its_brief_gets_a_note(tmp_project, tmp_path, run_hippo):
