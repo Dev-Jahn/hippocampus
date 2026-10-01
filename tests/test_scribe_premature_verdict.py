@@ -14,13 +14,14 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from conftest import REPO_ROOT, ledger_path, read_ledger
-from test_native_runs import (DID, _agent, _call, _launched, _msg, _note, _queued, _session,
-                              _user, _write)
+from conftest import HIPPO_BIN, REPO_ROOT, ledger_path, read_ledger
+from test_native_runs import (AGENT, DID, _agent, _call, _launched, _msg, _note, _queued,
+                              _session, _user, _write)
 
 sys.path.insert(0, str(REPO_ROOT / "cli"))
 import hippo_cli  # noqa: E402
@@ -107,7 +108,7 @@ def test_a_scribe_verdict_on_a_running_lane_is_dumped(tmp_project, run_hippo, fa
 
     assert not _verdicts(tmp_project)
     dump = _dumps(tmp_project)
-    assert "'dlane' is still running" in dump and f"pid {os.getpid()}" in dump
+    assert "'dlane' was still running" in dump and f"pid {os.getpid()}" in dump
     assert "started the lane" in dump  # the dump keeps what the clerk proposed
 
 
@@ -144,14 +145,20 @@ def test_without_a_lane_record_the_ledger_decides(tmp_project, run_hippo, fake_t
     _seed(tmp_project, *rows)
     _scribe(run_hippo, tmp_project, fake_transcript, [_accept("dnorec")], tmp_path)
     assert bool(_verdicts(tmp_project)) is not in_flight
-    assert ("is still running" in _dumps(tmp_project)) is in_flight
+    assert ("was still running" in _dumps(tmp_project)) is in_flight
 
 
-def test_a_native_run_takes_a_verdict_only_once_it_has_ended(tmp_project, run_hippo, tmp_path):
+@pytest.mark.parametrize("row, src", [
+    pytest.param(DID, "scribe", id="its-own-row"),
+    pytest.param(AGENT, "cli", id="main-s-row-under-its-bare-id"),
+])
+def test_a_native_run_takes_a_verdict_only_once_it_has_ended(tmp_project, run_hippo, tmp_path,
+                                                             row, src):
     """hippo's own index says when a run ended (a notification, a TaskStop, a run file); the
-    roster says so too, and a verdict the clerk reads off the launch window is dumped."""
-    _seed(tmp_project, _dispatch(DID, src="scribe", ex="subagent/claude-opus-5-5/xhigh",
-                                 kind="impl"))
+    roster says so too, and a verdict the clerk reads off the launch window is dumped. The
+    record may be main's row under the run's bare id (`native_refs`): the clerk's verdict names
+    the `ag-` id the skills teach and is moved onto that row — held the same way."""
+    _seed(tmp_project, _dispatch(row, src=src, ex="subagent/claude-opus-5-5/xhigh", kind="impl"))
     transcript = tmp_project / "transcript.jsonl"
     _write(transcript, [_user("add the retry loop in a subagent"), _call(), _launched()])
     _agent(_session(tmp_project), msgs=[_msg("m1")])
@@ -159,15 +166,54 @@ def test_a_native_run_takes_a_verdict_only_once_it_has_ended(tmp_project, run_hi
     _scribe(run_hippo, tmp_project, transcript, [_accept(DID, "launched the retry loop")],
             tmp_path, name="w1", capture=capture)
 
-    assert f"- {DID} (impl): lane {DID}  {RUNNING}" in capture.read_text()
+    assert f"- {row} (impl): lane {row}  {RUNNING}" in capture.read_text()
     assert not _verdicts(tmp_project)
-    assert f"'{DID}' is still running" in _dumps(tmp_project)
+    assert f"'{row}' was still running" in _dumps(tmp_project)
 
     _write(transcript, [_queued(_note()), _user("merged, thanks")], mode="a")
     _scribe(run_hippo, tmp_project, transcript, [_accept(DID, "retry loop merged")], tmp_path,
             name="w2", capture=capture)
-    assert f"- {DID} (impl): lane {DID}  [no outcome yet]" in capture.read_text()
-    assert [e["note"] for e in _verdicts(tmp_project)] == ["retry loop merged"]
+    assert f"- {row} (impl): lane {row}  [no outcome yet]" in capture.read_text()
+    assert [(e["ref"], e["note"]) for e in _verdicts(tmp_project)] == [
+        (row, "retry loop merged")]
+
+
+def test_a_lane_that_ends_while_the_clerk_reads_takes_no_verdict_from_that_window(
+        tmp_project, fake_transcript, tmp_path):
+    """The clerk reads a window cut while the lane ran, and the lane exits before the writer
+    checks the verdict: its usage row then lands first, so no view would set the verdict aside.
+    The writer holds the clerk to the roster it was shown. The mock clerk reads its answer from
+    a FIFO, so the lane ends exactly while the clerk is reading."""
+    _seed(tmp_project, _dispatch("dlane"))
+    _lane(tmp_project, "dlane")
+    answer, capture = tmp_path / "answer.fifo", tmp_path / "payload.txt"
+    os.mkfifo(answer)
+    proc = subprocess.Popen(
+        [str(HIPPO_BIN), "scribe", "--transcript", str(fake_transcript), "--session", "s1"],
+        cwd=tmp_project, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={**os.environ, "HIPPO_CLERK_BACKEND": "mock", "HIPPO_MOCK_OUTPUT": str(answer),
+             "HIPPO_MOCK_CAPTURE": str(capture)})
+    deadline = time.monotonic() + 30
+    while True:  # the payload is handed over once the clerk opens the FIFO to read its answer
+        try:
+            fd = os.open(answer, os.O_WRONLY | os.O_NONBLOCK)
+            break
+        except OSError:  # no reader yet
+            if proc.poll() is not None or time.monotonic() > deadline:
+                proc.kill()
+                pytest.fail(f"the clerk never read its answer: {proc.communicate()}")
+            time.sleep(0.01)
+    _lane(tmp_project, "dlane", ended=_ago(0), status="exited", rc=0)
+    _seed(tmp_project, _usage("dlane", minutes_ago=0))
+    os.set_blocking(fd, True)
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps({"worklog": "", "events": [_accept("dlane")]}))
+    _, err = proc.communicate(timeout=60)
+
+    assert proc.returncode == 0, err
+    assert f"- dlane (audit): lane dlane  {RUNNING}" in capture.read_text()
+    assert not _verdicts(tmp_project)
+    assert "'dlane' was still running" in _dumps(tmp_project)
 
 
 def test_main_and_a_lane_are_never_gated(tmp_project, run_hippo):
@@ -289,17 +335,30 @@ _USE = _r("2026-10-01T10:05:01Z", ev="usage", ref=DID, tokens=10, tin=8, tcached
 _METER = _r("2026-10-01T10:05:01Z", ev="clerk", name="turn-scribe", ok=True, ms=1, tokens=1,
             src="scribe")
 _LANE_OUT = {**_OUT, "ref": "dlane", "t": _ago(5)}
+# Another run's end in the same scribe run, the judge on: its usage, the judge's meter, its
+# triage — none of them the turn-scribe meter that closes a scribe run.
+_OTHER = [{**_USE, "ref": "ag-other"},
+          _r("2026-10-01T10:05:01Z", ev="clerk", name="jev-harvest", ok=True, ms=1, tokens=1,
+             src="scribe"),
+          _r("2026-10-01T10:05:01Z", ev="triage", ref="ag-other", route="accept-candidate",
+             verify=False, p={"done": 0.9}, src="scribe")]
 
 
 @pytest.mark.parametrize("rows, counted", [
     # The run ended in the window its verdict was read from: the scribe writes the clerk's
     # events, then the run's usage, then its own meter — one run, so the verdict stands.
     pytest.param(_native(_OUT, _USE, _METER), True, id="native-ended-in-the-same-window"),
+    pytest.param(_native(_OUT, *_OTHER, _USE, _METER), True,
+                 id="native-ended-in-the-same-window-beside-another-run"),
     pytest.param(_native(_OUT, _METER, _USE, _METER), False, id="native-ended-a-run-later"),
     pytest.param([_dispatch("dlane"), _LANE_OUT, _usage("dlane")], False,
                  id="wrapper-exit-after-the-verdict"),
-    pytest.param([_dispatch("dlane"), _triage("dlane", minutes_ago=6), _LANE_OUT,
-                  _usage("dlane")], True, id="wrapper-exit-before"),
+    pytest.param([_dispatch("dlane"), _usage("dlane", minutes_ago=6), _LANE_OUT,
+                  _triage("dlane")], True, id="wrapper-exit-before"),
+    # A batch harvest re-reads a lane whose judge failed at its exit, on a later run: that
+    # triage says nothing about when a lane with no usage row (a parse gap) ended.
+    pytest.param([_dispatch("dlane"), _LANE_OUT, _METER, _triage("dlane")], True,
+                 id="a-later-harvest-s-triage-dates-nothing"),
     pytest.param([_dispatch("dlane"), _LANE_OUT], True, id="unknown-end"),
     pytest.param([_dispatch("dlane"), {**_LANE_OUT, "src": "cli"}, _usage("dlane")], True,
                  id="main-s-early-verdict-is-main-s-call"),
@@ -309,6 +368,37 @@ def test_a_scribe_verdict_counts_only_once_its_delegation_ended(rows, counted):
     assert bool(hippo_cli.prior_cells(rows)) is counted
     assert (_OUT["ref"] in hippo_cli.judged_refs(rows)
             or "dlane" in hippo_cli.judged_refs(rows)) is counted
+
+
+def _lone(did, end_first=False):
+    """A lane whose only verdict is the scribe's `no-go`, 13s after the launch, while the lane
+    ran on 3.5 minutes (steno, 2026-09-21) — or, `end_first`, the same verdict after the exit."""
+    launch = _r("2026-09-21T21:41:23Z", ev="dispatch", id=did, kind="audit",
+                exec="codex/gpt-6.1-sol/high", scope="audit the cache", depth=0, src="wrapper")
+    out = _r("2026-09-21T21:41:36Z", ev="outcome", ref=did, result="no-go", attr="brief",
+             src="scribe")
+    meter = {**_METER, "t": "2026-09-21T21:41:36Z"}
+    use = _r("2026-09-21T21:45:00Z", ev="usage", ref=did, tokens=748000, tin=740000,
+             tcached=700000, tout=8000, model="gpt-6.1-sol", src="wrapper")
+    return [launch, use, out, meter] if end_first else [launch, out, meter, use]
+
+
+@pytest.mark.parametrize("end_first", [False, True])
+def test_a_lone_premature_verdict_leaves_its_dispatch_owed_one(end_first):
+    """No verdict, so an open item — and its `brief` is no attribution."""
+    page = hippo_cli.prior_facts(_lone("dold", end_first),
+                                 datetime(2026, 10, 2, tzinfo=timezone.utc))
+    open_items = page.split("## open items")[1].split("##")[0]
+    assert ("- dold (" in open_items) is not end_first
+    assert f"brief {int(end_first)} / harness 0" in page
+
+
+@pytest.mark.parametrize("end_first", [False, True])
+def test_premature_verdicts_do_not_make_the_distiller_due(tmp_project, end_first):
+    """The auto-distill count is of the verdicts PRIORS reads."""
+    _seed(tmp_project, *(r for k in range(hippo_cli.DISTILL_MIN_NEW)
+                         for r in _lone(f"d{k}", end_first)))
+    assert hippo_cli.distill_due(tmp_project / ".hippo") is end_first
 
 
 def test_main_s_verdict_after_a_premature_one_is_the_first(tmp_project, run_hippo, tmp_path):

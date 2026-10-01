@@ -292,8 +292,12 @@ def read_ledger(hp):
 
 
 # What a delegation's end writes: the wrapper at a lane's exit, the scribe's own code at a
-# native run's (§3.5.3c).
+# native run's (§3.5.3c). Any of them says the delegation has ended (`still_running`).
 EXIT_EVS = ("usage", "triage")
+# The ones that also say *when* (`verdict_rows`), being written only at the end itself. A
+# lane's triage is not one: a batch harvest asks the judge again for a lane whose triage failed
+# or was off at its exit (§3.6), on a later run of the batch — any time after the lane ended.
+END_ROWS = {("usage", "wrapper"), ("usage", "scribe"), ("triage", "scribe")}
 
 
 def verdict_rows(rows):
@@ -303,19 +307,20 @@ def verdict_rows(rows):
     outcome stamped before its delegation ended is a reading of a launch, not of work (§3.5.6b)
     — measured (steno, 2026-10-01): "No verdict yet. I just launched two lanes" became two
     `accepted` rows that PRIORS read as first-pass accepts, while the lanes ran on for 16 and 30
-    minutes and main later judged them `revised` and `lost`. The end is the first row the end
-    wrote — `usage` or `triage` by the wrapper at a lane's exit, or by the scribe's code at a
-    native run's. The scribe writes the clerk's events, then a run's end rows, then its own
-    `turn-scribe` meter, so an end row of its own with no meter between it and the outcome came
-    from the same scribe run: the run ended in the window the verdict was read from, and the
-    verdict stands. No end row, no skip — nothing is guessed. The ledger is never rewritten;
-    this is the one place every reader of a verdict asks."""
+    minutes and main later judged them `revised` and `lost`. The end is dated by the first row
+    written at it (END_ROWS): a lane's `usage`, which its wrapper writes at the exit, or a native
+    run's `usage` or `triage`, which the scribe's code writes in the run that saw the end. The
+    scribe writes the clerk's events, then a run's end rows, then its own `turn-scribe` meter,
+    so an end row of its own with no meter between it and the outcome came from the same scribe
+    run: the run ended in the window the verdict was read from, and the verdict stands. No end
+    row, no skip — nothing is guessed. The ledger is never rewritten; this is the one place
+    every reader of a verdict asks."""
     run, end, outs = 0, {}, []  # run: how many scribe runs had closed before a row
     for i, e in enumerate(rows):  # append-only, so file order is write order
         ev, src = e.get("ev"), e.get("src")
         if ev == "outcome" and src != "executor":
             outs.append((i, run, e))
-        elif ev in EXIT_EVS and src in ("wrapper", "scribe"):
+        elif (ev, src) in END_ROWS:
             end.setdefault(e.get("ref"), (i, run if src == "scribe" else None))
         elif ev == "clerk" and e.get("name") == "turn-scribe" and src == "scribe":
             run += 1
@@ -1668,9 +1673,13 @@ def validate_scribe_event(e):
     return None
 
 
-def check_scribe_outcome(hp, e, native=None):
+def check_scribe_outcome(hp, e, native=None, held=None):
     """Scribe-only, like validate_scribe_event: a second verdict for a dispatch is rejected, and
-    so is a verdict on a delegation still in flight (`still_running`).
+    so is a verdict on a delegation in flight — when the roster was built (`held`, ref → why,
+    from `dispatch_roster`) or now (`still_running`). The roster's reading is the one the
+    clerk's window matches: a lane that ends while the clerk reads (steno: a median 7s, up to
+    88s) is still a launch in that window, and its exit row lands before the verdict, so no
+    view would set the verdict aside either.
 
     The prompt has always said "at most one outcome per dispatch", and the roster marks the
     judged ones — and the clerk re-judged anyway, measured on this repo's own ledger: one
@@ -1692,10 +1701,11 @@ def check_scribe_outcome(hp, e, native=None):
     if e.get("ref") in judged_refs(rows):
         return (f"ev=outcome: ref={e.get('ref')!r} already has a verdict — the scribe does not "
                 "re-judge (at most one outcome per dispatch; a second verdict belongs to main)")
-    why = still_running(hp, e.get("ref"), rows, native)
+    why = (held or {}).get(e.get("ref")) or still_running(hp, e.get("ref"), rows, native)
     if why:
-        return (f"ev=outcome: ref={e.get('ref')!r} is still running: {why}. A verdict needs an "
-                "ended delegation; a launch or a progress line is not one")
+        return (f"ev=outcome: ref={e.get('ref')!r} was still running when this window was read: "
+                f"{why}. A verdict needs an ended delegation; a launch or a progress line is "
+                "not one")
     return None
 
 
@@ -5584,8 +5594,10 @@ DISPATCH_ROSTER_N = 12
 ROSTER_RUNNING = "[running — no verdict yet]"  # turn-scribe.md rule 2 names it verbatim
 
 
-def dispatch_roster(hp, native=None):
-    """The recent dispatches handed to the scribe with the digest.
+def dispatch_roster(hp, native=None, held=None):
+    """The recent dispatches handed to the scribe with the digest. `held`, when given, collects
+    the ids marked running and why, so the writer holds the clerk to what it was shown
+    (`check_scribe_outcome`).
 
     The clerk is told not to record a launch the wrapper already recorded, and until now its only
     way to tell was spotting the wrapper's trace in the digest — which is not something a digest
@@ -5630,7 +5642,10 @@ def dispatch_roster(hp, native=None):
         # still in flight takes no verdict at all, whatever it has claimed (§3.5.6b).
         if did in judged:
             return ""
-        if still_running(hp, did, rows, native):
+        why = still_running(hp, did, rows, native)
+        if why:
+            if held is not None:
+                held[did] = why
             return f"  {ROSTER_RUNNING}"
         if did in claims:
             return f"  [claims {claims[did]} — verdict pending]"
@@ -7286,9 +7301,10 @@ def cmd_scribe(args):
                     + "\n\n"
                 )
 
+    held = {}  # the roster's running lines, ref → why (`check_scribe_outcome`)
     payload = (
         f"# live directives\n\n{directive_roster(hp)}\n\n"
-        f"# dispatches already recorded\n\n{dispatch_roster(hp, native)}\n\n"
+        f"# dispatches already recorded\n\n{dispatch_roster(hp, native, held)}\n\n"
         f"{native_section(native)}"
         f"{hints}"
         f"# transcript digest\n\n{digest}"
@@ -7370,7 +7386,7 @@ def cmd_scribe(args):
         taken, verr = native_guard(hp, native_take, hp, e, native, alias) or (False, None)
         if not taken:
             verr = (validate_event(e) or validate_scribe_event(e) or check_ref(hp, e)
-                    or check_scribe_outcome(hp, e, native)
+                    or check_scribe_outcome(hp, e, native, held)
                     or check_scribe_directive(hp, e, start))
             if not verr:
                 append_event(hp, e, src="scribe")

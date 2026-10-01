@@ -979,29 +979,33 @@ an agent's own (PreCompact, below).
    the five rules above: the window start is not in the ledger, so a fold could not
    re-derive the decision, and the dump is the record (step 6).
 
-   **A verdict needs an ended delegation.** A scribe `outcome` is dumped, not written, when
-   its delegation is still in flight as the event is written, the dump naming the ref and why.
-   A wrapper lane is in flight while its record (§3.6) reads `running` the way `--watch` reads
-   it — no `ended`, and the wrapper alive; a wrapper that is gone ended or was lost, and a lost
-   lane is not in flight, so no lane holds a verdict off forever. With no record (it could not
-   be written, or was removed), a wrapper launch with no exit row in the ledger (`usage`,
-   `triage`) is in flight for the day the capsule's in-flight line uses: measured over 454
-   wrapper launches in 13 ledgers on this Mac (2026-10-02), the longest ran 3.6h to its exit
-   row, and 11 never wrote one. A native run is in flight while 3c's index has no end for it
-   (a notification, a TaskStop, a run file's end). Any other dispatch — a row main logged, one
-   the clerk coined — has no end to wait for and is not checked. Main's `hippo log outcome` is
-   never checked, and a lane's own claim stays a claim (§3.2). The roster marks such a line
-   `[running — no verdict yet]` (step 5), and rule 2 says it takes no outcome in this window,
-   whatever the digest says. Measured (steno, 2026-10-01): the clerk — gpt-6-luna at medium,
-   1.15.4's default (step 4) — read a window whose last assistant line was "No verdict yet. I
-   just launched two branch-triage lanes …" and recorded both lanes `accepted`, each note
-   saying the lane was started. They ended 16 and 30 minutes later, and main judged them
-   `revised` and `lost` an hour after that. The prompt already said "never attach an outcome to
-   a delegation still in flight", and the roster showed both lines open: the rule did not hold
-   even at medium effort, so it is checked in code, like the second verdict above. Refused
-   *and* folded: the check reads what the ledger does not hold — a live pid, a transcript's
-   notifications — while the rows written before it, or past it (no record and older than a
-   day, a run in another session's transcript), are read as no verdict by the views (§3.6b).
+   **A verdict needs an ended delegation.** A scribe `outcome` is dumped, not written, when its
+   delegation was in flight as the roster was built (step 5), or still is as the event is
+   written, the dump naming the ref and why. The roster's reading is the one the clerk's window
+   matches: a lane that ends while the clerk reads (steno: a median 7s, up to 88s) is still a
+   launch in that window, and its exit row lands before the verdict, where no view would set
+   the verdict aside. A wrapper lane is in flight while its record (§3.6) reads `running` the
+   way `--watch` reads it — no `ended`, and the wrapper alive; a wrapper that is gone ended or
+   was lost, and a lost lane is not in flight, so no lane holds a verdict off forever. With no
+   record (it could not be written, or was removed), a wrapper launch with no exit row in the
+   ledger (`usage`, `triage`) is in flight for the day the capsule's in-flight line uses:
+   measured over 454 wrapper launches in 13 ledgers on this Mac (2026-10-02), the longest ran
+   3.6h to its exit row, and 11 never wrote one. A native run is in flight while 3c's index has
+   no end for it (a notification, a TaskStop, a run file's end). Any other dispatch — a row
+   main logged, one the clerk coined — has no end to wait for and is not checked. Main's
+   `hippo log outcome` is never checked, and a lane's own claim stays a claim (§3.2). The
+   roster marks such a line `[running — no verdict yet]` (step 5), and rule 2 says it takes no
+   outcome in this window, whatever the digest says. Measured (steno, 2026-10-01): the clerk —
+   gpt-6-luna at medium, 1.15.4's default (step 4) — read a window whose last assistant line
+   was "No verdict yet. I just launched two branch-triage lanes …" and recorded both lanes
+   `accepted`, each note saying the lane was started. They ended 16 and 30 minutes later, and
+   main judged them `revised` and `lost` an hour after that. The prompt already said "never
+   attach an outcome to a delegation still in flight", and the roster showed both lines open:
+   the rule did not hold even at medium effort, so it is checked in code, like the second
+   verdict above. Refused *and* folded: the check reads what the ledger does not hold — a live
+   pid, a transcript's notifications — while the rows written before it, or past it (no record
+   and older than a day, a run in another session's transcript), are read as no verdict by the
+   views (§3.6b).
 
    The line is *who observed the value*, not who is trusted. The launcher builds `exec` from its
    own argv and a handed vocabulary holds — measured, 0 malformed in 110, and `kind` has held the
@@ -1671,21 +1675,24 @@ open items leave out native runs (`ag-` ids) with no verdict and give their coun
 hippo records every Agent and Workflow run, so an unjudged quick look-up is not a forgotten
 lane, and a list of them would bury the lanes that are.
 
-**The first verdict needs an ended delegation.** Every reader of a verdict — the routing
-table and the triage agreement here, and beside the page the in-flight line, the scribe's
-re-judge rule, `task:` resolution, main's second-verdict note and the auto-distill count — goes
-through one function, `verdict_rows`, which drops a lane's claim (§9.2) and a scribe outcome
-stamped before its delegation ended (§3.5.6b). The end is the first row the end wrote: `usage`
-or `triage` by the wrapper at a lane's exit, or by the scribe's own code at a native run's
-(§3.5.3c). The scribe writes the clerk's events, then a run's end rows, then its own
-`turn-scribe` meter, so an end row of its own with no meter between it and the outcome came
-from the same scribe run: the run ended in the window the verdict was read from, and the
-verdict stands — 15 native verdicts in 5 ledgers sit exactly there, one a second before its
-usage row, so ledger order decides, not the clock. With no end row nothing is skipped, since
-there is nothing to date the verdict against, and the ledger is never rewritten: the view
-reads it differently, and re-derivably (principle 5). The lane record's `ended` is not read
-here — records are pruned after a week (§3.6), and a view that read them would change its
-answer as they go.
+**The first verdict needs an ended delegation.** Every reader of a verdict — the routing table
+and the triage agreement here, and beside the page the in-flight line, the scribe's re-judge
+rule, `task:` resolution, main's second-verdict note and the auto-distill count — goes through
+one function, `verdict_rows`, which drops a lane's claim (§9.2) and a scribe outcome stamped
+before its delegation ended (§3.5.6b). The end is dated by the first row written at it: a
+lane's `usage`, which its wrapper writes at the exit, or a native run's `usage` or `triage`,
+which the scribe's own code writes in the run that saw the end (§3.5.3c). A lane's `triage`
+dates nothing: a batch harvest asks the judge again, on a later run, for a lane whose triage
+failed or was off at its exit (§3.6), and a lane with no `usage` — the parse gap a killed lane
+can leave — would otherwise have its end dated to that run. The scribe writes the clerk's
+events, then a run's end rows, then its own `turn-scribe` meter, so an end row of its own with
+no meter between it and the outcome came from the same scribe run: the run ended in the window
+the verdict was read from, and the verdict stands — 15 native verdicts in 5 ledgers sit exactly
+there, one a second before its usage row, so ledger order decides, not the clock. With no end
+row nothing is skipped, since there is nothing to date the verdict against, and the ledger is
+never rewritten: the view reads it differently, and re-derivably (principle 5). The lane
+record's `ended` is not read here — records are pruned after a week (§3.6), and a view that
+read them would change its answer as they go.
 
 Measured over the 13 ledgers on this Mac (2026-10-02): 4 of 77 scribe outcomes are set aside —
 steno's two accepts (§3.5.6b), a steno `no-go` stamped 13 seconds after its launch while the
