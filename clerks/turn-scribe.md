@@ -104,7 +104,10 @@ events: only the four kinds below are allowed, with exactly these field names.
    was lost (lost). **`ref` must be an id marked `[no outcome yet]` or
    `[claims … — verdict pending]` in `# dispatches already recorded`, a listed `ag-` id you
    record in this same output, or one you can literally see in this digest.** An id with
-   neither marker is already judged — the writer rejects a second verdict. Main rarely names a
+   no marker is already judged — the writer rejects a second verdict. A line marked
+   `[running — no verdict yet]` takes no outcome in this window, whatever the digest says: the
+   delegation has not ended, and a launch or a progress line is not a verdict — the writer
+   rejects it. Main rarely names a
    native run by its id when it judges one: it merges the run's branch, accepts its report or
    rejects its finding by the run's description, its task, or — for a Workflow — its worktree
    (`wf_<run>-N`, branch `worktree-wf_<run>-N`). An open native run's roster line carries

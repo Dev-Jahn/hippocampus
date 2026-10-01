@@ -291,12 +291,47 @@ def read_ledger(hp):
     return out
 
 
+# What a delegation's end writes: the wrapper at a lane's exit, the scribe's own code at a
+# native run's (§3.5.3c).
+EXIT_EVS = ("usage", "triage")
+
+
+def verdict_rows(rows):
+    """The outcome rows that are verdicts, in ledger order. Two kinds of outcome row are not.
+
+    An executor's self-report (src=executor) is a claim, not a verdict (§9.2). And a scribe
+    outcome stamped before its delegation ended is a reading of a launch, not of work (§3.5.6b)
+    — measured (steno, 2026-10-01): "No verdict yet. I just launched two lanes" became two
+    `accepted` rows that PRIORS read as first-pass accepts, while the lanes ran on for 16 and 30
+    minutes and main later judged them `revised` and `lost`. The end is the first row the end
+    wrote — `usage` or `triage` by the wrapper at a lane's exit, or by the scribe's code at a
+    native run's. The scribe writes the clerk's events, then a run's end rows, then its own
+    `turn-scribe` meter, so an end row of its own with no meter between it and the outcome came
+    from the same scribe run: the run ended in the window the verdict was read from, and the
+    verdict stands. No end row, no skip — nothing is guessed. The ledger is never rewritten;
+    this is the one place every reader of a verdict asks."""
+    run, end, outs = 0, {}, []  # run: how many scribe runs had closed before a row
+    for i, e in enumerate(rows):  # append-only, so file order is write order
+        ev, src = e.get("ev"), e.get("src")
+        if ev == "outcome" and src != "executor":
+            outs.append((i, run, e))
+        elif ev in EXIT_EVS and src in ("wrapper", "scribe"):
+            end.setdefault(e.get("ref"), (i, run if src == "scribe" else None))
+        elif ev == "clerk" and e.get("name") == "turn-scribe" and src == "scribe":
+            run += 1
+
+    def early(i, r, e):
+        at, by_run = end.get(e.get("ref"), (None, None))
+        return e.get("src") == "scribe" and at is not None and at > i and by_run != r
+
+    return [e for i, r, e in outs if not early(i, r, e)]
+
+
 def judged_refs(rows):
-    """Dispatch ids that carry a *verdict*. An executor's self-report (src=executor) is a
-    claim, not a verdict (§9.2) — it never counts as judged anywhere that word matters: the
-    in-flight line, the scribe's re-judge rule, the task: ref resolution, the priors join."""
-    return {e.get("ref") for e in rows
-            if e.get("ev") == "outcome" and e.get("src") != "executor"}
+    """Dispatch ids that carry a *verdict* (`verdict_rows`). A lane's claim and a scribe reading
+    of a launch never count as judged anywhere that word matters: the in-flight line, the
+    scribe's re-judge rule, the task: ref resolution, the priors join."""
+    return {e.get("ref") for e in verdict_rows(rows)}
 
 
 def executor_claims(rows):
@@ -1633,26 +1668,68 @@ def validate_scribe_event(e):
     return None
 
 
-def check_scribe_outcome(hp, e):
-    """Scribe-only, like validate_scribe_event: a second verdict for a dispatch is rejected.
+def check_scribe_outcome(hp, e, native=None):
+    """Scribe-only, like validate_scribe_event: a second verdict for a dispatch is rejected, and
+    so is a verdict on a delegation still in flight (`still_running`).
 
     The prompt has always said "at most one outcome per dispatch", and the roster marks the
     judged ones — and the clerk re-judged anyway, measured on this repo's own ledger: one
     dispatch judged `revised` was re-judged `accepted` by two later scribe runs, and a verdict
     main had recorded through the CLI was restated by the scribe 26 seconds later. Same lesson
     as the dispatch roster (§3.5.5): a prompt cannot hold a rule its writer does not check.
+    The prompt also said "never attach an outcome to a delegation still in flight", and a
+    medium-effort clerk read "No verdict yet. I just launched two lanes" as two acceptances
+    (steno, 2026-10-01) — the same lesson again.
 
     Main is different on purpose. A deliberate re-verdict (say, `revised` upgraded after
     rework) is main's call to make; it gets a stderr note, never a refusal — and the priors
     read the first verdict either way (the routing table is a first-pass rate)."""
     if e.get("ev") != "outcome":
         return None
+    rows = read_ledger(hp)
     # A lane's self-report is a claim, not a verdict (§9.2): the scribe recording main's
     # explicit acceptance signal *after* a claim is the normal flow, not a re-judgment.
-    if e.get("ref") in judged_refs(read_ledger(hp)):
+    if e.get("ref") in judged_refs(rows):
         return (f"ev=outcome: ref={e.get('ref')!r} already has a verdict — the scribe does not "
                 "re-judge (at most one outcome per dispatch; a second verdict belongs to main)")
+    why = still_running(hp, e.get("ref"), rows, native)
+    if why:
+        return (f"ev=outcome: ref={e.get('ref')!r} is still running: {why}. A verdict needs an "
+                "ended delegation; a launch or a progress line is not one")
     return None
+
+
+def still_running(hp, ref, rows, native=None):
+    """Why the delegation `ref` names is in flight right now → a reason, or None once it has
+    ended — or when nothing can tell, since a guess here would block a real verdict.
+
+    A native run (§3.5.3c) is read from this window's index (`native`): a notification, a
+    TaskStop or a run file's end. A wrapper lane from its record, as `--watch` reads it: no
+    `ended` and the wrapper alive is running; a wrapper that is gone ended or was lost, and a
+    lost lane is not in flight — it must never hold a verdict off forever. With no record (it
+    could not be written, or was removed), a wrapper launch with no exit row in the ledger may
+    still run within the day the capsule calls in flight (IN_FLIGHT_WINDOW_H): measured over
+    454 wrapper launches in 13 ledgers (2026-10-02), the longest ran 3.6h to its exit row, and
+    11 never wrote one. Any other dispatch — main's own row, a clerk's — has no end to wait
+    for."""
+    runs = (native or {}).get("runs", {}).values()
+    run = next((r for r in runs if ref in (r["id"], r["ref"])), None)
+    if run is not None:
+        return None if run["ended"] else (f"native run {run['id']} has not ended (no "
+                                          "notification, TaskStop or end in its run file yet)")
+    if not isinstance(ref, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", ref):
+        return None
+    rec = _read_json(hp / "lanes" / f"{ref}.json")
+    if rec:
+        return (f"its lane record has no end and its wrapper (pid {rec.get('pid')}) is alive"
+                if watch_state(rec) == "running" else None)
+    launch = next((e for e in rows if e.get("ev") == "dispatch" and e.get("id") == ref
+                   and e.get("src") == "wrapper"), None)
+    t, now = event_time(launch or {}), datetime.now(timezone.utc)
+    if (t is None or now - t > timedelta(hours=IN_FLIGHT_WINDOW_H)
+            or any(e.get("ev") in EXIT_EVS and e.get("ref") == ref for e in rows)):
+        return None
+    return f"no lane record and no exit row yet, launched {age_label(t, now)} ago"
 
 
 def check_scribe_directive(hp, e, start):
@@ -1893,12 +1970,10 @@ def cmd_log(args):
             if getattr(args, k) is not None:
                 e[k] = getattr(args, k)
         # Claims (src=executor) do not make this "a second verdict" — main judging a claimed
-        # dispatch is the intended sequence, and the note would train the reader to skim.
-        prior_verdicts = [
-            x for x in read_ledger(args.hp)
-            if x.get("ev") == "outcome" and x.get("ref") == e["ref"]
-            and x.get("src") != "executor"
-        ]
+        # dispatch is the intended sequence, and the note would train the reader to skim. Nor
+        # does a scribe reading of the launch: PRIORS reads main's verdict as the first.
+        prior_verdicts = [x for x in verdict_rows(read_ledger(args.hp))
+                          if x.get("ref") == e["ref"]]
     elif args.ev == "review":
         e.update(id=args.id, base=args.base, source=args.source, findings=args.findings)
     elif args.ev == "review-status":
@@ -2048,11 +2123,10 @@ def prior_cells(rows, prices=None):
     implementation of the join would be a second answer to the same question."""
     prices = prices or load_prices()
     first = {}
-    # Self-reported outcomes are claims, not verdicts (§9.2): they enter no cell, no
-    # attribution count, no unjoined count. The scorecard folds only judgments.
-    for e in rows:  # the ledger is append-only, so file order is chronological
-        if e.get("ev") == "outcome" and e.get("src") != "executor":
-            first.setdefault(e.get("ref"), e)
+    # Claims and scribe readings of a launch are not verdicts (`verdict_rows`): they enter no
+    # cell, no attribution count, no unjoined count. The scorecard folds only judgments.
+    for e in verdict_rows(rows):  # the ledger is append-only, so file order is chronological
+        first.setdefault(e.get("ref"), e)
     usage = {}
     for e in rows:  # the last row per (dispatch, model): a native run's rows are cumulative,
         if e.get("ev") == "usage":  # one per model (§3.5.3c); a codex lane has one model
@@ -2109,13 +2183,16 @@ def triage_agreement(rows):
     Stop — §3.5.3c) counts wherever it lands: it is written after a verdict main typed that
     same turn, main never sees it, and it never reaches the clerk that reads the verdict off
     the transcript, so it is an independent reading either way. A ledger with no triage row
-    gets no section: with no key the page is exactly what it was."""
+    gets no section: with no key the page is exactly what it was. The verdict is the first of
+    `verdict_rows`: a scribe reading of the launch is not one, and a route recorded after it is
+    still before the verdict."""
     tri, first = {}, {}
+    counted = {id(e) for e in verdict_rows(rows)}
     for e in rows:  # chronological, so "before the verdict" is file order
         ref = e.get("ref")
         if e.get("ev") == "triage" and (ref not in first or e.get("src") == "scribe"):
             tri[ref] = e.get("route")
-        elif e.get("ev") == "outcome" and e.get("src") != "executor":
+        elif id(e) in counted:
             first.setdefault(ref, e.get("result"))
     if not tri:
         return []
@@ -2160,9 +2237,9 @@ def prior_facts(rows, now, prices=None):
     does the sums, and it is no longer handed the raw ledger to do them from."""
     prices = prices or load_prices()
     disp = [e for e in rows if e.get("ev") == "dispatch"]
-    # Self-reported outcomes are claims, not verdicts (§9.2): they enter no cell, no
-    # attribution count, no unjoined count. The scorecard folds only judgments.
-    outs = [e for e in rows if e.get("ev") == "outcome" and e.get("src") != "executor"]
+    # Claims and scribe readings of a launch are not verdicts (`verdict_rows`): they enter no
+    # cell, no attribution count, no unjoined count. The scorecard folds only judgments.
+    outs = verdict_rows(rows)
     first = {}
     for e in outs:  # the ledger is append-only, so file order is chronological
         first.setdefault(e.get("ref"), e)
@@ -2337,17 +2414,19 @@ def cmd_distill(args):
 
 def distill_due(hp):
     """§3.5.8: PRIORS is missing or older than DISTILL_STALE_DAYS, and DISTILL_MIN_NEW verdicts
-    (outcomes that are not executor claims — the ones PRIORS reads) landed after the last
-    distiller row. Counted from the ledger, never a counter file. A failed run resets the count
-    too: a dead clerk must not be re-billed at every Stop (the cursor rule of §3.5.6)."""
+    (`verdict_rows` — the ones PRIORS reads) landed after the last distiller row. Counted from
+    the ledger, never a counter file. A failed run resets the count too: a dead clerk must not
+    be re-billed at every Stop (the cursor rule of §3.5.6)."""
     p = hp / "PRIORS.md"
     if p.exists() and time.time() - p.stat().st_mtime < DISTILL_STALE_DAYS * 86400:
         return False
+    rows = read_ledger(hp)
+    counted = {id(e) for e in verdict_rows(rows)}
     new = 0
-    for e in read_ledger(hp):
+    for e in rows:
         if e.get("ev") == "clerk" and e.get("name") == "distiller":
             new = 0
-        elif e.get("ev") == "outcome" and e.get("src") != "executor":
+        elif id(e) in counted:
             new += 1
     return new >= DISTILL_MIN_NEW
 
@@ -5502,6 +5581,7 @@ def directive_roster(hp):
 
 
 DISPATCH_ROSTER_N = 12
+ROSTER_RUNNING = "[running — no verdict yet]"  # turn-scribe.md rule 2 names it verbatim
 
 
 def dispatch_roster(hp, native=None):
@@ -5546,9 +5626,12 @@ def dispatch_roster(hp, native=None):
 
     def marker(did):
         # A claimed dispatch is still awaiting the verdict — and naming the claim keeps the
-        # clerk from reading the lane's own report in the digest as an acceptance signal.
+        # clerk from reading the lane's own report in the digest as an acceptance signal. One
+        # still in flight takes no verdict at all, whatever it has claimed (§3.5.6b).
         if did in judged:
             return ""
+        if still_running(hp, did, rows, native):
+            return f"  {ROSTER_RUNNING}"
         if did in claims:
             return f"  [claims {claims[did]} — verdict pending]"
         return "  [no outcome yet]"
@@ -7287,7 +7370,8 @@ def cmd_scribe(args):
         taken, verr = native_guard(hp, native_take, hp, e, native, alias) or (False, None)
         if not taken:
             verr = (validate_event(e) or validate_scribe_event(e) or check_ref(hp, e)
-                    or check_scribe_outcome(hp, e) or check_scribe_directive(hp, e, start))
+                    or check_scribe_outcome(hp, e, native)
+                    or check_scribe_directive(hp, e, start))
             if not verr:
                 append_event(hp, e, src="scribe")
         if verr:

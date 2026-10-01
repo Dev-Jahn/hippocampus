@@ -164,7 +164,10 @@ optional `src` (`scribe|cli|wrapper|executor`).
   brief, and the vanished StructuredOutput was harness). A second outcome for one dispatch is
   legal from main — a deliberate re-verdict after rework is main's call — but it gets a stderr
   note, because the routing table is a *first-pass* rate and keeps reading the first verdict.
-  From the scribe a second outcome is rejected outright (§3.5.6b).
+  From the scribe a second outcome is rejected outright (§3.5.6b). A verdict needs an ended
+  delegation: a scribe outcome on one still in flight is refused at write time (§3.5.6b), and
+  one already in the ledger, stamped before its delegation ended, is no verdict in any view —
+  main's later verdict is the first (§3.6b). The ledger is not rewritten.
 - `review-status.addressed ∈ {full, partial, none}` — closed like `result`, because it is the one
   field reviews are folded on ("not fully addressed"): a free-form "fully" would read as open
   forever. `hippo log review` prints a one-line stderr reminder to record the closing
@@ -912,8 +915,10 @@ an agent's own (PreCompact, below).
    task, its description — rarely by its id. Measured (2026-09-25): 0 of 21 `ag-wf_` rows ever
    got a verdict, so no Workflow's cost reached PRIORS, though main had merged the work of every
    finished one in hippo; and 17 rows landing in one mlx-vlm window left 5 of them off the last
-   12. The prompt says the same in rule 2 (the A/B in 3c). Expected output = strict JSON:
-   `{"worklog": "…", "events": [ …ledger events without t… ]}`.
+   12. The prompt says the same in rule 2 (the A/B in 3c). A line still open is marked
+   `[no outcome yet]`, `[claims … — verdict pending]` after a lane's own report, or
+   `[running — no verdict yet]` while the delegation is in flight (6b). Expected output =
+   strict JSON: `{"worklog": "…", "events": [ …ledger events without t… ]}`.
 6. Validation, **per event**: check each event by the same rules as `hippo log` (per-ev key
    whitelist — unknown keys rejected; `t` and `src` are always stamped by the writer; exec shape
    and ref existence as in §3.2). A rejected event is dumped to `failures/` and skipped; the
@@ -928,7 +933,7 @@ an agent's own (PreCompact, below).
    malformed copy of an event that had also landed well; a later checkup read the pile as lost
    records and deleted 16. The per-run file is also what the checkup skill now reads against
    the ledger before calling a rejection a loss.
-6b. **Six extra rules, on the clerk's output only.** A scribe `usage` is rejected — the
+6b. **Seven extra rules, on the clerk's output only.** A scribe `usage` is rejected — the
    wrapper observed the cost and was there when the lane ran. A scribe `dispatch` is rejected when its
    executor is `codex`, or when either closed slot of `exec` is outside its vocabulary
    (`codex|claude|fork|subagent|workflow` / `low|medium|high|xhigh|max|ultra|inherit`). A scribe
@@ -973,6 +978,30 @@ an agent's own (PreCompact, below).
    live text with the change merged in. Not appended rather than appended-but-unfolded, like
    the five rules above: the window start is not in the ledger, so a fold could not
    re-derive the decision, and the dump is the record (step 6).
+
+   **A verdict needs an ended delegation.** A scribe `outcome` is dumped, not written, when
+   its delegation is still in flight as the event is written, the dump naming the ref and why.
+   A wrapper lane is in flight while its record (§3.6) reads `running` the way `--watch` reads
+   it — no `ended`, and the wrapper alive; a wrapper that is gone ended or was lost, and a lost
+   lane is not in flight, so no lane holds a verdict off forever. With no record (it could not
+   be written, or was removed), a wrapper launch with no exit row in the ledger (`usage`,
+   `triage`) is in flight for the day the capsule's in-flight line uses: measured over 454
+   wrapper launches in 13 ledgers on this Mac (2026-10-02), the longest ran 3.6h to its exit
+   row, and 11 never wrote one. A native run is in flight while 3c's index has no end for it
+   (a notification, a TaskStop, a run file's end). Any other dispatch — a row main logged, one
+   the clerk coined — has no end to wait for and is not checked. Main's `hippo log outcome` is
+   never checked, and a lane's own claim stays a claim (§3.2). The roster marks such a line
+   `[running — no verdict yet]` (step 5), and rule 2 says it takes no outcome in this window,
+   whatever the digest says. Measured (steno, 2026-10-01): the clerk — gpt-6-luna at medium,
+   1.15.4's default (step 4) — read a window whose last assistant line was "No verdict yet. I
+   just launched two branch-triage lanes …" and recorded both lanes `accepted`, each note
+   saying the lane was started. They ended 16 and 30 minutes later, and main judged them
+   `revised` and `lost` an hour after that. The prompt already said "never attach an outcome to
+   a delegation still in flight", and the roster showed both lines open: the rule did not hold
+   even at medium effort, so it is checked in code, like the second verdict above. Refused
+   *and* folded: the check reads what the ledger does not hold — a live pid, a transcript's
+   notifications — while the rows written before it, or past it (no record and older than a
+   day, a run in another session's transcript), are read as no verdict by the views (§3.6b).
 
    The line is *who observed the value*, not who is trusted. The launcher builds `exec` from its
    own argv and a handed vocabulary holds — measured, 0 malformed in 110, and `kind` has held the
@@ -1641,6 +1670,32 @@ reading, which is what the table measures. A ledger with no triage row gets no s
 open items leave out native runs (`ag-` ids) with no verdict and give their count on one line:
 hippo records every Agent and Workflow run, so an unjudged quick look-up is not a forgotten
 lane, and a list of them would bury the lanes that are.
+
+**The first verdict needs an ended delegation.** Every reader of a verdict — the routing
+table and the triage agreement here, and beside the page the in-flight line, the scribe's
+re-judge rule, `task:` resolution, main's second-verdict note and the auto-distill count — goes
+through one function, `verdict_rows`, which drops a lane's claim (§9.2) and a scribe outcome
+stamped before its delegation ended (§3.5.6b). The end is the first row the end wrote: `usage`
+or `triage` by the wrapper at a lane's exit, or by the scribe's own code at a native run's
+(§3.5.3c). The scribe writes the clerk's events, then a run's end rows, then its own
+`turn-scribe` meter, so an end row of its own with no meter between it and the outcome came
+from the same scribe run: the run ended in the window the verdict was read from, and the
+verdict stands — 15 native verdicts in 5 ledgers sit exactly there, one a second before its
+usage row, so ledger order decides, not the clock. With no end row nothing is skipped, since
+there is nothing to date the verdict against, and the ledger is never rewritten: the view
+reads it differently, and re-derivably (principle 5). The lane record's `ended` is not read
+here — records are pruned after a week (§3.6), and a view that read them would change its
+answer as they go.
+
+Measured over the 13 ledgers on this Mac (2026-10-02): 4 of 77 scribe outcomes are set aside —
+steno's two accepts (§3.5.6b), a steno `no-go` stamped 13 seconds after its launch while the
+lane ran on for 3.5 minutes and 748k tokens, and an mlx-vlm `accepted` 73 seconds before its
+lane's exit, whose own claim then said `revised`. steno's first-pass rate went from 238/288
+(82.6%) to 236/287 (82.2%), 107/129 to 105/128 in the 14-day window PRIORS reads, and its
+`audit × codex/gpt-6.1-sol/high` cell from 2/4 — a printed 50% — to 0/3, under the bar; its
+triage table gained the two routes the premature accepts had hidden, since a route recorded
+after the first verdict is not read. A steno checkup had flagged 6 such rows from their notes;
+the ones with no end row to date them against stay as they are.
 
 The page no longer waits for a manual run: the scribe regenerates it when it is due (§3.5.8), and
 `hippo prior distill` stays for the run nobody wants to wait a week for.
