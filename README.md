@@ -97,7 +97,7 @@ That creates `.hippo/` and nothing else.
 
 ### The clerk backend
 
-The clerks resolve their backend automatically: codex (gpt-6-luna, low effort) if installed, else
+The clerks resolve their backend automatically: codex (gpt-6-luna, medium effort) if installed, else
 headless claude (sonnet, low effort; it saves no session, so clerk runs stay out of
 `claude --resume`). When a project needs a different one, set `clerk: {backend: codex|claude}` in
 `.hippo/config.yaml` — it outranks the variable and the automatic choice until removed — or export

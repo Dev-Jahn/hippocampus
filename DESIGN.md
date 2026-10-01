@@ -225,8 +225,10 @@ optional `src` (`scribe|cli|wrapper|executor`).
   (update semantics).
 - `directive.state ∈ {active, withdrawn, expired}`; an active directive requires `text` only. The
   last event for an `id` is its current state (a derived view is never stored — principles 4 and
-  5). A directive lives until `hippo directive withdraw` — `withdrawn` is the user changing their
-  mind; `expired` survives only on old rows.
+  5), so a scribe event on an id that main wrote within the scribe's own window is never
+  written: an explicit write beats an inference (§3.5.6b). A directive lives until `hippo
+  directive withdraw` — `withdrawn` is the user changing their mind; `expired` survives only on
+  old rows.
 - `directive.lifetime` is **retired** (1.14.0): still an allowed key, because old rows carry it,
   and written by nothing — `directive add --lifetime` is accepted and ignored with a stderr note,
   and a scribe event that still carries one has it dropped. Measured across 28 projects on 7
@@ -242,7 +244,8 @@ optional `src` (`scribe|cli|wrapper|executor`).
   handle for *superseding* a directive, so it has to be typeable from memory in a project whose
   prose is in any language. For the same reason the scribe is handed the live ids alongside the
   digest (§3.5.5): a clerk that invents a fresh id for an existing subject does not update it, it
-  silently forks it. `hippo directive add` derives the id from `--text` and **refuses** when that
+  silently forks it — and with their whole texts, since an update replaces the text. `hippo
+  directive add` derives the id from `--text` and **refuses** when that
   leaves nothing (text with no ascii letters) rather than falling back to a meaningless `directive-<hash>`.
   Derived ids carry a 4-char hash of the full text, so they never collide across different text —
   which makes them content fingerprints, not subject handles. To supersede, pass `--id` yourself.
@@ -838,10 +841,14 @@ an agent's own (PreCompact, below).
    the user's shell profile. A write main makes inside a worker call's own window to the same
    thing with the same values — the same status on the task, the same verdict on the dispatch —
    reads as the worker's; it costs a line.
-4. Resolve the backend: `config.yaml > $HIPPO_CLERK_BACKEND > automatic (codex/gpt-6-luna/low when
-   codex exists, otherwise claude -p sonnet at low effort) > mock` (for tests). That pair is hippo's
-   one cheap tier (the lane agent, §3.6, is its sonnet-low half); hippo runs no haiku (the A/B note
-   in clerk_run.sh). 120s timeout. The claude backend saves no session
+4. Resolve the backend: `config.yaml > $HIPPO_CLERK_BACKEND > automatic (codex/gpt-6-luna/medium
+   when codex exists, otherwise claude -p sonnet at low effort) > mock` (for tests). luna ran at
+   low until 1.15.3, and low's quality gap to medium cost more than its saving: on iislab-slurm
+   (2026-09-29/30) a luna-low clerk asked to record 7 listed runs emitted 33 events, the list ~5
+   times over, and rewrote directives main had just written into shorter ones (step 6b). The
+   claude fallback stays sonnet-low — the lane agent's tier (§3.6), never measured short of the
+   job; hippo runs no haiku (the A/B note in clerk_run.sh). 120s timeout. The claude backend
+   saves no session
    (`--no-session-persistence`): measured (2026-09-27), without it every clerk run was a
    transcript in the host project's folder — 534 of 537 in mlx-vlm, 506 (85MB) in a Windows
    project — and filled `claude --resume`. `$HIPPO_CLERK_MODEL`
@@ -850,7 +857,11 @@ an agent's own (PreCompact, below).
 5. Prompt = `clerks/turn-scribe.md` + the live directive roster + the recent dispatch roster + the
    native runs to record, when any (3c) + the digest. Both rosters exist for one reason: an id
    the clerk coins for a subject that already has one forks it instead of updating it, and the
-   digest cannot be relied on to contain the existing id. The dispatch roster is also the set an
+   digest cannot be relied on to contain the existing id. The directive roster carries each live
+   text whole, folded onto one line: an update under a reused id replaces the text, so the clerk
+   can write the whole revised directive (the prompt's rule 3) only from the whole live one.
+   Handed a 100-char preview, it wrote deltas — measured, step 6b. The dispatch roster is also
+   the set an
    outcome may legally `ref`, with the listed native ids the same output records. It is the last
    12 dispatches plus every row of this session's native runs launched within 24h that has no
    verdict yet, each of those with its task and a run's worktrees (`· task …`, `· worktrees
@@ -868,7 +879,13 @@ an agent's own (PreCompact, below).
    call itself* (no JSON, wrong envelope, nonzero rc) is still all-or-nothing and records
    `ev:clerk ok:false`. Either way the ledger is never contaminated and **the cursor advances**
    (never re-bill the same input forever). **Never fill a gap by inventing content.**
-6b. **Five extra rules, on the clerk's output only.** A scribe `usage` is rejected — the
+   Identical events in one output (the same JSON, key order aside) are processed once, and the
+   events one run rejects share one dump, each with its reason under a count. Measured
+   (iislab-slurm, 2026-09-29): the 7-run list emitted ~5 times (step 4) wrote 17 dumps, one per
+   malformed copy of an event that had also landed well; a later checkup read the pile as lost
+   records and deleted 16. The per-run file is also what the checkup skill now reads against
+   the ledger before calling a rejection a loss.
+6b. **Six extra rules, on the clerk's output only.** A scribe `usage` is rejected — the
    wrapper observed the cost and was there when the lane ran. A scribe `dispatch` is rejected when its
    executor is `codex`, or when either closed slot of `exec` is outside its vocabulary
    (`codex|claude|fork|subagent|workflow` / `low|medium|high|xhigh|max|ultra|inherit`). A scribe
@@ -891,6 +908,28 @@ an agent's own (PreCompact, below).
    would put a wrong verdict in a cell and block the right one, so it stays in the dump. For the
    same reason an outcome naming a listed run whose dispatch this output refused or skipped is
    dumped, saying so: the next clerk never sees that verdict.
+
+   **An explicit write beats an inference.** A scribe `directive` (active or withdrawn) on an
+   id is dumped, not written, when the ledger holds an explicit directive event on that id —
+   any `src` but `scribe` and `executor`, which never folds (§3.2) — stamped at or after the
+   window's start: the first stamped transcript line after the cursor (a Claude Code line or a
+   codex rollout line, both stamp `timestamp`), cut to the whole second the ledger stamps, so
+   the same second is inside. The ledger is read as each event is written, so a write main
+   makes while the detached clerk is still running wins too. A window with no readable stamp
+   is not guessed at: any explicit write on the id wins, and the reason says so. The dump
+   names the id and the winning write's time; main's text stays what every reader is given,
+   and checkup can still read what the clerk proposed. An id main has not written since the
+   window began updates as before — the clerk recording what main did not. Measured
+   (iislab-slurm, 2026-09-30): of 28 active scribe directive writes, 20 reused an id whose
+   latest text main had written with `directive add`, most within the minute of main's write,
+   and most shrank it (`storage-iisdata` 368→90 chars, `a-quota-unit` 178→43, `no-lockout`
+   147→48, `nvidia-unify-at-end` 208→95). Only 3 were useful: 2 new ids, and one change main
+   had not recorded — which, written as a 101-char delta over a 224-char rule main wrote the
+   day before, erased the whole allocation rule from every session. That one is now an
+   update with the whole text: the roster carries it (step 5) and the prompt asks for the
+   live text with the change merged in. Not appended rather than appended-but-unfolded, like
+   the five rules above: the window start is not in the ledger, so a fold could not
+   re-derive the decision, and the dump is the record (step 6).
 
    The line is *who observed the value*, not who is trusted. The launcher builds `exec` from its
    own argv and a handed vocabulary holds — measured, 0 malformed in 110, and `kind` has held the
@@ -1684,7 +1723,8 @@ Four rules govern the directive block:
   `main|all`). A user
   ruling that is invisible at session start is effectively not there, and a cap does not fix that
   problem — it makes it quiet. Newlines are collapsed (a multi-line value would break the
-  one-per-line shape); the text itself is never cut.
+  one-per-line shape); the text itself is never cut — nor in the scribe's roster, where a
+  cut text is what a clerk's update replaces the whole directive from (§3.5.5).
 - **Volume is a warning, never a limit** (principle 3). The write always goes through; what follows
   it, on stderr, is what the live set now costs: any directive over 200 chars, named by id and
   size → compress it and re-add under the same `--id`; 8 or more live, or 1600 characters in total
@@ -1705,8 +1745,11 @@ Four rules govern the directive block:
   is withdrawn automatically, and
   the scribe may not infer a withdrawal from anything but the user saying so — measured
   (2026-08-02), a clerk once withdrew a live hold because an assistant report mentioned its
-  keyword. Automation that decides is the failure mode; visibility is the fix, and the verdict
-  stays with main and the user.
+  keyword. Nor may it overwrite main: an explicit write beats an inference, so a scribe write on
+  an id main wrote within the scribe's window is set aside (§3.5.6b) — measured, 20 of 28 scribe
+  directive writes in one project restated main's fresh text, most of them shorter. Automation
+  that decides is the failure mode; visibility is the fix, and the verdict stays with main and
+  the user.
 - **Content is judged, never enforced.** The three rules above count characters and days; what
   the directives *say* went unread, and an obedient model is most dangerous where two live
   clauses contradict each other (measured: a fail-closed NO-GO out of two GPU clauses). At

@@ -38,6 +38,12 @@ Code) or `~/.codex/sessions/` in dated subdirectories (Codex) — take the newes
 - `cursors.json` against the actual transcript: is there a window left unread since the last
   scribe run? Count the dumps under `failures/` and their recent causes. Report gaps and failures
   **exactly as they are** (never fill a gap by inventing one).
+- A scribe dump of rejected events (one file per run, each event with its reason) is not a lost
+  record by itself. Before reporting one as lost, check whether the same id or ref landed in the
+  ledger from the same run or a later one — a clerk that repeats itself leaves malformed copies
+  of events it also wrote well (measured: 17 rejections in one run, every one a duplicate of a
+  recorded event). A directive set aside because main wrote that id in the window is main's
+  write standing, not a loss. Delete a dump only once you have checked it this way.
 - Example verdict: "scribe failed 4/52 runs (8%) — all malformed JSON, a candidate for tuning the
   turn-scribe prompt".
 

@@ -6,7 +6,8 @@
 # stdout. Backend resolution: $HIPPO_CLERK_BACKEND (auto|codex|claude|mock,
 # default auto). auto picks codex if the codex CLI is installed, else claude,
 # else exits 3. $HIPPO_CLERK_MODEL overrides the model on either backend; unset,
-# each backend falls back to its own default (codex: gpt-6-luna, claude: sonnet).
+# each backend falls back to its own default (codex: gpt-6-luna at medium effort,
+# claude: sonnet at low).
 # The whole call is bounded to $HIPPO_CLERK_TIMEOUT seconds
 # (default 120; exit 124 on timeout). Backend stderr stays off stdout; on a
 # non-zero exit its last few lines (error lines first choice) go to stderr.
@@ -157,10 +158,13 @@ case "$BACKEND" in
     fi
     # --disable hooks: keep the Stop hook of the codex session this clerk starts from spawning
     # another clerk. Belt and braces with the HIPPO_CLERK guard (survives a stripped environment).
+    # medium, not low (DESIGN §3.5.4): luna-low's quality gap to medium cost more than its
+    # saving — measured (iislab-slurm, 2026-09-29/30), a luna-low clerk repeated a 7-run list
+    # ~5 times in one output, and rewrote directives main had just written into shorter ones.
     open_err_file
     with_timeout "$TIMEOUT" codex exec \
       -m "${MODEL:-gpt-6-luna}" \
-      -c model_reasoning_effort="low" \
+      -c model_reasoning_effort="medium" \
       -c service_tier="fast" \
       -s read-only \
       --disable hooks \
@@ -187,9 +191,10 @@ case "$BACKEND" in
     #                         without it every run was a transcript in the host project's
     #                         folder — 534 of 537 in one project, 506 in another — filling
     #                         --resume.
-    # Default model is sonnet at low effort — the same tier as codex's gpt-6-luna at low above:
-    # hippo's cheap tier is luna-low where codex exists and sonnet-low where it does not, and
-    # never haiku. Haiku was demoted after a measured A/B (2026-07-31): it invented
+    # Default model is sonnet at low effort, the fallback where codex is missing. It is not the
+    # same tier as codex's gpt-6-luna at medium above: luna went to medium on measured quality
+    # (above), and sonnet-low has not been measured short of it, so it stays. Never haiku.
+    # Haiku was demoted after a measured A/B (2026-07-31): it invented
     # outcome:accepted for a lane whose acceptance was still pending — a semantic error that
     # passes schema validation.
     # claude prints some failures on stdout (a bad model id, measured) — those reach the dump's
