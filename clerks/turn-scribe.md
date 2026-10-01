@@ -121,7 +121,7 @@ events: only the four kinds below are allowed, with exactly these field names.
    wrong? → `work`. **If the digest does not say which, omit `attr` entirely** — an absent
    attribution is a gap, but a reflexive `work` is a lie that blames the executor for the brief's
    defect, and every routing decision built on it inherits that lie.
-3. `{"ev":"directive","id":"<short kebab id>","text":"<the gist of what was said>","state":"active"}`
+3. `{"ev":"directive","id":"<short kebab id>","text":"<the gist of what was said; for an update, the whole revised directive>","state":"active"}`
    or `{"ev":"directive","id":"<existing id>","state":"withdrawn"}`
    — **only operating constraints or instructions spoken by the user (USER: lines)**. Rules or
    resolutions the model invented for itself are not directives — do not record them. A decision
@@ -133,7 +133,14 @@ events: only the four kinds below are allowed, with exactly these field names.
    **Reuse an id.** The `# live directives` section above the digest lists every directive that is
    currently live. When this turn *changes* an instruction that is already on that list, reuse its
    exact id — a new id does not update anything, it just adds a second directive that says
-   something different. Coin a new id only for a genuinely new instruction. When the user drops an
+   something different. **An update replaces the whole text**, so its `text` is the complete
+   revised directive: start from the live text on the list, keep every clause the user did not
+   change, and merge the change in. Never write the change alone — a delta under a live id erases
+   every clause it leaves out (measured: a 224-char allocation rule was replaced by the one
+   101-char clause the user had amended, and the rule vanished from every session). If main has
+   already recorded the instruction under that id in this window, main's write stands and yours
+   is set aside, so there is no need to restate it. Coin a new id only for a genuinely new
+   instruction. When the user drops an
    instruction that is on the list, record it withdrawn under that same id. A withdrawal needs
    the same evidence as an addition: the user saying so, on a USER line. **Never infer one from
    the assistant's own summaries or reports** — a paraphrase that merely mentions a directive's

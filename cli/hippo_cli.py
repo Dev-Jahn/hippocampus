@@ -443,6 +443,11 @@ JEV_DIR = CLERKS / "jev"  # question specs live as text (principle 8)
 # the API's own answer to an oversize state is a 422 — a gate that fails silently is worse
 # than one that says the state was too large.
 JEV_STATE_BUDGET_CHARS = 110_000
+# The judge's view of a scribe window (DESIGN §3.5 step 2). The clerk's digest budget (300k)
+# is far past the state limit, so a longer digest is made again under this bound — oldest
+# entries left out first, under an OMITTED line. 10k under the state budget: room for JSON
+# escaping (a char per line, quotes) and the task-end roster beside the digest.
+JEV_DIGEST_CHARS = 100_000
 JEV_RETRY_STATUS = (429, 529)  # the two transient ones; every other status is the answer
 JEV_RETRY_WAIT = 2.0
 JEV_SPECS = {}  # per-process cache: a spec file is read once
@@ -1645,6 +1650,60 @@ def check_scribe_outcome(hp, e):
     if e.get("ref") in judged_refs(read_ledger(hp)):
         return (f"ev=outcome: ref={e.get('ref')!r} already has a verdict — the scribe does not "
                 "re-judge (at most one outcome per dispatch; a second verdict belongs to main)")
+    return None
+
+
+def check_scribe_directive(hp, e, start):
+    """Scribe-only: an explicit write beats an inference (§3.5.6b).
+
+    A scribe directive event on an id is not written when the ledger — read now, so a write
+    main made while this detached clerk was still running counts — holds a later explicit
+    write on that id: any src but the scribe's own and a lane's (which never folds, §3.2),
+    stamped at or after `start`, the window's first transcript time cut to the whole second
+    the ledger stamps. With no readable start there is nothing to compare against, and no
+    guess: any explicit write on the id wins. Measured (iislab-slurm, 2026-09-30): 20 of 28
+    active scribe directive writes reused an id main had just written, most within the
+    minute, and most shrank it — `storage-iisdata` 368→90 chars, `a-quota-unit` 178→43."""
+    if e.get("ev") != "directive":
+        return None
+    did = e.get("id")
+    last = None
+    for r in read_ledger(hp):
+        if (r.get("ev") == "directive" and r.get("id") == did
+                and r.get("src") not in ("scribe", "executor")):
+            last = r
+    if last is None:
+        return None
+    if start is None:
+        return (f"ev=directive: {did} was written explicitly at {last.get('t')} and the window "
+                "has no timestamp to tell whether that was before it — the explicit write wins")
+    t = event_time(last)
+    if t is not None and t >= start:
+        return (f"ev=directive: {did} was written explicitly at {last.get('t')}, inside this "
+                f"window (from {start:%Y-%m-%dT%H:%M:%SZ}) — the explicit write wins")
+    return None
+
+
+def window_start(transcript, since, end):
+    """The time of the first stamped line after the cursor, to the whole second — or None.
+
+    Both hosts stamp every conversational line with a top-level `timestamp` (a Claude Code
+    session line, a codex rollout line); a line without one (a host's bookkeeping) is passed
+    over to the next that has one."""
+    with transcript.open("r", encoding="utf-8", errors="replace") as f:
+        for i, raw in enumerate(f, 1):
+            if i <= since:
+                continue
+            if i > end:
+                break
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                continue
+            ts = rec.get("timestamp") if isinstance(rec, dict) else None
+            t = _iso_time(ts) if isinstance(ts, str) else None
+            if t is not None:
+                return t.astimezone(timezone.utc).replace(microsecond=0)
     return None
 
 
@@ -4625,14 +4684,16 @@ def directive_roster(hp):
 
     Without it the clerk coins a fresh id for an instruction that already has one, and the two
     sit in the ledger as unrelated directives — the update never lands. Reading the ledger from
-    inside the clerk would cost a tool call and a lot of latency for what is a short list."""
+    inside the clerk would cost a tool call and a lot of latency for what is a short list.
+
+    Each text is whole (folded onto one line, never cut): an update under a reused id replaces
+    the text, so the clerk can only write the whole revised directive if it was shown the
+    whole live one. Measured (iislab-slurm, 2026-09-30): handed a 100-char preview, the clerk
+    replaced a 224-char allocation rule with the 101-char clause the user had changed."""
     live = [d for d in directives(hp).values() if d.get("state") == "active"]
     if not live:
         return "(none yet)"
-    return "\n".join(
-        f"- {d['id']}: {one_line(d.get('text', ''), 100)}"
-        for d in live
-    )
+    return "\n".join(f"- {d['id']}: {one_line(d.get('text', ''))}" for d in live)
 
 
 DISPATCH_ROSTER_N = 12
@@ -6247,28 +6308,44 @@ def cmd_scribe(args):
     digest_py = SCRIPTS / "digest_lite.py"
     if not digest_py.exists():
         die(f"no digest script: {digest_py}")
-    r = subprocess.run(
-        # sys.executable, not "python3": under `uv run --script` there is no
-        # guarantee a python3 sits on PATH. digest_lite is stdlib-only.
-        # --until-line: the cursor will advance to `end`, so the digest must stop at exactly
-        # `end` too. Otherwise a line appended between the line count and the digest gets
-        # summarized now and again on the next run (a duplicated window boundary).
-        [
-            sys.executable,
-            str(digest_py),
-            str(transcript),
-            "--since-line",
-            str(since),
-            "--until-line",
-            str(end),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=SCRIBE_TIMEOUT,
-    )
-    if r.returncode != 0:
-        die(f"digest failed (rc={r.returncode}): {r.stderr.strip()}")
-    digest = r.stdout
+
+    def window_digest(budget=None):
+        """digest_lite over this window; `budget` bounds it in chars, digest_lite's own when
+        None (DESIGN §3.5 step 2)."""
+        r = subprocess.run(
+            # sys.executable, not "python3": under `uv run --script` there is no
+            # guarantee a python3 sits on PATH. digest_lite is stdlib-only.
+            # --until-line: the cursor will advance to `end`, so the digest must stop at exactly
+            # `end` too. Otherwise a line appended between the line count and the digest gets
+            # summarized now and again on the next run (a duplicated window boundary).
+            [
+                sys.executable,
+                str(digest_py),
+                str(transcript),
+                "--since-line",
+                str(since),
+                "--until-line",
+                str(end),
+            ] + ([] if budget is None else ["--budget", str(budget)]),
+            capture_output=True,
+            text=True,
+            timeout=SCRIBE_TIMEOUT,
+        )
+        if r.returncode != 0:
+            die(f"digest failed (rc={r.returncode}): {r.stderr.strip()}")
+        return r.stdout
+
+    digest = window_digest()
+    jdigest = None
+
+    def judge_digest():
+        """The judge's view of this window: the digest itself while it fits the judge's state,
+        else the window digested again under JEV_DIGEST_CHARS. Made at most once."""
+        nonlocal jdigest
+        if jdigest is None:
+            fits = len(digest) <= JEV_DIGEST_CHARS or jev_backend(hp) == "off"
+            jdigest = digest if fits else window_digest(JEV_DIGEST_CHARS)
+        return jdigest
 
     def save_cursor():
         cursors[args.session] = end
@@ -6300,7 +6377,7 @@ def cmd_scribe(args):
     hints = ""
     if jev_backend(hp) != "off":
         questions = jev_questions("scribe-gate")
-        answers, jmeta = judge(hp, "scribe-gate", {"digest": digest}, questions)
+        answers, jmeta = judge(hp, "scribe-gate", {"digest": judge_digest()}, questions)
         append_event(
             hp,
             {"ev": "clerk", "name": "jev-gate", "ok": jmeta["ok"], "ms": jmeta["ms"],
@@ -6346,7 +6423,7 @@ def cmd_scribe(args):
         save_cursor()
         append_event(hp, {**meter, "ok": False}, src="scribe")
         auto_distill(hp)
-        task_ends(hp, digest)
+        task_ends(hp, judge_digest())
         die(f"scribe failed: {reason} — dump: {p}")
 
     if rc != 0:
@@ -6375,12 +6452,25 @@ def cmd_scribe(args):
             return 2
         return 0 if isinstance(e.get("id"), str) and e["id"] in listed else 1
 
-    events = sorted(obj.get("events", []), key=order)
+    # Identical events collapse to their first (§3.5.6): measured, a clerk asked to record 7
+    # runs emitted the list ~5 times over, and every copy was processed and every rejected
+    # copy dumped on its own.
+    raw = obj.get("events", [])
+    seen, unique = set(), []
+    for e in raw:
+        key = json.dumps(e, sort_keys=True, ensure_ascii=False)
+        if key not in seen:
+            seen.add(key)
+            unique.append(e)
+    events = sorted(unique, key=order)
     # An id an outcome may name a native run by → the row that records the run: its own `ag-`
     # id when main's row is its record (native_refs) — the skills teach main that id, so main
     # judges the run by it — and a restated dispatch id (native_take).
     alias = {r["id"]: r["ref"] for r in native["runs"].values()
              if r["ref"] and r["ref"] != r["id"]} if native else {}
+    start = (window_start(transcript, since, end)
+             if any(isinstance(e, dict) and e.get("ev") == "directive" for e in events) else None)
+    rejected = []
     for e in events:
         # lifetime is retired (§3.2) and the prompt no longer asks for it; a clerk that still
         # says `turn` must not make its directive invisible to the view.
@@ -6392,11 +6482,18 @@ def cmd_scribe(args):
         taken, verr = native_guard(hp, native_take, hp, e, native, alias) or (False, None)
         if not taken:
             verr = (validate_event(e) or validate_scribe_event(e) or check_ref(hp, e)
-                    or check_scribe_outcome(hp, e))
+                    or check_scribe_outcome(hp, e) or check_scribe_directive(hp, e, start))
             if not verr:
                 append_event(hp, e, src="scribe")
         if verr:
-            dump_failure(hp, "scribe", f"{verr}\n\n{json.dumps(e, ensure_ascii=False, indent=2)}\n")
+            rejected.append(f"{verr}\n\n{json.dumps(e, ensure_ascii=False, indent=2)}\n")
+    if rejected:
+        # One run, one file: the reasons are per event, the record is per run (17 files from
+        # one run were once read by checkup as 17 lost records).
+        dupes = len(raw) - len(unique)
+        head = (f"{len(rejected)} of {len(unique)} events rejected in this scribe run"
+                + (f" ({dupes} identical repeats collapsed first)" if dupes else ""))
+        dump_failure(hp, "scribe", head + "\n\n" + "\n---\n\n".join(rejected))
     if obj.get("worklog", "").strip():
         worklog_append(hp, obj["worklog"].strip())
     settle()
@@ -6405,7 +6502,7 @@ def cmd_scribe(args):
     auto_distill(hp)
     # 9. Open tasks that look ended (DESIGN §3.5.9) — last, on both paths: it reads nothing
     # the scribe wrote (the clerk never writes tasks.yaml) and nothing waits on it.
-    task_ends(hp, digest)
+    task_ends(hp, judge_digest())
 
 
 # --- argparse -----------------------------------------------------------------
