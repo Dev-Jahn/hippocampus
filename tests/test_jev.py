@@ -307,10 +307,12 @@ def test_a_failed_gate_is_recorded_and_the_clerk_runs_unchanged(
     assert "test dummy work finished" in worklog_path(tmp_project).read_text(encoding="utf-8")
 
 
-def test_an_oversize_digest_sends_nothing_and_the_clerk_runs(
-    tmp_project, run_hippo, valid_mock_output, tmp_path
+def test_an_oversize_digest_reaches_the_judge_as_a_bounded_view(
+    tmp_project, run_hippo, valid_mock_output, tmp_path, cli
 ):
-    # ~60 user lines, each capped at 2500 chars by digest_lite — past the 110k budget.
+    """§3.5 step 2: user lines are kept whole, so 60 of them (~192k chars) are past the judge's
+    state limit. The clerk reads the whole digest; the judge reads the window digested again
+    under JEV_DIGEST_CHARS — the newest entries, under an OMITTED line saying what went."""
     transcript = tmp_project / "big.jsonl"
     with transcript.open("w", encoding="utf-8") as fh:
         for i in range(60):
@@ -328,11 +330,17 @@ def test_an_oversize_digest_sends_nothing_and_the_clerk_runs(
     )
     assert proc.returncode == 0, proc.stderr
 
-    assert not jev_capture.exists(), "an oversize digest must not be sent"
-    assert [e["ok"] for e in _clerk_rows(tmp_project, "jev-gate")] == [False]
-    assert "state exceeds jev budget" in proc.stderr
+    state = json.loads(jev_capture.read_text(encoding="utf-8"))["state"]
+    view = state["digest"]
+    assert len(view) <= cli.JEV_DIGEST_CHARS
+    assert len(json.dumps(state, ensure_ascii=False)) <= cli.JEV_STATE_BUDGET_CHARS
+    assert view.startswith("OMITTED: "), view[:200]
+    assert "line 59 " in view and "line 0 " not in view, "the oldest entries go first"
+    assert [e["ok"] for e in _clerk_rows(tmp_project, "jev-gate")] == [True]
     assert [e["ok"] for e in _clerk_rows(tmp_project, "turn-scribe")] == [True]
-    assert "# gate hints" not in _payload(clerk_capture)
+    payload = _payload(clerk_capture)
+    assert "# gate hints" in payload
+    assert "line 0 " in payload and "OMITTED" not in payload, "the clerk reads the whole digest"
 
 
 def test_with_the_backend_off_the_gate_leaves_no_trace(

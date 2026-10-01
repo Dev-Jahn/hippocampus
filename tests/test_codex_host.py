@@ -113,7 +113,7 @@ def test_digest_reduces_codex_rollout_to_the_shared_line_vocabulary(tmp_path):
     assert "USER: Use GPUs 0 and 1 only" in out
     assert "ASSIST: Understood" in out
     assert "TOOL exec:" in out and "pytest -q" in out
-    assert "RES: 3 passed" in out
+    assert "RES: ok" in out  # an ordinary command's result is one line (§3.5 step 2)
     assert "must stay hidden" not in out  # reasoning is excluded for the same reason as thinking
     assert "token_count" not in out
 

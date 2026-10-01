@@ -587,7 +587,45 @@ an agent's own (PreCompact, below).
 1. Non-blocking flock on `.hippo/scribe.lock` — if it is held, just exit (the cursor covers the gap
    on the next run automatically).
 2. Load this session's cursor from `cursors.json` → compress only the lines after it with
-   `digest_lite.py` (a light port of the digest logic proven on the 479MB audit).
+   `digest_lite.py`, one line per entry (`[N] USER|ASSIST|TOOL|RES|RES-ERR|COMPACTION: …`, N the
+   transcript line), the same vocabulary from both hosts. **What is kept is decided by role, not
+   by a per-line cap.** The caps it started with (user 2,500 chars, assistant 1,500, a result 350)
+   came with the audit tool (§8), not from the scribe's job, and they cut exactly what the scribe
+   records from. Measured on one iislab-slurm session (147 user turns), chars per turn: user
+   messages, task notifications included, median 198 / p90 9,760 / max 39,554; assistant text
+   1,015 / 2,820 / 6,783; hippo calls with their output p90 ~6k, max ~42k; Agent/Task/Workflow
+   launches with their reports p90 ~23k, max ~97k — and every other tool call with its result
+   median ~5.7k, p90 ~55k, max ~520k. The last is tool I/O main has already put in its own
+   words. So **whole, never cut**: user messages (a `queued_command` prompt — the user typing,
+   or a notification arriving, mid-turn — included; Claude's `isMeta` text, a loaded skill's
+   body, is the host's and left out), assistant text, compaction summaries, every hippo call
+   wherever it sits in a shell command and its output, Agent/Task/Workflow/SendMessage calls
+   and their results (codex: the `collaboration` tools), AskUserQuestion (its result is the
+   user's answer), and the git commands that are outcome signals — commit, merge, tag, push,
+   cherry-pick, revert, `gh pr merge` — with their output. **Every other call is one line**:
+   the tool and its target (a path, a pattern, a command's first line), its result `ok` or the
+   error's line (behind an exit code the last line — a test summary, a traceback's exception —
+   else the first), each bounded to 300 chars for display. A call answered inside the window
+   but made before it is classified from a scan of the earlier calls, so a foreground agent's
+   report stays whole. Codex batches several commands into one `exec` call; one hippo call in
+   the batch keeps the whole batch.
+
+   **One budget, explicit when it bites**: `DIGEST_BUDGET_CHARS = 300_000`. The smaller clerk
+   backend has a 200k-token context (codex luna's rollout reports 258k); less ~50k for the
+   prompt, the rosters and the reply leaves ~150k, and at 2 chars a token — under the 2.6–2.8
+   measured on two real scribe payloads, because a digest without tool output is denser in CJK
+   text — that is 300k chars. Over it, entries are left out oldest-first, one-line ones before
+   whole ones, and the digest opens with `OMITTED: … the oldest N one-line entries (C chars)
+   and M whole entries (D chars) are left out` — never silently. The judge (3b, 9) reads the
+   same window under a bound of its own: its state limit is 110k chars (§3.9), so a digest past
+   `JEV_DIGEST_CHARS = 100_000` is made again with `--budget 100000` — the same rule, the same
+   marker — and the clerk still reads the whole one. Measured on the same session's 106 Stop
+   windows (2026-10-01): old digest median 6.4k / p90 15.5k / max 128k chars, new 5.9k / 44.7k
+   / 232k; the budget bit in none; the judge got the bounded view in 3, where the old digest
+   had failed the judge's limit outright in 1. On a codex rollout (mlx-vlm, 72 turns) old
+   0.4k / 22.7k / 80k, new 0.5k / 47.7k / 249k — and the old digest had no USER line at all
+   there: that codex version writes user and assistant text as `response_item` messages, which
+   it did not read (an older version's `event_msg` twin of the same message is not repeated).
 3. **Deterministic prefilter**: if the digest has no TOOL or USER line, update the cursor and exit
    (zero model calls).
 3b. **The judge gate** (§3.9). The prefilter answers *did anything happen*; this answers *is any of
@@ -1772,7 +1810,9 @@ malformed JSON isolated into failures), and digest_lite basics. Around twenty of
 
 ## 8. Salvage record
 
-- The audit's digest logic (digest.py, proven on 479MB) → `scripts/digest_lite.py`
+- The audit's digest logic (digest.py, proven on 479MB) → `scripts/digest_lite.py`. Its line
+  vocabulary and `[N]` prefix stay; its per-line caps were replaced (2026-10-01) by kept-by-role
+  and one budget (§3.5 step 2) — they were the audit's, and cut what the scribe records from
 - The task registry concept (1,081 voluntary uses even after the plugin was switched off = revealed
   preference) → a thin rewrite
 - The body of the "fleet-dispatch" skill → the revised `skills/dispatch`

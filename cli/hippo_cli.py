@@ -443,6 +443,11 @@ JEV_DIR = CLERKS / "jev"  # question specs live as text (principle 8)
 # the API's own answer to an oversize state is a 422 — a gate that fails silently is worse
 # than one that says the state was too large.
 JEV_STATE_BUDGET_CHARS = 110_000
+# The judge's view of a scribe window (DESIGN §3.5 step 2). The clerk's digest budget (300k)
+# is far past the state limit, so a longer digest is made again under this bound — oldest
+# entries left out first, under an OMITTED line. 10k under the state budget: room for JSON
+# escaping (a char per line, quotes) and the task-end roster beside the digest.
+JEV_DIGEST_CHARS = 100_000
 JEV_RETRY_STATUS = (429, 529)  # the two transient ones; every other status is the answer
 JEV_RETRY_WAIT = 2.0
 JEV_SPECS = {}  # per-process cache: a spec file is read once
@@ -6303,28 +6308,44 @@ def cmd_scribe(args):
     digest_py = SCRIPTS / "digest_lite.py"
     if not digest_py.exists():
         die(f"no digest script: {digest_py}")
-    r = subprocess.run(
-        # sys.executable, not "python3": under `uv run --script` there is no
-        # guarantee a python3 sits on PATH. digest_lite is stdlib-only.
-        # --until-line: the cursor will advance to `end`, so the digest must stop at exactly
-        # `end` too. Otherwise a line appended between the line count and the digest gets
-        # summarized now and again on the next run (a duplicated window boundary).
-        [
-            sys.executable,
-            str(digest_py),
-            str(transcript),
-            "--since-line",
-            str(since),
-            "--until-line",
-            str(end),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=SCRIBE_TIMEOUT,
-    )
-    if r.returncode != 0:
-        die(f"digest failed (rc={r.returncode}): {r.stderr.strip()}")
-    digest = r.stdout
+
+    def window_digest(budget=None):
+        """digest_lite over this window; `budget` bounds it in chars, digest_lite's own when
+        None (DESIGN §3.5 step 2)."""
+        r = subprocess.run(
+            # sys.executable, not "python3": under `uv run --script` there is no
+            # guarantee a python3 sits on PATH. digest_lite is stdlib-only.
+            # --until-line: the cursor will advance to `end`, so the digest must stop at exactly
+            # `end` too. Otherwise a line appended between the line count and the digest gets
+            # summarized now and again on the next run (a duplicated window boundary).
+            [
+                sys.executable,
+                str(digest_py),
+                str(transcript),
+                "--since-line",
+                str(since),
+                "--until-line",
+                str(end),
+            ] + ([] if budget is None else ["--budget", str(budget)]),
+            capture_output=True,
+            text=True,
+            timeout=SCRIBE_TIMEOUT,
+        )
+        if r.returncode != 0:
+            die(f"digest failed (rc={r.returncode}): {r.stderr.strip()}")
+        return r.stdout
+
+    digest = window_digest()
+    jdigest = None
+
+    def judge_digest():
+        """The judge's view of this window: the digest itself while it fits the judge's state,
+        else the window digested again under JEV_DIGEST_CHARS. Made at most once."""
+        nonlocal jdigest
+        if jdigest is None:
+            fits = len(digest) <= JEV_DIGEST_CHARS or jev_backend(hp) == "off"
+            jdigest = digest if fits else window_digest(JEV_DIGEST_CHARS)
+        return jdigest
 
     def save_cursor():
         cursors[args.session] = end
@@ -6356,7 +6377,7 @@ def cmd_scribe(args):
     hints = ""
     if jev_backend(hp) != "off":
         questions = jev_questions("scribe-gate")
-        answers, jmeta = judge(hp, "scribe-gate", {"digest": digest}, questions)
+        answers, jmeta = judge(hp, "scribe-gate", {"digest": judge_digest()}, questions)
         append_event(
             hp,
             {"ev": "clerk", "name": "jev-gate", "ok": jmeta["ok"], "ms": jmeta["ms"],
@@ -6402,7 +6423,7 @@ def cmd_scribe(args):
         save_cursor()
         append_event(hp, {**meter, "ok": False}, src="scribe")
         auto_distill(hp)
-        task_ends(hp, digest)
+        task_ends(hp, judge_digest())
         die(f"scribe failed: {reason} — dump: {p}")
 
     if rc != 0:
@@ -6481,7 +6502,7 @@ def cmd_scribe(args):
     auto_distill(hp)
     # 9. Open tasks that look ended (DESIGN §3.5.9) — last, on both paths: it reads nothing
     # the scribe wrote (the clerk never writes tasks.yaml) and nothing waits on it.
-    task_ends(hp, digest)
+    task_ends(hp, judge_digest())
 
 
 # --- argparse -----------------------------------------------------------------
