@@ -182,6 +182,11 @@ optional `src` (`scribe|cli|wrapper|executor`).
 - `ev:usage` (§9.6, built in 1.10.0) is what a lane actually cost — written by the wrapper at
   lane exit from what it observed (the rollout's cumulative token count with billing breakdown;
   the "tokens used" footer as total-only fallback; nothing → no event, a gap is a gap).
+  A lane's count is the rollout's at its end less the last one written before the lane
+  started (1.16.0): a resumed session appends to its rollout and the count runs on, so the
+  hand resume measured in §3.6 ("Resuming a lane") recorded the session's whole 7,653,151
+  tokens, the 416,650 of the lane it resumed among them. The footer has no such baseline — it
+  is the session's running count too — which is why it stays the fallback.
   `ref` joins a dispatch fail-closed. Dollars are computed at read time from the shipped
   `prices.yaml` (USD per 1M, refreshed each release, `as_of` printed by PRIORS so staleness is
   visible); a model off the sheet renders as unpriced and named, never guessed. A replaced
@@ -1093,15 +1098,22 @@ one line per new codex command (`lane <scope> · <elapsed> · exec: <command, on
 chars>`, recognized only in codex's own `<shell> -lc '…' in <cwd>` shape — 1,657 of 1,657 in
 sixteen real logs) and per agent message (`… · said: <first sentence, ≤120 chars>`), at most
 one line per 3s with the newest event winning, then the final line (`exited rc=0 · 14 cmds ·
-187,135 tokens · raw log <path>`) and the triage line. No compact line may read as a prompt:
+187,135 tokens · raw log <path>`), the triage line and, for a lane that can be resumed, the
+`resume:` line ("Resuming a lane" below). No compact line may read as a prompt:
 Claude Code wakes main when a background shell has not grown for 45s and its last line matches
 one of seven patterns in its binary — `(y/n)`, `[y/n]`, `(yes/no)`, a `Do you|Would you|Shall
 I|Are you sure|Ready to …?` question, `Press any key|Enter` (no word boundary: `express any key`
 matches), `Continue?`, `Overwrite?` — so the three characters those need — `?`, the space after
 `press`, the slash of `y/n` — are swapped for look-alikes. `.hippo/lanes/<id>.json` holds only
-what the rollout cannot give back cheaply — `id scope exec pid pgid started codex_session cmds
-last last_at log report` (paths absolute: the record is read from any cwd), then `status` (`exited|killed`), `rc`, `signal`, `triage` and, written
-last, `ended` — rewritten whole at the stream's cadence, and a new lane start prunes lane files
+what the rollout cannot give back cheaply — `id scope kind exec pid pgid started codex_session
+cmds last last_at log report` (paths absolute: the record is read from any cwd), `task` and
+`depth` when set, `codex_args` (codex's arguments as a resume takes them — "Resuming a lane"
+below — absent when no prompt could be told apart), `attempts` (one `{started, rc, reason}` per
+run of codex, `reason ∈ {exit, capacity, signal, timeout}`; more than one only when the wrapper
+resumed it, "A model at capacity" below) and `waiting` (`{resume, of, until}`, only while a
+capacity wait runs), then `status` (`exited|killed`), `rc`, `signal`, `triage`, `cause` (the
+judge's, when it named one) and, written last, `ended` — rewritten whole at the stream's
+cadence, and a new lane start prunes lane files
 older than 7 days (no schedule, §4). Batch lanes run through the same machinery: `<id>.err`
 keeps its shape as the raw log, the compact lines join the batch's stderr, and each lane gets
 its record under its dispatch id — with `check_rc` and `check` (the check output's path) where
@@ -1116,7 +1128,9 @@ it lingers, and whatever of the group outlives codex is killed with it), the rec
 was SIGKILLed with its wrapper before either was on record — and gets its rc when codex exits,
 `ev:usage` comes from the rollout as on any exit, triage runs when the judge is on, and the
 wrapper exits 128+signal (a batch stops launching, signals every running lane and exits the
-same way; rerunning it resumes). The handlers hold only while codex can run: a signal during
+same way; rerunning it resumes). A signal during a capacity wait ends the lane at once, killed,
+with the rc of the attempt before it — no resume starts after a stop. The handlers hold only
+while codex can run, its waits included: a signal during
 the launch notes, or during a batch's harvest, takes its default action and stops the wrapper. Before 1.15.0 a killed lane recorded
 no rc, no usage and no triage — and Claude Code does kill background shells: under critical
 memory pressure once main has been idle 30 minutes with no agent running, and with a stopped
@@ -1128,10 +1142,13 @@ not fit in 1.5s is the part that may go missing.
 record says it ended or the window passes. The record chooses the window: 540s (under the Bash
 tool's 600s ceiling), or 60s for a lane whose record says `face: "workflow"` (1.16.0, "Two
 faces" below); `--for` overrides it. Still
-running, it prints one line — `lane <id> running · <elapsed> · <cmds> cmds · last: <event>` —
+running, it prints one line — `lane <id> running · <elapsed> · <cmds> cmds · last: <event>`,
+or during a capacity wait `… · <cmds> cmds · model at capacity — resume 1 of 3 in 42s` —
 and exits 3; ended, it prints the final lines — `lane <id> exited rc=0 after 5m12s · 14 cmds ·
-<scope>`, a batch entry's `check: pass|fail rc=N · <path>`, the triage line when there is one,
-`report: <path>`, `raw log: <path>` — and exits 0; a `batch:<bid>` id reads a batch record;
+<scope>`, `attempts: rc=1 model at capacity · rc=0` when the wrapper resumed it, a batch
+entry's `check: pass|fail rc=N · <path>`, the triage line when there is one, `report: <path>`,
+`raw log: <path>` and, for a lane that can be resumed, `resume: <command>` — and exits 0; a
+`batch:<bid>` id reads a batch record;
 no record is 2, outside a project too (like the launch, this surface is never silent: a
 watcher told nothing would read it as an end). It reads `.hippo/lanes/` and writes nothing.
 A record without `ended` whose
@@ -1145,10 +1162,20 @@ blocking foreground call, never a sleep, is what keeps it open.
 "hippo:lane", description: "<scope>", prompt: "<the hippo dispatch command>")` gets a row in the
 agent panel — Enter opens its transcript, x stops it, and the kill trap records the stop. The agent
 is sonnet at low effort with Bash alone (hippo's cheap Claude tier; it runs no haiku — §3.5.4): it
-runs the command verbatim in the background, reads the id off the first `dispatch:<id>` or
-`batch:<id>` in its output (a whole batch is one row, "Two faces" below),
-loops `--watch` in the foreground, and replies with the final lines, which reach main as the one
-completion notification. Measured before building (spike, 2026-09-24): an agent that ends its turn
+runs the command verbatim in the background with `timeout: 2147483647`, reads the id off the
+first `dispatch:<id>` or `batch:<id>` in its output (a whole batch is one row, "Two faces"
+below), loops `--watch` in the foreground, and replies with the final lines, which reach main as
+the one completion notification. The timeout is there because a background Bash call's
+`timeout` is its deadline: measured (b200-cluster, 2026-10-01), lane d1034f0c, relayed with
+none, was SIGTERMed at exactly 30m00s, and Claude Code told the relay "Background command … was
+stopped after reaching its background time limit". Read from the 2.1.286 binary: the default is
+1,800,000 ms, the maximum is the larger of 7,200,000 ms and what `BASH_MAX_TIMEOUT_MS` allows,
+capped at 2³¹−1, and a request above the maximum is clamped to it, not refused (a probe with
+2147483647 on a background call was accepted). So the relay asks for 2³¹−1 and gets whatever
+the host allows — two hours, or more where the user raised `BASH_MAX_TIMEOUT_MS` in Claude
+Code's environment (settings.json `env`); a lane that may run longer needs exactly that, and
+the dispatch skill says so. Every background launch of `hippo dispatch` passes it, the plain
+Bash form and a batch included. Measured before building (spike, 2026-09-24): an agent that ends its turn
 while its background job runs shows `completed` on its row, and main then gets an interim
 notification plus an extra wake-up turn when the job ends; an agent whose turn stays open on
 blocking calls causes neither. Measured end to end (2.1.281, a stub codex behind a real hippo:lane,
@@ -1278,9 +1305,65 @@ into a temp file of the wrapper's own (prepended like `--fast`, so it lands ahea
 subcommand; a caller's own `-o`/`--output-last-message` is read instead and left in place),
 the stderr tail the wrapper already forwarded, `check_output: null`, and the changes in `-C
 <dir>` or the cwd — and one stderr line reports it: `dispatch: triage escalate (done .41 ·
-blocked .03 · ask .62 · creep .05 · verify yes)`. The same function triages a batch lane, and
+blocked .03 · ask .62 · creep .05 · verify yes)`, with ` · cause <cause>` after the route when
+the judge named one (below). The same function triages a batch lane, and
 the route lands as `ev:triage` (§3.2). stdout is untouched throughout. Without the key none of
 this exists — no capture flag in codex's argv, no request, no row, no note.
+
+**Resuming a lane** (1.16.0). Measured (b200-cluster, 2026-10-01): lane d2c305dd ended rc 1 on
+codex's `Selected model is at capacity` line — twice, then the footer — and the judge's row
+said `cause: transient`, but every line main saw said only `triage failed (done .03 · blocked
+.23 · ask .14 · creep .15 · verify yes)`. Main read the raw log for the reason, then worked out
+by itself that a lane resumes as `hippo dispatch … -- <the same codex args> resume <session>
+"<prompt>"` (codex's `exec resume [SESSION_ID] [PROMPT]`, codex's own options before `resume`,
+as `codex exec resume --help` takes them on 0.159.2). So the triage line names the cause
+whenever the judge named one — `triage failed · cause transient (done .03 · blocked .23 · ask
+.14 · creep .15 · verify yes)`, one shape on the stream, in the record's `triage` (with `cause`
+beside it) and from `--watch`; the harvest's route column, which named a failure's cause
+already, now names any lane's. And a lane that ended killed, or whose cause is one a resume can
+clear (`transient`, `environment`), ends on one more line: `resume: hippo dispatch --kind <kind>
+--scope '<scope> (resumed)' [--task <task>] [--depth N] -- <codex args> resume <session>
+"Continue the same task from where you stopped; do not redo finished steps; end with the report
+your original prompt asked for."`. It is built from the record alone — `kind`, `task`, `depth`
+and `codex_args` go on record at the launch, so a wrapper killed before its last line still
+leaves `--watch` what it needs — quoted with `shlex` (a scope carrying quotes, `$(…)` or a
+newline is data to the shell), the fixed continuation in double quotes. `codex_args` is codex's
+arguments with the prompt taken off where codex's grammar puts it (last, after any `--`), a
+`resume …` the lane was itself launched with taken off too, and `-C <cwd>` added when they
+name no working root, so the line resumes where the lane worked from any directory. No session
+id, or no prompt to take off: no line — a missing line costs main a look at the record, a
+broken one costs a lane. A batch lane's line has the same form and resumes it as a single
+dispatch: the journal never sees that lane, and a later rerun of the batch still relaunches the
+entry fresh — main picks one. A resume is a new dispatch with its own usage (§3.2, `ev:usage`).
+
+**A model at capacity** (1.16.0). The stop above was a harness loss: at 15:59Z, 5 minutes into
+a gpt-6.1-sol high lane, codex printed `ERROR: Selected model is at capacity. Please try a
+different model.` twice and exited 1; main's resume of the same session, a moment later, was
+accepted at once and ran to rc 0. Of the 17 lane records surviving on that machine it is the
+one capacity failure; across all ledgers 3 failures carry cause `transient`. So the wrapper
+resumes such a lane itself, with no flag and no setting: when codex exits non-zero, unsignalled,
+with a session id, and a stderr line of that attempt starts `ERROR: ` and one of
+`CAPACITY_SIGNATURES` — today exactly the measured one; a new signature needs a measured log,
+because a guessed one would resume failures a resume repeats — it waits `CAPACITY_WAITS` (60s,
+120s, 240s) and runs `codex exec <codex_args> resume <session> "Your previous turn stopped on a
+server capacity error before you finished. Continue the same task from where you stopped; …"`,
+up to three times. It stays one lane: one dispatch id and record, whose `attempts` holds each
+run with its rc and why it ended; one raw log, each resume after a separator line; one report,
+the last attempt's; one `ev:usage` at the end, read once from the rollout, which a resumed
+session appends to with its count running on (measured: no reset across the resume above) —
+summed per attempt, the first attempt's tokens would count up to four times; and one triage,
+at the very end. The stream says `lane <scope> · <elapsed> · model at capacity — resuming in
+60s (resume 1 of 3)` — no `?`, no `y/n`: the shell is silent for the whole wait, and its last
+line must match none of the seven wake patterns — then `resumed: session <id> (resume 1 of 3)`,
+or `model at capacity — all 3 resumes used; the lane ends`; the record's `waiting` gives
+`--watch` its running line. The kill trap holds through the waits: a signal ends the lane at
+once, killed. A batch lane gets the same through the same machinery — one journal exit, at the
+end — and its entry's `timeout` bounds the whole lane, waits included: a wait that would end
+past it is not started (`not resumed: the entry's timeout ends first`), and the lane ends on
+the attempt before. This is no judgment taken from main: the wrapper reads no report and
+decides nothing about the work — it asks again a server that refused to answer, on the one
+line that says so, and every attempt stays visible on the record and the stream; the triage
+and the verdict come once, over the lane as it finally ended.
 
 **Batch** (1.12.0). One launch per call was the right shape until the batches were not: a
 measured 222-lane "fleet" cost $2 to run, while the orchestrator model driving its launch/harvest
@@ -1349,7 +1432,8 @@ else `escalate`) and a `verify` hint, against thresholds that sit in `clerks/jev
 next to the questions they belong to. A route is evidence of exactly the standing a check rc
 has — `accept-candidate` is not acceptance, and batch still writes no `ev:outcome`. The record
 lands in the journal as a `triage` line with every probability and in the ledger as
-`ev:triage` (§3.2), and the progress line gains `triage=<route>`. Over budget, the state is
+`ev:triage` (§3.2), and the progress line gains `triage=<route>` (and `cause=<cause>`
+when the judge named one, 1.16.0). Over budget, the state is
 trimmed in one fixed order (stderr, brief, changes, then the report from its *head*, since a
 lane's summary of itself is at the end) and the record names what was cut — the journal line
 and the `ev:triage` row's `trimmed` — no silent shortening, and no answer invented for a judge
@@ -1454,11 +1538,13 @@ with their price:
   every minute instead of every nine: one Activity line a minute per lane — `lane <id> running ·
   3m12s · 14 cmds · last: exec: pytest -q` — at ≈$0.005 a minute on top of the relay's ≈$0.02
   start and end (the 24s measurement above, at Sonnet 5.5 prices). The window is the record's
-  choice, not the relay's: `agents/lane.md` stays one fixed body with no number in it, and an
+  choice, not the relay's: `agents/lane.md` stays one fixed body with no window in it, and an
   explicit `--for` still wins. A Workflow of relays is no run to the scribe (§3.5.3c), so that
   cost is recorded nowhere — it is the price of watching. After the Workflow, `hippo dispatch
   --batch <manifest>` harvests; like any rerun it first relaunches what failed with a cause a
-  relaunch could clear, so after a failure it goes the one-row way.
+  relaunch could clear, so after a failure it goes the one-row way. Each relay runs its own
+  lane as a background call of its own, so each lane has its own deadline (the lane agent
+  above): the face is not bounded by the host's limit as a whole.
 - **One row — a wide batch.** `Agent(subagent_type: "hippo:lane", description: <batch scope>,
   prompt: "hippo dispatch --batch <manifest>")`. A full run prints `batch:<bid>` (`b` + 32 hex)
   first on stdout and keeps `.hippo/lanes/<bid>.json` — `id manifest stem pid started total
@@ -1478,7 +1564,10 @@ with their price:
   the batch's handler: the lanes are signalled as before, and the batch record says `killed`
   within 0.5s — the main thread wakes twice a second while lanes run. Outside the lanes, in the
   plan pass or the harvest, the signal now ends the run where it stands and is recorded, where
-  before it took its default action with nothing on record.
+  before it took its default action with nothing on record. The whole batch is one background
+  call, so the host's deadline bounds the whole batch — two hours unless `BASH_MAX_TIMEOUT_MS`
+  is raised (the lane agent above); a wide batch that may run longer needs it raised, or the
+  Workflow face.
 
 Codex has no agent panel and keeps the plain Bash form of both.
 

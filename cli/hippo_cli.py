@@ -2576,6 +2576,18 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 # command's output never does.
 CODEX_EXEC_RE = re.compile(r"^(?:\S*/)?(?:ba|z|da|k)?sh -l?c (['\"])(.*?)(?:\1 in [/~].*)?$")
 SENTENCE_RE = re.compile(r"^(.+?[.!?。！？])(?=\s|$)")
+# A model-capacity failure, as codex prints it: its own `ERROR: ` line on stderr, then a
+# non-zero exit. Measured once (b200-cluster, 2026-10-01T15:59Z, codex-cli 0.159.2, gpt-6.1-sol
+# high, 5 minutes in): `ERROR: Selected model is at capacity. Please try a different model.`
+# twice, the footer, rc 1 — and the same session resumed by hand was accepted at once. Only a
+# line seen in a real log joins this tuple: a guessed one would resume a lane whose failure a
+# resume repeats.
+CAPACITY_SIGNATURES = ("Selected model is at capacity",)
+CAPACITY_WAITS = (60, 120, 240)  # seconds before resume 1, 2, 3 of a lane at capacity
+RESUME_CONTINUE = ("Continue the same task from where you stopped; do not redo finished steps; "
+                   "end with the report your original prompt asked for.")
+CAPACITY_CONTINUE = ("Your previous turn stopped on a server capacity error before you "
+                     "finished. " + RESUME_CONTINUE)
 
 
 def lane_elapsed(seconds):
@@ -2659,21 +2671,35 @@ class Lane:
     turns it into two things: the compact event stream on the wrapper's stderr (one line per
     command and per agent message, at most one per LANE_EVERY), and the record in
     .hippo/lanes/<id>.json — the few facts the rollout cannot give back cheaply. It also owns
-    the lane's signal: codex runs in a session of its own, so a signal reaches it only here."""
+    the lane's signal: codex runs in a session of its own, so a signal reaches it only here.
 
-    def __init__(self, did, scope, exec_, record, log, report, out=None, face=None):
+    `kind`, `task`, `depth` and `codex_args` (codex's arguments without the prompt — None when
+    there is no prompt to take off) are what a `resume:` line is made of (resume_command):
+    on record from the start, because a killed wrapper may not live to print one."""
+
+    def __init__(self, did, scope, exec_, record, log, report, kind, task="", depth=0,
+                 codex_args=None, out=None, face=None):
         self.path = record  # None: no .hippo/, no record — the stream still runs
         self.out = out or sys.stderr
         self.label = one_line(scope, LANE_SCOPE_CHARS)
         self.t0 = time.monotonic()
-        self.rec = {"id": did, "scope": scope, "exec": exec_, "pid": os.getpid(), "pgid": None,
-                    "started": now_iso(), "codex_session": None, "cmds": 0, "last": None,
-                    "last_at": None, "log": str(Path(log).absolute()),
+        self.since = time.time()  # what the session's rollout held before this is not its cost
+        self.rec = {"id": did, "scope": scope, "kind": kind, "exec": exec_, "pid": os.getpid(),
+                    "pgid": None, "started": now_iso(), "codex_session": None, "cmds": 0,
+                    "last": None, "last_at": None, "log": str(Path(log).absolute()),
                     "report": str(Path(report).absolute()) if report else None}
+        if task:
+            self.rec["task"] = task
+        if depth:
+            self.rec["depth"] = depth
+        if codex_args is not None:
+            self.rec["codex_args"] = codex_args
+        self.rec["attempts"] = []
         if face:  # `workflow`: launched by `--batch … --entry`, so --watch polls each minute
             self.rec["face"] = face
         self.session_id = self.model = ""
         self.footer_total = None
+        self.capacity = False  # this attempt's stderr carried a CAPACITY_SIGNATURES line
         self.tail = collections.deque(maxlen=400)  # what triage reads of stderr — never more
         self.signal = None
         self._signal_at = None
@@ -2696,6 +2722,8 @@ class Lane:
         two event shapes."""
         self.tail.append(line)
         s = ANSI_RE.sub("", line).strip()
+        if any(s.startswith(f"ERROR: {sig}") for sig in CAPACITY_SIGNATURES):
+            self.capacity = True
         if not self.session_id and s.startswith("session id:"):
             self.session_id = s.split(":", 1)[1].strip()
             self.rec["codex_session"] = self.session_id
@@ -2732,6 +2760,45 @@ class Lane:
         line = f"lane {self.label} · {lane_elapsed(time.monotonic() - self.t0)} · {text}"
         self.out.write(unprompt(line) + "\n")
         self.out.flush()
+
+    def announce(self, text):
+        """An event of the wrapper's own, on the stream and the record at once — after any
+        event still pending, so the stream keeps its order."""
+        if self._pending is not None:
+            self.say(self._pending)
+            self._pending = None
+        self._said = time.monotonic()
+        self.rec["last"], self.rec["last_at"] = text, now_iso()
+        self.say(text)
+        self.write()
+
+    def attempt_started(self):
+        self.capacity, self._prev, self._header = False, "", None
+        self.rec.pop("waiting", None)
+        self.rec["attempts"].append({"started": now_iso(), "rc": None, "reason": None})
+        self.write()
+
+    def attempt_ended(self, rc, timed_out):
+        """→ why this attempt ended: `signal`, `timeout`, `capacity` (non-zero on a
+        CAPACITY_SIGNATURES line) or `exit`. On record with the next write."""
+        reason = ("signal" if self.signal is not None else "timeout" if timed_out else
+                  "capacity" if rc != 0 and self.capacity else "exit")
+        self.rec["attempts"][-1].update(rc=rc, reason=reason)
+        return reason
+
+    def wait_to_resume(self, seconds, n):
+        """The wait before resume `n`: on the stream, on record for --watch (`waiting`), and cut
+        short by a stop — a signal now ends the lane at once → False. The kill trap is the same
+        one: the handlers stay installed, and the caller goes straight to finish."""
+        of = len(CAPACITY_WAITS)
+        until = datetime.fromtimestamp(time.time() + seconds, timezone.utc)
+        self.rec["waiting"] = {"resume": n, "of": of,
+                               "until": until.strftime("%Y-%m-%dT%H:%M:%SZ")}
+        self.announce(f"model at capacity — resuming in {seconds:g}s (resume {n} of {of})")
+        end = time.monotonic() + seconds
+        while self.signal is None and (left := end - time.monotonic()) > 0:
+            time.sleep(min(0.2, left))
+        return self.signal is None
 
     def tick(self):
         """Emit the newest pending event and write the record, when the cadence allows — and a
@@ -2791,18 +2858,57 @@ class Lane:
         if self._pending is not None:
             self.say(self._pending)
             self._pending = None
+        self.rec.pop("waiting", None)
         self.rec.update({"status": status, "rc": rc})
         if self.signal is not None:
             self.rec["signal"] = signal.Signals(self.signal).name
             self.kill(signal.SIGKILL)  # a stopped lane leaves nothing of its group behind
         self.write()
 
-    def close(self, triage_line=None):
-        """`ended` is written last, so a reader that sees it has every final line."""
-        if triage_line:
-            self.rec["triage"] = triage_line
+    def close(self, t=None):
+        """The triage `t` (the judge's reading, or None) as its line and its cause, then
+        `ended`, written last: a reader that sees it has every final line."""
+        if t and t.get("route"):
+            self.rec["triage"] = triage_line(t)
+        if t and triage_cause(t) in CAUSES:
+            self.rec["cause"] = triage_cause(t)
         self.rec["ended"] = now_iso()
         self.write()
+
+
+def run_lane(lane, run_once, raw, codex_args, deadline=None):
+    """codex for one lane, launch to end (§3.6) → (rc, timed_out) of its last attempt.
+    `run_once(tail)` runs codex once — as launched when `tail` is None, else as `codex exec
+    <codex_args> <tail>` — and returns (rc, timed_out). An attempt that ended non-zero on a
+    CAPACITY_SIGNATURES line, unsignalled and in time, with a session to resume, is followed
+    by a resume of that session after the next wait in CAPACITY_WAITS — a harness loss
+    recovered, not a judgment: the verdict stays main's and every attempt is on record. It
+    stays one lane: one record (its `attempts`), one raw log (a separator line before each
+    resume), the last attempt's report, and the caller's one usage row and one triage."""
+    tail, of = None, len(CAPACITY_WAITS)
+    while True:
+        lane.attempt_started()
+        rc, timed_out = run_once(tail)
+        n = len(lane.rec["attempts"])  # the resume this one would be
+        if (lane.attempt_ended(rc, timed_out) != "capacity" or codex_args is None
+                or not lane.session_id):
+            return rc, timed_out
+        if n > of:
+            lane.announce(f"model at capacity — all {of} resumes used; the lane ends")
+            return rc, timed_out
+        wait = CAPACITY_WAITS[n - 1]
+        if deadline is not None and time.monotonic() + wait >= deadline:
+            lane.announce("model at capacity — not resumed: the entry's timeout ends first")
+            return rc, timed_out
+        if not lane.wait_to_resume(wait, n):
+            return rc, timed_out
+        sep = (f"\n--- hippo: resume {n} of {of} of session {lane.session_id} after a "
+               f"model-capacity error · {now_iso()} ---\n")
+        raw.write(sep.encode())
+        raw.flush()
+        lane.tail.append(sep)  # the judge reads where one attempt ends and the next begins
+        lane.announce(f"resumed: session {lane.session_id} (resume {n} of {of})")
+        tail = ["resume", lane.session_id, CAPACITY_CONTINUE]
 
 
 def pump_lane(child, lane, raw, deadline=None):
@@ -2917,7 +3023,8 @@ def run_dispatch(argv):
         fd, name = tempfile.mkstemp(prefix=f"hippo-{did}-", suffix=".log")
         os.close(fd)
         log, report_copy, record = Path(name), None, None
-    lane = Lane(did, scope, exec_label(rest), record, log, report_copy)
+    lane = Lane(did, scope, exec_label(rest), record, log, report_copy, kind, task, depth,
+                codex_resume_args(rest, Path.cwd()))
     print(f"dispatch:{did}", flush=True)
     # The lane inherits its own dispatch id (§9.2): every hippo write it makes arrives as
     # src=executor, and `log outcome` needs no --ref. Set even when the record failed — the
@@ -2952,32 +3059,42 @@ def run_dispatch(argv):
     # than being swallowed while codex starts anyway only to be killed.
     for s in LANE_SIGNALS:
         signal.signal(s, lambda signum, _frame: lane.stop(signum))
-    try:
-        child = subprocess.Popen(
-            ["codex", "exec", *rest], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, start_new_session=True,
-        )
-    except OSError as err:
-        lane.finish(127, "exited")
-        lane.close()
-        die(f"dispatch: could not run codex: {err}", 127)
-    lane.launched(child.pid)
-    with contextlib.ExitStack() as files:
-        copy = files.enter_context(report_copy.open("wb")) if report_copy else None
-        tee = threading.Thread(target=tee_stdout, args=(child.stdout, copy), daemon=True)
-        tee.start()
-        pump_lane(child, lane, files.enter_context(log.open("wb")))
-        rc = child.wait()
-        tee.join(timeout=LANE_DRAIN)
+    capture = rest[:2] if own_report else []
+    with log.open("wb") as raw:
+
+        def run_once(tail):
+            if tail is not None and own_report:
+                report.write_bytes(b"")  # the last attempt's message, never an earlier one's
+            argv = rest if tail is None else [*capture, *lane.rec["codex_args"], *tail]
+            try:
+                child = subprocess.Popen(
+                    ["codex", "exec", *argv], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, start_new_session=True,
+                )
+            except OSError as err:
+                print(f"dispatch: could not run codex: {err}", file=sys.stderr)
+                raw.write(f"could not run codex: {err}\n".encode())
+                return 127, False
+            lane.launched(child.pid)
+            with contextlib.ExitStack() as files:
+                copy = files.enter_context(report_copy.open("wb")) if report_copy else None
+                tee = threading.Thread(target=tee_stdout, args=(child.stdout, copy), daemon=True)
+                tee.start()
+                pump_lane(child, lane, raw)
+                rc = child.wait()
+                tee.join(timeout=LANE_DRAIN)
+            return rc, False
+
+        rc, _ = run_lane(lane, run_once, raw, lane.rec.get("codex_args"))
     status = "killed" if lane.signal is not None else "exited"
     lane.finish(rc, status)
-    usage = collect_usage(lane.session_id, lane.model, lane.footer_total)
+    usage = collect_usage(lane.session_id, lane.model, lane.footer_total, lane.since)
     if bad is None and usage is not None:
         append_event(hp, {"ev": "usage", "ref": did, **usage}, src="wrapper")
     how = f"killed by {lane.rec['signal']}" if lane.signal is not None else "exited"
     tokens = f" · {usage['tokens']:,} tokens" if usage else ""
     lane.say(f"{how} rc={rc} · {lane.rec['cmds']} cmds{tokens} · raw log {log}")
-    line = None
+    t = None
     if on:
         ex = {"rc": rc, "check_rc": None}
         state = triage_state(scope, kind, brief, ex,
@@ -2985,13 +3102,15 @@ def run_dispatch(argv):
                              _read_text(report) or None, strip_codex_noise("".join(lane.tail)),
                              None, lane_dir(rest, Path.cwd()))
         t = triage(hp, state, ex, did if bad is None else None)
-        line = triage_line(t) if t["route"] else None
-        print(f"dispatch: {line}" if line else
+        print(f"dispatch: {triage_line(t)}" if t["route"] else
               f"dispatch: no triage — the judge did not answer ({t['jev']['reason']})",
               file=sys.stderr)
         if own_report:
             report.unlink(missing_ok=True)
-    lane.close(line)
+    lane.close(t)
+    cmd = resume_command(lane.rec)
+    if cmd:  # last: what main runs to go on from here, read off the record as --watch reads it
+        print(f"resume: {cmd}", file=sys.stderr)
     sys.exit(128 + lane.signal if lane.signal is not None else rc)
 
 
@@ -3084,6 +3203,11 @@ def watch_lines(rec, state):
     last = rec.get("last") or "no event yet"
     if state == "running":
         took = lane_elapsed(_iso_seconds(rec.get("started")))
+        wait = rec.get("waiting")
+        if isinstance(wait, dict):  # between attempts: the wait is what it is doing
+            left = lane_elapsed(-_iso_seconds(wait.get("until")))
+            return [f"lane {did} running · {took} · {cmds} cmds · model at capacity — resume "
+                    f"{wait.get('resume')} of {wait.get('of')} in {left}"]
         return [f"lane {did} running · {took} · {cmds} cmds · last: {last}"]
     if state == "lost":
         return [f"lane {did} lost — its wrapper (pid {rec.get('pid')}) is gone and recorded no "
@@ -3093,6 +3217,11 @@ def watch_lines(rec, state):
            "timed out" if rec.get("timed_out") else rec.get("status", "ended"))
     rc = "" if rec.get("rc") is None else f" rc={rec['rc']}"  # none: SIGKILLed before codex exited
     lines = [f"lane {did} {how}{rc} after {took} · {cmds} cmds · {rec.get('scope')}"]
+    attempts = rec.get("attempts") or []
+    if len(attempts) > 1:  # the wrapper resumed it: every attempt, as it ended
+        lines.append("attempts: " + " · ".join(
+            f"rc={a.get('rc')}" + (" model at capacity" if a.get("reason") == "capacity" else "")
+            for a in attempts))
     if "check_rc" in rec:  # a batch entry's check — evidence its relay's reply must carry
         crc = rec["check_rc"]
         lines.append(f"check: {check_mark(crc)}{'' if crc in (None, 0) else f' rc={crc}'} · "
@@ -3105,6 +3234,9 @@ def watch_lines(rec, state):
     else:
         lines.append("report: none — the lane printed no final message")
     lines.append(f"raw log: {rec.get('log')}")
+    cmd = resume_command(rec)
+    if cmd:
+        lines.append(f"resume: {cmd}")
     return lines
 
 
@@ -3215,6 +3347,46 @@ def prompt_of(rest):
     worse than none."""
     last = rest[-1] if rest else ""
     return last if not last.startswith("-") and len(last) > 40 else None
+
+
+def codex_resume_args(args, cwd):
+    """codex's arguments to resume a lane's session with → a list, or None when the last
+    argument is no prompt. The prompt comes off where codex's grammar puts it — last, with a
+    `--` before it — and so does a `resume …` the lane was itself launched with: `resume
+    <session> "<prompt>"` is appended to what is left. codex's own options stay before
+    `resume`, as `codex exec resume --help` (0.159.2) takes them. With no `-C` they gain `-C
+    <cwd>`: a resume run from another directory still works where the lane did."""
+    if len(args) >= 2 and args[-2] == "--":
+        base = args[:-2]
+    elif args and not args[-1].startswith("-"):
+        base = args[:-1]
+    else:
+        return None
+    if "resume" in base:
+        base = base[: base.index("resume")]
+    return base if codex_cd(base) is not None else [*base, "-C", str(cwd)]
+
+
+def resume_command(rec):
+    """The `hippo dispatch` command that resumes a lane's codex session, from its record — for
+    a lane that ended killed, or whose triage named a cause a resume can clear (transient,
+    environment) — or None. None too without a session id or the arguments to resume with:
+    no line rather than a broken command. It launches a new single dispatch — a batch lane's
+    included — with the lane's labels and " (resumed)" on its scope."""
+    if not (rec.get("status") == "killed" or rec.get("cause") in RELAUNCHABLE_CAUSES):
+        return None
+    sid, args, kind = rec.get("codex_session"), rec.get("codex_args"), rec.get("kind")
+    if not sid or not isinstance(args, list) or not kind:
+        return None
+    scope = str(rec.get("scope") or "")
+    argv = ["hippo", "dispatch", "--kind", kind, "--scope",
+            scope if scope.endswith(" (resumed)") else f"{scope} (resumed)"]
+    if rec.get("task"):
+        argv += ["--task", rec["task"]]
+    if rec.get("depth"):
+        argv += ["--depth", str(rec["depth"])]
+    # The continuation is fixed text with nothing a shell expands, so double quotes hold it.
+    return f'{shlex.join([*argv, "--", *args, "resume", sid])} "{RESUME_CONTINUE}"'
 
 
 def output_last_message(rest):
@@ -3526,32 +3698,6 @@ def adapter_argv(en):
             f"model_reasoning_effort={en['effort']}", *en["args"], "--", en["prompt"]]
 
 
-def codex_usage(err_path):
-    """Banner and footer land in <id>.err (measured 0.144.6: "session id: …", "model: …" and
-    the two-line "tokens used" footer all ride stderr) — the same prev-line walk as
-    run_dispatch, then the same rollout/footer collection."""
-    try:
-        text = err_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    session_id = model = ""
-    footer_total = None
-    prev = ""
-    for line in text.splitlines():
-        s = line.strip()
-        if not session_id and s.startswith("session id:"):
-            session_id = s.split(":", 1)[1].strip()
-        elif not model and s.startswith("model:"):
-            model = s.split(":", 1)[1].strip()
-        elif prev == "tokens used":
-            try:
-                footer_total = int(s.replace(",", ""))
-            except ValueError:
-                pass
-        prev = s
-    return collect_usage(session_id, model, footer_total)
-
-
 def journal_state(journal):
     """Previous attempts per id, the ids that are DONE (latest exit line has rc==0 and
     check_rc null-or-0), and the latest exit and triage record per id. A relaunch mints a NEW
@@ -3659,23 +3805,28 @@ def strip_codex_noise(text, limit=TRIAGE_STDERR_TAIL):
     return "\n".join(keep)[-limit:]
 
 
+def codex_cd(args):
+    """The working root codex's args name with `-C`/`--cd`, as given, or None."""
+    for i, a in enumerate(args or []):
+        if a == "--":
+            break
+        if a in ("-C", "--cd") and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith("--cd="):
+            return a[len("--cd="):]
+        if a.startswith("-C") and len(a) > 2:
+            return a[2:]
+    return None
+
+
 def lane_dir(args, cwd):
     """Where the lane worked: `-C <worktree>` when its codex args carry one (dispatch skill §5),
     resolved the way codex resolves it — against the child's own cwd — else that cwd: the
     entry's `cwd` in a batch."""
-    for i, a in enumerate(args or []):
-        if a == "--":
-            break
-        raw = None
-        if a in ("-C", "--cd") and i + 1 < len(args):
-            raw = args[i + 1]
-        elif a.startswith("--cd="):
-            raw = a[len("--cd="):]
-        elif a.startswith("-C") and len(a) > 2:
-            raw = a[2:]
-        if raw:
-            p = Path(raw)
-            return p if p.is_absolute() else Path(cwd) / p
+    raw = codex_cd(args)
+    if raw:
+        p = Path(raw)
+        return p if p.is_absolute() else Path(cwd) / p
     return Path(cwd)
 
 
@@ -3882,12 +4033,17 @@ def triage(hp, state, ex, ref, src="wrapper"):
 
 
 def triage_line(t):
-    """The route and the numbers behind it, as one stderr line reads them."""
+    """The route, the cause when the judge named one — what the ev:triage row records — and
+    the numbers behind the route, as one line reads them: `triage failed · cause transient
+    (done .03 · blocked .23 · ask .14 · creep .15 · verify yes)`. The one shape every surface
+    prints: the wrapper's stream, the lane record, --watch."""
     a = t["answers"] or {}
     nums = " · ".join(f"{label} {_pp(a.get(q))}" for label, q in
                       (("done", "claims_done"), ("blocked", "reports_blocked"),
                        ("ask", "needs_decision"), ("creep", "scope_creep")))
-    return f"triage {t['route']} ({nums} · verify {'yes' if t['verify'] else 'no'})"
+    cause = triage_cause(t)
+    named = f" · cause {cause}" if cause in CAUSES else ""
+    return f"triage {t['route']}{named} ({nums} · verify {'yes' if t['verify'] else 'no'})"
 
 
 def lane_report(en, outdir):
@@ -4008,7 +4164,10 @@ def harvest_row(r, clusters, outdir, cwd):
         route = f"failed {clusters.get(en['id'], '-')} {cause.get('choice') or '-'}"
         numbers = f"cause {_pp(cause.get('confidence'))}"
     elif ans:
-        route = r["route"] or "-"
+        # A lane that did not fail may still carry a cause (an escalation over a missing tool):
+        # named where the judge named one, as on every triage line.
+        named = cause.get("choice") in CAUSES
+        route = (r["route"] or "-") + (f" {cause['choice']}" if named else "")
         numbers = (f"done {_pp(ans.get('claims_done'))} "
                    f"blocked {_pp(ans.get('reports_blocked'))} "
                    f"ask {_pp(ans.get('needs_decision'))} "
@@ -4824,42 +4983,54 @@ class BatchRun:
         env = {**os.environ, "HIPPO_DISPATCH": did, "HIPPO_DEPTH": str(en["depth"]),
                "PATH": lane_path(), **({"HIPPO_DIR": str(hp)} if hp is not None else {})}
         cmd = adapter_argv(en)
-        timed_out = False
         # The same lane machinery as a single dispatch (§3.6): <id>.err keeps its shape (the
         # raw stderr, byte for byte), the compact stream joins the batch's own stderr, and the
         # record lands in .hippo/lanes/ under the dispatch id.
         lane = Lane(did, en["scope"], e["exec"], self.ld / f"{did}.json" if self.ld else None,
-                    err_p, out_p, face=self.face)
+                    err_p, out_p, en["kind"], en["task"], en["depth"],
+                    codex_resume_args(cmd[2:], en["cwd"]), face=self.face)
         if self.face:
             # The Workflow face's relay greps this, as it does a single dispatch's — printed
             # once the record exists, so a watcher never races it into existence.
             print(f"dispatch:{did}", flush=True)
-        with out_p.open("wb") as fo, err_p.open("wb") as fe:
-            try:
-                child = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=fo,
-                                         stderr=subprocess.PIPE, env=env, cwd=en["cwd"],
-                                         start_new_session=True)
-            except OSError as oe:
-                fe.write(f"could not run {cmd[0]}: {oe}\n".encode())
-                rc = 127
-            else:
-                with BATCH_LOCK:
-                    self.running.add(lane)
-                    if self.signaled:  # it launched as the signal landed
-                        lane.stop(self.signaled[0])
+        # The entry's timeout bounds the whole lane, capacity waits and resumes included.
+        deadline = None if en["timeout"] is None else time.monotonic() + en["timeout"]
+
+        def run_once(tail):
+            argv = cmd if tail is None else ["codex", "exec", *lane.rec["codex_args"], *tail]
+            with out_p.open("wb") as fo:  # the report is the last attempt's
+                try:
+                    child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=fo,
+                                             stderr=subprocess.PIPE, env=env, cwd=en["cwd"],
+                                             start_new_session=True)
+                except OSError as oe:
+                    fe.write(f"could not run {argv[0]}: {oe}\n".encode())
+                    return 127, False
                 lane.launched(child.pid)
-                self.note(f"{lane.label}: started")
-                deadline = None if en["timeout"] is None else time.monotonic() + en["timeout"]
+                if tail is None:
+                    self.note(f"{lane.label}: started")
                 timed_out = pump_lane(child, lane, fe, deadline)
-                rc = child.wait()
-                with BATCH_LOCK:
-                    self.running.discard(lane)
+                return child.wait(), timed_out
+
+        # Running from before the launch to after the last attempt: a signal reaches the lane
+        # in a capacity wait too, and one that lands before codex starts kills it as it starts.
+        with BATCH_LOCK:
+            self.running.add(lane)
+            if self.signaled:
+                lane.stop(self.signaled[0])
+        try:
+            with err_p.open("wb") as fe:
+                rc, timed_out = run_lane(lane, run_once, fe, lane.rec.get("codex_args"),
+                                         deadline)
+        finally:
+            with BATCH_LOCK:
+                self.running.discard(lane)
         if timed_out:
             lane.rec["timed_out"] = True
         lane.finish(rc, "killed" if lane.signal is not None or timed_out else "exited")
 
         # Cost was incurred whatever rc says; a parse gap stays a gap in the ledger too.
-        usage = codex_usage(err_p)
+        usage = collect_usage(lane.session_id, lane.model, lane.footer_total, lane.since)
         # A usage row must join to a dispatch row: when the dispatch record failed, the
         # tokens still reach the journal below, just not the ledger.
         if usage is not None and hp is not None and bad is None:
@@ -4889,12 +5060,12 @@ class BatchRun:
         # Triage at lane exit (§3.6): one calibrated read of the whole report, while the
         # files are hot and main is not in the loop. With the judge off it does not exist —
         # no record, no column, no changed line.
-        route = None
+        route = t = None
         if self.on:
             claim = executor_claims(read_ledger(hp)).get(did) if hp is not None else None
             t = triage_entry(hp, en, rec, self.outdir, claim, self.jrnl)
             route = t["route"]
-        lane.close(triage_line(t) if route else None)
+        lane.close(t)
 
         ok = rc == 0 and check_rc in (None, 0)
         with BATCH_LOCK:
@@ -4905,6 +5076,8 @@ class BatchRun:
             if self.on:
                 # A triage that failed shows as "-": the gap is a fact about the batch too.
                 line += f" triage={route or '-'}"
+                if lane.rec.get("cause"):
+                    line += f" cause={lane.rec['cause']}"
             print(line, file=sys.stderr)
         how = (f"killed by {lane.rec['signal']}" if lane.rec.get("signal") else
                "timed out" if timed_out else f"exited rc={rc}")
@@ -5162,13 +5335,33 @@ def _find_key(obj, key):
     return None
 
 
-def collect_usage(session_id, model, footer_total):
+def _rollout_time(row):
+    """A rollout row's own timestamp in epoch seconds, or None when it has none."""
+    try:
+        return datetime.fromisoformat(row["timestamp"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def collect_usage(session_id, model, footer_total, since=None):
     """What the lane cost, from the best witness available (§9.6).
 
-    Preferred: the rollout's final cumulative token count — it carries the billing breakdown
-    (input / cached / output+reasoning). Fallback: the "tokens used" footer, total only.
-    Neither there → None; a gap is a gap, and no number is ever invented."""
-    u = None
+    Preferred: the rollout's cumulative token count — it carries the billing breakdown
+    (input / cached / output+reasoning). A resumed session appends to its rollout and the
+    count runs on (measured, codex-cli 0.159.2: 416,650 when a lane stopped at capacity,
+    7,653,151 at the end of its resume, no reset in between), so a lane's cost is the count
+    at its end less the last one written before it started (`since`, epoch seconds): a lane
+    that resumes another's session is not billed that lane's tokens again, and the attempts
+    of a lane that resumed itself are one count. Fallback: the "tokens used" footer, total
+    only — the session's running count too, so it carries no such baseline. Neither there →
+    None; a gap is a gap, and no number is ever invented."""
+    def counts(c):
+        return {"tokens": int(c["total_tokens"]), "tin": int(c["input_tokens"]),
+                "tcached": int(c.get("cached_input_tokens") or 0),
+                "tout": (int(c.get("output_tokens") or 0)
+                         + int(c.get("reasoning_output_tokens") or 0))}
+
+    u = base = None
     if session_id:
         hits = sorted((Path.home() / ".codex" / "sessions").glob(
             f"*/*/*/rollout-*-{session_id}.jsonl"))
@@ -5179,25 +5372,25 @@ def collect_usage(session_id, model, footer_total):
                     if "total_token_usage" not in line:
                         continue
                     try:
-                        found = _find_key(json.loads(line), "total_token_usage")
+                        row = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    found = _find_key(row, "total_token_usage")
                     if isinstance(found, dict):
-                        u = found  # cumulative — the last one is the lane's total
+                        u = found  # cumulative — the last one is the session's total
+                        t = _rollout_time(row)
+                        if since is not None and t is not None and t < since:
+                            base = found
             except OSError:
                 u = None
     if u is not None:
         try:
-            out = {
-                "tokens": int(u["total_tokens"]),
-                "tin": int(u["input_tokens"]),
-                "tcached": int(u.get("cached_input_tokens") or 0),
-                "tout": (int(u.get("output_tokens") or 0)
-                         + int(u.get("reasoning_output_tokens") or 0)),
-            }
+            out, past = counts(u), counts(base) if base is not None else None
         except (KeyError, TypeError, ValueError):
-            out = None
+            out = past = None
         if out is not None:
+            if past is not None and out["tokens"] >= past["tokens"]:  # less: a restarted count
+                out = {k: out[k] - past[k] for k in out}
             if model:
                 out["model"] = model
             return out

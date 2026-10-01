@@ -11,6 +11,7 @@ its per-entry .err shape and goes through the same machinery.
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -252,8 +253,13 @@ def test_a_signal_is_forwarded_and_the_lane_recorded_killed(tmp_project, tmp_pat
         os.kill(grandchild, 0)
     (u,) = [e for e in read_ledger(tmp_project) if e.get("ev") == "usage"]
     assert u["ref"] == did and u["tokens"] == 1100000, "usage from the rollout, killed or not"
-    assert err.decode().splitlines()[-1].split(" · ", 2)[2].startswith(
+    assert err.decode().splitlines()[-2].split(" · ", 2)[2].startswith(
         f"killed by {sig.name} rc={rec['rc']} · 1 cmds · 1,100,000 tokens")
+    # A killed lane with a session ends on the command that resumes it.
+    assert err.decode().splitlines()[-1] == (
+        "resume: " + shlex.join(["hippo", "dispatch", "--kind", "impl", "--scope",
+                                 "doomed (resumed)", "--", "-C", str(tmp_project), "resume",
+                                 SESSION]) + f' "{hippo_cli.RESUME_CONTINUE}"')
 
 
 def test_old_lane_files_are_pruned_when_a_lane_starts(tmp_project, tmp_path):
@@ -586,6 +592,21 @@ def test_the_lane_agent_is_a_low_effort_sonnet_relay_with_bash_alone():
         "lane", "sonnet", "low", "Bash")
     assert "run_in_background: true" in text and "hippo dispatch --watch <id>" in text
     assert "grep -m1 -oE '(batch:b|dispatch:d)[0-9a-f]{32}' <path>" in text
+
+
+def test_every_background_launch_asks_for_the_hosts_longest_deadline():
+    """A background Bash call's `timeout` is its deadline: with none, Claude Code stopped a
+    relayed lane at exactly 30m00s (measured, b200-cluster 2026-10-01). 2.1.286 clamps a
+    larger request to its maximum — 2h, or more under a raised BASH_MAX_TIMEOUT_MS — so the
+    relay's launch and the skill's plain and batch launches ask for 2^31-1."""
+    lane = (REPO_ROOT / "agents" / "lane.md").read_text(encoding="utf-8")
+    (step,) = re.findall(r"^1\. Run the command.*?(?=^2\. )", lane, re.M | re.S)
+    assert "`run_in_background: true` and `timeout: 2147483647`" in " ".join(step.split())
+    skill = " ".join((REPO_ROOT / "skills" / "dispatch" / "SKILL.md").read_text(
+        encoding="utf-8").split())
+    assert "plain form and batch alike, passes `timeout: 2147483647`" in skill
+    assert "`BASH_MAX_TIMEOUT_MS` raised in Claude Code's environment" in skill
+    assert "in the Workflow face each lane has its own deadline" in skill
 
 
 def _lane_agent_wait(path, window=None):

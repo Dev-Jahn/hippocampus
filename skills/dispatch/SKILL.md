@@ -66,6 +66,12 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   through `run_in_background`, never nohup/disown (orphans) or `> log 2>&1` (raw stderr stays in
   `.hippo/lanes/<id>.log`, the report in `<id>.out`). A killed lane still records rc and usage.
   A codex argument that collides with a wrapper flag goes after `--`.
+- **Deadlines (Claude Code)**: a background call's `timeout` is its deadline — 30 minutes when
+  none is given — so every background `hippo dispatch`, plain form and batch alike, passes
+  `timeout: 2147483647` (the lane agent does); the host clamps it to its maximum, 2 hours. A
+  lane or a one-row batch that may run past 2 hours needs `BASH_MAX_TIMEOUT_MS` raised in Claude
+  Code's environment (settings.json `"env"`), or the host stops it at 2h; in the Workflow face
+  each lane has its own deadline.
 - `--depth 1` = an orchestrator lane that may spawn; its children start at 0. Lane-origin
   launches pass a dollar breaker ($500 per parent per 24h, `dispatch: {max_wave_usd: N}` in
   `.hippo/config.yaml`); main is never gated.
@@ -74,8 +80,11 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   update deletes them.
 - **Neutral vocabulary**: GPU memory "overlap", "contamination", "injection" tripped the
   executor's content filter ten times — write safety statements in neutral academic terms.
-- To steer a lane mid-flight, kill it and resume by explicit session id (never `--last` when
-  lanes run in parallel).
+- **Resume, do not relaunch**: a lane that ended killed or on a `transient`/`environment` cause
+  ends with `resume: <command>` — the same codex session as a new dispatch. Run it as printed,
+  or swap its closing prompt to steer (never `--last` when lanes run in parallel). A
+  model-capacity error the wrapper resumes by itself, up to 3 times, after 1, 2 and 4 minutes —
+  the final lines then carry `attempts:`.
 
 ## 2b. Batch
 
@@ -107,7 +116,8 @@ entries:
 - **The journal decides**: no journal → everything launches; some entries unfinished → it
   resumes by itself (lanes whose triage named `capability` or `spec` are skipped — they need a
   new brief); all done → nothing launches. Every run ends with the harvest table. Delete the
-  journal to start over.
+  journal to start over. A batch lane's `resume:` line runs outside the journal: a rerun still
+  relaunches that entry fresh — use one or the other.
 - **`--dry-run` is the plan**: difficulty per brief, the suggested exec, notes. An entry with
   no `model` launches on the suggestion when `TYPESAFE_API_KEY` is set; without it, `model` is
   required. The manifest is per-batch data, never standing config.
