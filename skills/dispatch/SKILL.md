@@ -45,10 +45,10 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
 - **On Claude Code, launch a single lane through the lane agent**: `Agent(subagent_type:
   "hippo:lane", description: "<scope>", prompt: "<the command above>")` — an agent-panel row
   with the lane's latest command or message (x stops it, recorded), one notification at the
-  end: rc, triage, report and raw-log paths. A Workflow script calls it as `agent("<command on
-  one line>", {agentType: 'hippo:lane'})`, no schema, when a later step reads the lane's
-  result; many lanes go to `--batch` (§2b). The plain Bash form stays for Codex and for a lane
-  launched in a lane.
+  end: rc, triage, report and raw-log paths, and the resume command when there is one. A
+  Workflow script calls it as `agent("<command on one line>", {agentType: 'hippo:lane'})`, no
+  schema, when a later step reads the lane's result; many lanes go to `--batch` (§2b). The
+  plain Bash form stays for Codex and for a lane launched in a lane.
 - **`--kind` is the PRIORS axis — reuse a tag**: `impl fix perf verify audit design research
   spike docs infra chore` (one ledger carried 26 tags over 108 dispatches, 19 used once). The
   subject goes in `--scope`.
@@ -80,11 +80,14 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   update deletes them.
 - **Neutral vocabulary**: GPU memory "overlap", "contamination", "injection" tripped the
   executor's content filter ten times — write safety statements in neutral academic terms.
-- **Resume, do not relaunch**: a lane that ended killed or on a `transient`/`environment` cause
-  ends with `resume: <command>` — the same codex session as a new dispatch. Run it as printed,
-  or swap its closing prompt to steer (never `--last` when lanes run in parallel). A
-  model-capacity error the wrapper resumes by itself, up to 3 times, after 1, 2 and 4 minutes —
-  the final lines then carry `attempts:`.
+- **Resume, do not relaunch**: a lane that ended killed, at model capacity or on a
+  `transient`/`environment` cause ends with `resume: <command>` — the same codex session as a
+  new dispatch. Run it as printed, or swap its closing prompt to steer — in single quotes, or
+  `"$p"` from a single-quoted variable, so `$` and backticks stay literal (never `--last` when
+  lanes run in parallel). A resumed lane has no brief of its own, so its triage is weak
+  evidence: read its report. A model-capacity error the wrapper resumes by itself, up to 3
+  times, after 1, 2 and 4 minutes — the stream says so as it waits, and `--watch` lists the
+  `attempts:`.
 
 ## 2b. Batch
 

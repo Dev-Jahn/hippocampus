@@ -16,8 +16,8 @@ failure is never resumed.
 The lanes run in-process (hippo_cli.run_dispatch / run_batch) so CAPACITY_WAITS can be cut to
 hundredths of a second by monkeypatch; no test here sleeps for the real schedule. The stub
 codex is a python script on PATH: it records its argv, prints the measured banner, appends a
-cumulative token_count row to its session's rollout, and fails on the capacity line for its
-first $STUB_FAIL_RUNS runs.
+cumulative token_count row to its session's rollout, and fails for its first $STUB_FAIL_RUNS
+runs — on the capacity line, or as $STUB_MODE says.
 """
 import json
 import os
@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,13 @@ log = Path(os.environ["STUB_ARGV_LOG"])
 runs = (len(log.read_text().splitlines()) if log.exists() else 0) + 1
 with log.open("a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\n")
+# STUB_MODE: how a failing run fails — one mode for every run, or a comma list, one per run
+# (the last repeats).
+modes = os.environ.get("STUB_MODE", "capacity").split(",")
+mode = modes[min(runs, len(modes)) - 1]
+failing = runs <= int(os.environ.get("STUB_FAIL_RUNS", "0"))
+if failing and mode == "silent":  # gone before a byte of stderr
+    sys.exit(1)
 sid = os.environ.get("STUB_SESSION", "")
 err = sys.stderr
 err.write("OpenAI Codex v0.159.2\n--------\nmodel: gpt-6.1-sol\n")
@@ -91,13 +99,32 @@ if runs == int(os.environ.get("STUB_HANG_RUN", "0")):
     err.write("exec\n/bin/zsh -lc 'sleep 60' in /w\n")
     err.flush()
     time.sleep(60)
-if runs <= int(os.environ.get("STUB_FAIL_RUNS", "0")):
-    if os.environ.get("STUB_MODE", "capacity") == "capacity":
-        err.write("ERROR: Selected model is at capacity. Please try a different model.\n" * 2)
+capacity = "ERROR: Selected model is at capacity. Please try a different model.\n"
+if failing:
+    if runs == int(os.environ.get("STUB_PARTIAL_RUN", "0")):  # a message, then the failure
+        sys.stdout.write(f"Partial from attempt {runs}.\n")
+        sys.stdout.flush()
+        if out:
+            Path(out).write_text(f"Partial from attempt {runs}.\n")
+    if mode == "capacity":
+        err.write(capacity * 2)
+    elif mode == "quoted":  # a command's output, printed raw as codex does, quotes the line
+        err.write("exec\n/bin/zsh -lc 'cat old.log' in /w\n succeeded in 0ms:\n" + capacity
+                  + "ERROR: unexpected status 500 Internal Server Error\n")
+    elif mode == "grep":  # the quote is the last line, but not codex's own
+        err.write("exec\n/bin/zsh -lc \"grep -rn 'at capacity' .\" in /w\n succeeded in 0ms:\n"
+                  "./old.log:7:" + capacity + "  " + capacity)
     else:
         err.write("ERROR: unexpected status 500 Internal Server Error\n")
+    err.flush()
+    if os.environ.get("STUB_LINGER"):  # still running after its last word, and says so
+        import time
+        Path(str(log) + ".lingering").touch()
+        time.sleep(float(os.environ["STUB_LINGER"]))
     err.write(footer)
     sys.exit(1)
+if mode == "recovered":  # the line, and then the turn went on to finish
+    err.write(capacity)
 msg = f"Report from attempt {runs}.\n"
 sys.stdout.write(msg)
 if out:
@@ -178,6 +205,7 @@ def _resume_line(argv):
 def test_a_lane_at_capacity_resumes_its_session_and_stays_one_lane(lab, capfd, monkeypatch,
                                                                     tmp_path):
     monkeypatch.setenv("STUB_FAIL_RUNS", "2")
+    monkeypatch.setenv("STUB_PARTIAL_RUN", "1")
     capture = tmp_path / "sent.json"
     _judge(monkeypatch, tmp_path, ACCEPT, capture)
     code, did, out, err = _dispatch(capfd, PROMPT)
@@ -203,13 +231,14 @@ def test_a_lane_at_capacity_resumes_its_session_and_stays_one_lane(lab, capfd, m
     assert rec["codex_args"] == ["-m", "gpt-6.1-sol", "-c", "model_reasoning_effort=high",
                                  "--skip-git-repo-check", "-C", lab.cwd]
 
-    # One raw log with a separator before each resume; the report is the last attempt's.
+    # One raw log with a separator before each resume; the report is the last attempt's, though
+    # stdout passed every attempt's through (attempt 1 printed a message before it failed).
     log = Path(rec["log"]).read_text(encoding="utf-8")
     assert log.count(CAPACITY_LINE) == 4
     assert log.count(f"--- hippo: resume 1 of 3 of session {SID} after a model-capacity") == 1
     assert log.count(f"--- hippo: resume 2 of 3 of session {SID} after a model-capacity") == 1
     assert Path(rec["report"]).read_text(encoding="utf-8") == "Report from attempt 3.\n"
-    assert out.splitlines()[1:] == ["Report from attempt 3."], "stdout passes through: only the last attempt printed"
+    assert out.splitlines()[1:] == ["Partial from attempt 1.", "Report from attempt 3."]
 
     # One usage row for the whole lane: the rollout's count is cumulative across the resumes
     # (1000 a run), so it is read once at the end — not three cumulative reads summed.
@@ -217,11 +246,16 @@ def test_a_lane_at_capacity_resumes_its_session_and_stays_one_lane(lab, capfd, m
     assert (u["ref"], u["tokens"], u["tin"], u["tcached"], u["tout"]) == (
         did, 3000, 2700, 1500, 300)
 
-    # One triage, at the very end, over the last attempt's report.
+    # One triage, at the very end, over the last attempt's report — and over every attempt's
+    # stderr, with the separators that say where each resume began.
     (t,) = _rows(lab.project, "triage")
     assert t["ref"] == did and t["route"] == "accept-candidate"
     assert [e["name"] for e in _rows(lab.project, "clerk")].count("jev-harvest") == 1
-    assert json.loads(capture.read_text())["state"]["report"] == "Report from attempt 3.\n"
+    state = json.loads(capture.read_text())["state"]
+    assert state["report"] == "Report from attempt 3.\n"
+    assert "Working on attempt 1." in state["stderr_tail"]
+    assert f"--- hippo: resume 2 of 3 of session {SID}" in state["stderr_tail"]
+    assert state["brief"] == PROMPT, "the auto-resume keeps the lane's own brief"
 
     # The stream says what it is waiting for, and no line of it reads as a prompt.
     waits = [ln for ln in err if "model at capacity" in ln]
@@ -237,7 +271,10 @@ def test_a_lane_at_capacity_resumes_its_session_and_stays_one_lane(lab, capfd, m
 def test_a_lane_still_at_capacity_after_three_resumes_ends_and_says_how(lab, capfd,
                                                                         monkeypatch, tmp_path):
     monkeypatch.setenv("STUB_FAIL_RUNS", "99")
-    _judge(monkeypatch, tmp_path, {**ACCEPT, "cause": {"choice": "transient", "confidence": 0.9}})
+    monkeypatch.setenv("STUB_PARTIAL_RUN", "1")
+    capture = tmp_path / "sent.json"
+    _judge(monkeypatch, tmp_path, {**ACCEPT, "cause": {"choice": "transient", "confidence": 0.9}},
+           capture)
     code, did, _, err = _dispatch(capfd, PROMPT)
     assert code == 1
     assert len(lab.argvs()) == 4, "the launch and three resumes, no more"
@@ -247,6 +284,9 @@ def test_a_lane_still_at_capacity_after_three_resumes_ends_and_says_how(lab, cap
     (u,) = _rows(lab.project, "usage")
     assert u["tokens"] == 4000
     assert len(_rows(lab.project, "triage")) == 1
+    # Attempt 1's message is no report of the lane's: the last attempt printed none.
+    assert json.loads(capture.read_text())["state"]["report"] is None
+    assert Path(rec["report"]).read_text(encoding="utf-8") == ""
 
     # The cause on the triage line, then the command that resumes the session, last.
     assert any(ln.endswith("model at capacity — all 3 resumes used; the lane ends")
@@ -259,6 +299,9 @@ def test_a_lane_still_at_capacity_after_three_resumes_ends_and_says_how(lab, cap
                            "-m", "gpt-6.1-sol", "-c", "model_reasoning_effort=high",
                            "--skip-git-repo-check", "-C", lab.cwd, "resume", SID])
     assert err[-1] == resume
+    # The wrapper knows the lane stopped at capacity, so the line needs no judge to name it.
+    assert hippo_cli.resume_command({k: v for k, v in rec.items() if k != "cause"}) == \
+        resume.removeprefix("resume: ")
 
     # --watch reads the same lines off the record: the attempts, the triage, the resume.
     lines = hippo_cli.watch_lines(rec, "ended")
@@ -295,6 +338,7 @@ def test_a_signal_during_the_wait_ends_the_lane_at_once_killed(lab, capfd, monke
     assert (rec["status"], rec["signal"], rec["rc"]) == ("killed", "SIGTERM", 1)
     assert [(a["rc"], a["reason"]) for a in rec["attempts"]] == [(1, "capacity")]
     assert "waiting" not in rec and rec["ended"]
+    assert rec["pgid"] is None, "no codex ran in the wait: no group to signal"
     assert err[-2].split(" · ", 2)[2].startswith("killed by SIGTERM rc=1 · 0 cmds")
     assert err[-1].startswith("resume: hippo dispatch --kind impl --scope 'accounts (resumed)'")
 
@@ -338,12 +382,22 @@ def test_the_watch_line_shows_the_wait():
     assert " · 13 cmds · model at capacity — resume 1 of 3 in 4" in line, line
 
 
-@pytest.mark.parametrize("mode, session", [("error", SID), ("capacity", "")])
+def test_the_resume_schedule_is_the_one_the_skill_promises():
+    """Every other test cuts the waits short; the real ones are what main is told to expect."""
+    assert hippo_cli.CAPACITY_WAITS == (60, 120, 240)
+    skill = " ".join((REPO_ROOT / "skills" / "dispatch" / "SKILL.md").read_text(
+        encoding="utf-8").split())
+    assert "up to 3 times, after 1, 2 and 4 minutes" in skill
+
+
+@pytest.mark.parametrize("mode, session", [("error", SID), ("quoted", SID), ("grep", SID),
+                                           ("capacity", "")])
 def test_no_resume_without_the_capacity_line_or_a_session(lab, capfd, monkeypatch, tmp_path,
                                                           mode, session):
-    """Another failure is not a capacity loss — a resume would repeat it. And with no session
-    id there is nothing to resume: no attempt, and no resume line even when the cause would
-    earn one."""
+    """Another failure is not a capacity loss — a resume would repeat it — and a command's
+    output quoting the line is not codex's own: printed raw before another failure (`quoted`),
+    or last but not at a line's start (`grep`). With no session id there is nothing to resume:
+    no attempt, and no resume line even when the cause would earn one."""
     monkeypatch.setenv("STUB_FAIL_RUNS", "99")
     monkeypatch.setenv("STUB_MODE", mode)
     monkeypatch.setenv("STUB_SESSION", session)
@@ -352,7 +406,7 @@ def test_no_resume_without_the_capacity_line_or_a_session(lab, capfd, monkeypatc
     assert code == 1 and len(lab.argvs()) == 1
     rec = lab.record(did)
     assert [(a["rc"], a["reason"]) for a in rec["attempts"]] == [
-        (1, "exit" if mode == "error" else "capacity")]
+        (1, "capacity" if mode == "capacity" else "exit")]
     assert not any("resuming" in ln for ln in err)
     if session:
         assert err[-1].startswith("resume: "), "a transient cause with a session earns one"
@@ -361,16 +415,81 @@ def test_no_resume_without_the_capacity_line_or_a_session(lab, capfd, monkeypatc
         assert hippo_cli.resume_command(rec) is None
 
 
+@pytest.mark.parametrize("then", ["error", "silent"])
+def test_a_resume_that_fails_another_way_is_not_resumed_again(lab, capfd, monkeypatch, then):
+    """The capacity reading is the attempt's own: a resume that fails on something else, or
+    dies before a byte of stderr, ends the lane there."""
+    monkeypatch.setenv("STUB_FAIL_RUNS", "99")
+    monkeypatch.setenv("STUB_MODE", f"capacity,{then}")
+    code, did, _, _ = _dispatch(capfd, PROMPT)
+    assert code == 1 and len(lab.argvs()) == 2
+    assert [(a["rc"], a["reason"]) for a in lab.record(did)["attempts"]] == [
+        (1, "capacity"), (1, "exit")]
+
+
+def test_a_lane_that_printed_the_line_and_exited_0_is_left_alone(lab, capfd, monkeypatch):
+    """rc 0 is a finished lane, whatever its stderr said on the way: a resume would pay for the
+    work twice."""
+    monkeypatch.setenv("STUB_MODE", "recovered")
+    code, did, _, _ = _dispatch(capfd, PROMPT)
+    assert code == 0 and len(lab.argvs()) == 1
+    assert [(a["rc"], a["reason"]) for a in lab.record(did)["attempts"]] == [(0, "exit")]
+
+
+def test_a_stop_after_the_capacity_line_is_a_stop(lab, capfd, monkeypatch):
+    """codex still running after the line when the signal lands: the attempt ended on the
+    signal, and no resume starts."""
+    monkeypatch.setenv("STUB_FAIL_RUNS", "99")
+    monkeypatch.setenv("STUB_LINGER", "30")
+    marker = Path(str(lab.argv_log) + ".lingering")
+    sent = {}
+
+    def stop_after_the_line():
+        t_end = time.monotonic() + 30
+        while time.monotonic() < t_end:
+            if marker.exists():
+                time.sleep(0.5)  # the wrapper reads the line meanwhile
+                if signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL:
+                    sent["at"] = time.monotonic()
+                    os.kill(os.getpid(), signal.SIGTERM)
+                return
+            time.sleep(0.05)
+
+    threading.Thread(target=stop_after_the_line, daemon=True).start()
+    code, did, _, err = _dispatch(capfd, PROMPT)
+    assert code == 128 + signal.SIGTERM and "at" in sent
+    assert len(lab.argvs()) == 1 and not any("resuming" in ln for ln in err)
+    assert [(a["rc"], a["reason"]) for a in lab.record(did)["attempts"]] == [
+        (-signal.SIGTERM, "signal")]
+
+
+def test_a_codex_that_cannot_start_ends_the_lane_on_record(lab, capfd, monkeypatch, tmp_path):
+    nothing = tmp_path / "nothing"
+    nothing.mkdir()
+    monkeypatch.setenv("PATH", str(nothing))
+    code, did, _, err = _dispatch(capfd, PROMPT)
+    assert code == 127
+    assert any(ln.startswith("dispatch: could not run codex: ") for ln in err)
+    rec = lab.record(did)
+    assert (rec["status"], rec["rc"]) == ("exited", 127) and rec["ended"]
+    assert [(a["rc"], a["reason"]) for a in rec["attempts"]] == [(127, "exit")]
+    assert "could not run codex" in Path(rec["log"]).read_text(encoding="utf-8")
+
+
 def test_a_lane_that_resumes_an_earlier_lanes_session_pays_only_its_own_tokens(
-        lab, capfd, monkeypatch):
+        lab, capfd, monkeypatch, tmp_path):
     """The rollout already holds the first lane's count when its resume starts (measured: the
-    resumed lane recorded the session's whole 7,653,151, the first lane's 416,650 included)."""
+    resumed lane recorded the session's whole 7,653,151, the first lane's 416,650 included).
+    Its last argument is the continuation, not a brief: no notes are priced on it, and the
+    judge reads no brief rather than that text."""
     past = {"input_tokens": 414185, "cached_input_tokens": 349440, "output_tokens": 2465,
             "reasoning_output_tokens": 1137, "total_tokens": 416650}
     lab.rollout.write_text(json.dumps({"timestamp": "2026-10-01T15:59:09.261Z",
                                        "type": "event_msg", "payload": {
                                            "type": "token_count",
                                            "info": {"total_token_usage": past}}}) + "\n")
+    capture = tmp_path / "sent.json"
+    _judge(monkeypatch, tmp_path, ACCEPT, capture)
     code, did, _, _ = _dispatch(capfd, "resume", SID, hippo_cli.RESUME_CONTINUE,
                                 scope="accounts (resumed)")
     assert code == 0
@@ -380,6 +499,25 @@ def test_a_lane_that_resumes_an_earlier_lanes_session_pays_only_its_own_tokens(
     assert lab.record(did)["codex_args"] == [
         "-m", "gpt-6.1-sol", "-c", "model_reasoning_effort=high", "--skip-git-repo-check",
         "-C", lab.cwd]
+    assert [e["name"] for e in _rows(lab.project, "clerk")] == ["jev-harvest"]
+    assert json.loads(capture.read_text())["state"]["brief"] is None
+
+
+def test_a_count_that_went_down_is_a_restart_not_a_negative_cost(lab):
+    """The last count before the lane started is its baseline — unless the count fell below
+    it: then the session's count began again, and all of it is the lane's."""
+    def row(stamp, total):
+        return json.dumps({"timestamp": stamp, "type": "event_msg", "payload": {
+            "type": "token_count", "info": {"total_token_usage": {
+                "input_tokens": total, "cached_input_tokens": 0, "output_tokens": 0,
+                "reasoning_output_tokens": 0, "total_tokens": total}}}})
+    lab.rollout.write_text(row("2026-10-01T10:00:00.000Z", 5000) + "\n"
+                           + row("2026-10-01T12:00:00.000Z", 1200) + "\n")
+    since = datetime(2026, 10, 1, 11, tzinfo=timezone.utc).timestamp()
+    assert hippo_cli.collect_usage(SID, "m", None, since)["tokens"] == 1200
+    lab.rollout.write_text(row("2026-10-01T10:00:00.000Z", 5000) + "\n"
+                           + row("2026-10-01T12:00:00.000Z", 7000) + "\n")
+    assert hippo_cli.collect_usage(SID, "m", None, since)["tokens"] == 2000
 
 
 # --------------------------------------------------------------------------
@@ -405,6 +543,12 @@ def _batch(capfd, manifest):
 
 def test_a_batch_lane_at_capacity_resumes_through_the_same_machinery(lab, capfd, monkeypatch):
     monkeypatch.setenv("STUB_FAIL_RUNS", "1")
+    monkeypatch.setenv("STUB_PARTIAL_RUN", "1")
+    # The session's rollout already holds an earlier lane's count: not this lane's cost.
+    lab.rollout.write_text(json.dumps({"timestamp": "2026-10-01T15:59:09.261Z", "payload": {
+        "type": "token_count", "info": {"total_token_usage": {
+            "input_tokens": 400000, "cached_input_tokens": 0, "output_tokens": 16650,
+            "reasoning_output_tokens": 0, "total_tokens": 416650}}}}) + "\n")
     manifest = _wave(lab.project)
     code, _, err = _batch(capfd, manifest)
     assert code == 0, err
@@ -429,10 +573,39 @@ def test_a_batch_lane_at_capacity_resumes_through_the_same_machinery(lab, capfd,
 def test_a_batch_entrys_timeout_bounds_the_waits_too(lab, capfd, monkeypatch):
     monkeypatch.setenv("STUB_FAIL_RUNS", "99")
     monkeypatch.setattr(hippo_cli, "CAPACITY_WAITS", (60, 60, 60))
-    code, _, err = _batch(capfd, _wave(lab.project, timeout=20))
+    manifest = _wave(lab.project, timeout=20)
+    code, _, err = _batch(capfd, manifest)
     assert code == 1 and len(lab.argvs()) == 1
     assert any(ln.endswith("model at capacity — not resumed: the entry's timeout ends first")
                for ln in err)
+    # Still at capacity as it ended, so its record carries the resume — no judge needed.
+    (ex,) = [r for r in _journal(manifest) if r["event"] == "exit"]
+    assert hippo_cli.watch_lines(lab.record(ex["dispatch"]), "ended")[-1].startswith(
+        "resume: hippo dispatch --kind impl --scope 'accounts (resumed)'")
+
+
+def test_one_deadline_bounds_every_attempt_of_a_batch_lane(lab, capfd, monkeypatch):
+    """Set once at the launch: a resumed attempt gets what is left of the entry's timeout, not
+    a fresh one — and a lane its timeout stopped ends killed, on its resume line."""
+    monkeypatch.setenv("STUB_FAIL_RUNS", "1")
+    monkeypatch.setenv("STUB_HANG_RUN", "2")
+    pump, deadlines = hippo_cli.pump_lane, []
+
+    def watched(child, lane, raw, deadline=None):
+        deadlines.append(deadline)
+        return pump(child, lane, raw, deadline)
+
+    monkeypatch.setattr(hippo_cli, "pump_lane", watched)
+    manifest = _wave(lab.project, timeout=3)
+    code, _, _ = _batch(capfd, manifest)
+    assert code == 1 and len(lab.argvs()) == 2
+    assert len(deadlines) == 2 and deadlines[0] == deadlines[1] is not None
+    (ex,) = [r for r in _journal(manifest) if r["event"] == "exit"]
+    assert ex["timed_out"] is True
+    rec = lab.record(ex["dispatch"])
+    assert (rec["status"], rec["timed_out"]) == ("killed", True)
+    assert [a["reason"] for a in rec["attempts"]] == ["capacity", "timeout"]
+    assert hippo_cli.watch_lines(rec, "ended")[-1].startswith("resume: ")
 
 
 def test_a_signal_to_a_batch_reaches_a_lane_in_its_wait(lab, capfd, monkeypatch):
@@ -490,6 +663,7 @@ def test_a_batch_lane_with_a_transient_cause_ends_on_its_resume_line(lab, capfd,
     assert rec["triage"].startswith("triage failed · cause transient (") and \
         rec["cause"] == "transient"
     assert f"[1/1] one rc=1 check=- {ex['dispatch']} triage=failed cause=transient" in err
+    assert not any(ln.startswith("resume: ") for ln in err), "not in the batch's shared stream"
     lines = hippo_cli.watch_lines(rec, "ended")
     assert lines[-1] == _resume_line([
         "hippo", "dispatch", "--kind", "fix", "--scope", "it's $(rm -rf ~) `x` (resumed)",
@@ -526,6 +700,11 @@ def test_which_lanes_get_a_resume_line():
     rec = {"codex_session": SID, "codex_args": ["-C", "/w"], "kind": "impl", "scope": "s"}
     line = hippo_cli.resume_command
     assert line({**rec, "status": "killed"})
+    assert line({**rec, "status": "killed", "timed_out": True}), "a batch entry's timeout"
+    assert line({**rec, "status": "exited", "attempts": [{"reason": "capacity"}] * 4}), \
+        "still at capacity: the wrapper knows, judge or no judge"
+    assert line({**rec, "status": "exited",
+                 "attempts": [{"reason": "capacity"}, {"reason": "exit"}]}) is None
     assert line({**rec, "status": "exited", "cause": "transient"})
     assert line({**rec, "status": "exited", "cause": "environment"})
     assert line({**rec, "status": "exited", "cause": "capability"}) is None
@@ -541,10 +720,18 @@ def test_codex_args_lose_the_prompt_and_name_the_working_root():
     take = hippo_cli.codex_resume_args
     assert take(["-m", "x", "do it"], "/w") == ["-m", "x", "-C", "/w"]
     assert take(["-m", "x", "--", "-starts like a flag"], "/w") == ["-m", "x", "-C", "/w"]
-    assert take(["-C", "rel", "--skip-git-repo-check", "go"], "/w") == [
-        "-C", "rel", "--skip-git-repo-check"], "a -C of its own is kept, not doubled"
+    assert take(["-C", "/x", "--skip-git-repo-check", "go"], "/w") == [
+        "-C", "/x", "--skip-git-repo-check"], "a -C of its own is kept, not doubled"
     assert take(["--cd=/x", "go"], "/w") == ["--cd=/x"]
+    # A relative root is made absolute where codex resolved it: the line runs from anywhere.
+    assert take(["-C", ".claude/worktrees/pass2", "go"], "/w") == [
+        "-C", "/w/.claude/worktrees/pass2"]
+    assert take(["--cd=rel", "go"], "/w") == ["--cd=/w/rel"]
+    assert take(["-Crel", "go"], "/w") == ["-C/w/rel"]
     assert take(["-m", "x", "resume", SID, "go on"], "/w") == ["-m", "x", "-C", "/w"]
+    assert take(["-o", "resume", "go"], "/w") == ["-o", "resume", "-C", "/w"], \
+        "an option's value spelled `resume` is no subcommand"
+    assert take(["-o", "resume", "resume", SID, "go on"], "/w") == ["-o", "resume", "-C", "/w"]
     assert take(["-m", "x", "--json"], "/w") is None, "no prompt last: nothing to resume with"
     assert take([], "/w") is None
 

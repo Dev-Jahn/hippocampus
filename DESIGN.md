@@ -1129,13 +1129,15 @@ was SIGKILLed with its wrapper before either was on record — and gets its rc w
 `ev:usage` comes from the rollout as on any exit, triage runs when the judge is on, and the
 wrapper exits 128+signal (a batch stops launching, signals every running lane and exits the
 same way; rerunning it resumes). A signal during a capacity wait ends the lane at once, killed,
-with the rc of the attempt before it — no resume starts after a stop. The handlers hold only
+with the rc of the attempt before it — no resume starts after a stop, and nothing is signalled:
+no codex runs then, and the record's `pgid` is cleared for the wait, since the last attempt's
+group id may by then name another process's group. The handlers hold only
 while codex can run, its waits included: a signal during
 the launch notes, or during a batch's harvest, takes its default action and stops the wrapper. Before 1.15.0 a killed lane recorded
 no rc, no usage and no triage — and Claude Code does kill background shells: under critical
-memory pressure once main has been idle 30 minutes with no agent running, and with a stopped
-agent's shells. Its kill is SIGTERM to the whole process tree, then SIGKILL 1.5s later
-(2.1.281), so the order is status and rc first, then usage, then the judge — the part that may
+memory pressure once main has been idle 30 minutes with no agent running, with a stopped
+agent's shells, and at a background call's deadline (the lane agent below). Its kill is SIGTERM
+to the whole process tree, then SIGKILL 1.5s later (2.1.281), so the order is status and rc first, then usage, then the judge — the part that may
 not fit in 1.5s is the part that may go missing.
 
 **Watching a lane.** `hippo dispatch --watch <id> [--for SECONDS]` blocks until the lane's
@@ -1169,7 +1171,8 @@ the one completion notification. The timeout is there because a background Bash 
 `timeout` is its deadline: measured (b200-cluster, 2026-10-01), lane d1034f0c, relayed with
 none, was SIGTERMed at exactly 30m00s, and Claude Code told the relay "Background command … was
 stopped after reaching its background time limit". Read from the 2.1.286 binary: the default is
-1,800,000 ms, the maximum is the larger of 7,200,000 ms and what `BASH_MAX_TIMEOUT_MS` allows,
+the larger of 1,800,000 ms and `BASH_DEFAULT_TIMEOUT_MS`, the maximum is the larger of
+7,200,000 ms and what `BASH_MAX_TIMEOUT_MS` (or a larger `BASH_DEFAULT_TIMEOUT_MS`) allows,
 capped at 2³¹−1, and a request above the maximum is clamped to it, not refused (a probe with
 2147483647 on a background call was accepted). So the relay asks for 2³¹−1 and gets whatever
 the host allows — two hours, or more where the user raised `BASH_MAX_TIMEOUT_MS` in Claude
@@ -1320,21 +1323,26 @@ as `codex exec resume --help` takes them on 0.159.2). So the triage line names t
 whenever the judge named one — `triage failed · cause transient (done .03 · blocked .23 · ask
 .14 · creep .15 · verify yes)`, one shape on the stream, in the record's `triage` (with `cause`
 beside it) and from `--watch`; the harvest's route column, which named a failure's cause
-already, now names any lane's. And a lane that ended killed, or whose cause is one a resume can
-clear (`transient`, `environment`), ends on one more line: `resume: hippo dispatch --kind <kind>
---scope '<scope> (resumed)' [--task <task>] [--depth N] -- <codex args> resume <session>
+already, now names any lane's. And a lane that ended killed, on a model-capacity error the
+wrapper did not resume away ("A model at capacity" below — known with the judge off too), or
+whose cause is one a resume can clear (`transient`, `environment`), ends on one more line:
+`resume: hippo dispatch --kind <kind> --scope '<scope> (resumed)' [--task <task>] [--depth N] -- <codex args> resume <session>
 "Continue the same task from where you stopped; do not redo finished steps; end with the report
 your original prompt asked for."`. It is built from the record alone — `kind`, `task`, `depth`
 and `codex_args` go on record at the launch, so a wrapper killed before its last line still
 leaves `--watch` what it needs — quoted with `shlex` (a scope carrying quotes, `$(…)` or a
 newline is data to the shell), the fixed continuation in double quotes. `codex_args` is codex's
 arguments with the prompt taken off where codex's grammar puts it (last, after any `--`), a
-`resume …` the lane was itself launched with taken off too, and `-C <cwd>` added when they
-name no working root, so the line resumes where the lane worked from any directory. No session
-id, or no prompt to take off: no line — a missing line costs main a look at the record, a
-broken one costs a lane. A batch lane's line has the same form and resumes it as a single
-dispatch: the journal never sees that lane, and a later rerun of the batch still relaunches the
-entry fresh — main picks one. A resume is a new dispatch with its own usage (§3.2, `ev:usage`).
+`resume …` the lane was itself launched with taken off too (the first `resume` that is no
+option's value), and its working root made absolute — `-C <cwd>` added when they name none, a
+relative `-C` resolved against the lane's cwd — so the line resumes where the lane worked from
+any directory. No session id, or no prompt to take off: no line — a missing line costs main a
+look at the record, a broken one costs a lane. A batch lane's line has the same form and
+resumes it as a single dispatch: the journal never sees that lane, and a later rerun of the
+batch still relaunches the entry fresh — main picks one. A resume is a new dispatch with its
+own usage (§3.2, `ev:usage`) and no brief of its own: its last argument is the continuation,
+and the task is in the session, so it gets no launch notes and its triage reads `brief: null`
+— weaker evidence than a first lane's route, where the report has to carry the task.
 
 **A model at capacity** (1.16.0). The stop above was a harness loss: at 15:59Z, 5 minutes into
 a gpt-6.1-sol high lane, codex printed `ERROR: Selected model is at capacity. Please try a
@@ -1342,12 +1350,15 @@ different model.` twice and exited 1; main's resume of the same session, a momen
 accepted at once and ran to rc 0. Of the 17 lane records surviving on that machine it is the
 one capacity failure; across all ledgers 3 failures carry cause `transient`. So the wrapper
 resumes such a lane itself, with no flag and no setting: when codex exits non-zero, unsignalled,
-with a session id, and a stderr line of that attempt starts `ERROR: ` and one of
-`CAPACITY_SIGNATURES` — today exactly the measured one; a new signature needs a measured log,
-because a guessed one would resume failures a resume repeats — it waits `CAPACITY_WAITS` (60s,
-120s, 240s) and runs `codex exec <codex_args> resume <session> "Your previous turn stopped on a
-server capacity error before you finished. Continue the same task from where you stopped; …"`,
-up to three times. It stays one lane: one dispatch id and record, whose `attempts` holds each
+with a session id, and the attempt's stderr ends — nothing after but blank lines and the
+footer — on a line that starts `ERROR: ` and one of `CAPACITY_SIGNATURES` — today exactly the
+measured one; a new signature needs a measured log, because a guessed one would resume failures
+a resume repeats. Codex prints a command's output raw, so a lane that reads another lane's log
+can print the same line; anchored to the line's start and to the attempt's end, such a quote
+followed by a failure of another kind is no capacity loss. Then the wrapper waits
+`CAPACITY_WAITS` (60s, 120s, 240s) and runs `codex exec <codex_args> resume <session> "Your
+previous turn stopped on a server capacity error before you finished. Continue the same task
+from where you stopped; …"`, up to three times. It stays one lane: one dispatch id and record, whose `attempts` holds each
 run with its rc and why it ended; one raw log, each resume after a separator line; one report,
 the last attempt's; one `ev:usage` at the end, read once from the rollout, which a resumed
 session appends to with its count running on (measured: no reset across the resume above) —
@@ -1360,8 +1371,9 @@ or `model at capacity — all 3 resumes used; the lane ends`; the record's `wait
 once, killed. A batch lane gets the same through the same machinery — one journal exit, at the
 end — and its entry's `timeout` bounds the whole lane, waits included: a wait that would end
 past it is not started (`not resumed: the entry's timeout ends first`), and the lane ends on
-the attempt before. This is no judgment taken from main: the wrapper reads no report and
-decides nothing about the work — it asks again a server that refused to answer, on the one
+the attempt before. A lane still at capacity when it ends — its resumes used, or its timeout too
+near — ends on its `resume:` line, judge or no judge. This is no judgment taken from main: the
+wrapper reads no report and decides nothing about the work — it asks again a server that refused to answer, on the one
 line that says so, and every attempt stays visible on the record and the stream; the triage
 and the verdict come once, over the lane as it finally ended.
 

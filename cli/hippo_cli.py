@@ -2576,12 +2576,13 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 # command's output never does.
 CODEX_EXEC_RE = re.compile(r"^(?:\S*/)?(?:ba|z|da|k)?sh -l?c (['\"])(.*?)(?:\1 in [/~].*)?$")
 SENTENCE_RE = re.compile(r"^(.+?[.!?。！？])(?=\s|$)")
-# A model-capacity failure, as codex prints it: its own `ERROR: ` line on stderr, then a
-# non-zero exit. Measured once (b200-cluster, 2026-10-01T15:59Z, codex-cli 0.159.2, gpt-6.1-sol
-# high, 5 minutes in): `ERROR: Selected model is at capacity. Please try a different model.`
-# twice, the footer, rc 1 — and the same session resumed by hand was accepted at once. Only a
-# line seen in a real log joins this tuple: a guessed one would resume a lane whose failure a
-# resume repeats.
+# A model-capacity failure, as codex prints it: its own `ERROR: ` line on stderr as the
+# attempt's last word — nothing after it but the footer — then a non-zero exit. Measured once
+# (b200-cluster, 2026-10-01T15:59Z, codex-cli 0.159.2, gpt-6.1-sol high, 5 minutes in): an
+# agent message, `ERROR: Selected model is at capacity. Please try a different model.` twice,
+# the footer, rc 1 — and the same session resumed by hand was accepted at once. Only a line
+# seen in a real log joins this tuple: a guessed one would resume a lane whose failure a resume
+# repeats.
 CAPACITY_SIGNATURES = ("Selected model is at capacity",)
 CAPACITY_WAITS = (60, 120, 240)  # seconds before resume 1, 2, 3 of a lane at capacity
 RESUME_CONTINUE = ("Continue the same task from where you stopped; do not redo finished steps; "
@@ -2699,7 +2700,7 @@ class Lane:
             self.rec["face"] = face
         self.session_id = self.model = ""
         self.footer_total = None
-        self.capacity = False  # this attempt's stderr carried a CAPACITY_SIGNATURES line
+        self.capacity = False  # this attempt's stderr ends on a CAPACITY_SIGNATURES line (feed)
         self.tail = collections.deque(maxlen=400)  # what triage reads of stderr — never more
         self.signal = None
         self._signal_at = None
@@ -2721,9 +2722,16 @@ class Lane:
         """One raw stderr line: the banner facts usage collection has always read, then the
         two event shapes."""
         self.tail.append(line)
-        s = ANSI_RE.sub("", line).strip()
-        if any(s.startswith(f"ERROR: {sig}") for sig in CAPACITY_SIGNATURES):
+        bare = ANSI_RE.sub("", line).rstrip()
+        s = bare.strip()
+        # A capacity line counts while it is the attempt's last word: codex's own, at the start
+        # of the line, followed by nothing but blank lines and the footer. Any other line ends
+        # it — so a command whose output quotes one (a lane reading another lane's log), then a
+        # failure of some other kind, is never taken for a capacity loss and resumed.
+        if any(bare.startswith(f"ERROR: {sig}") for sig in CAPACITY_SIGNATURES):
             self.capacity = True
+        elif s and s != "tokens used" and self._prev != "tokens used":
+            self.capacity = False
         if not self.session_id and s.startswith("session id:"):
             self.session_id = s.split(":", 1)[1].strip()
             self.rec["codex_session"] = self.session_id
@@ -2779,8 +2787,8 @@ class Lane:
         self.write()
 
     def attempt_ended(self, rc, timed_out):
-        """→ why this attempt ended: `signal`, `timeout`, `capacity` (non-zero on a
-        CAPACITY_SIGNATURES line) or `exit`. On record with the next write."""
+        """→ why this attempt ended: `signal`, `timeout`, `capacity` (non-zero, its stderr
+        ending on a CAPACITY_SIGNATURES line) or `exit`. On record with the next write."""
         reason = ("signal" if self.signal is not None else "timeout" if timed_out else
                   "capacity" if rc != 0 and self.capacity else "exit")
         self.rec["attempts"][-1].update(rc=rc, reason=reason)
@@ -2789,7 +2797,10 @@ class Lane:
     def wait_to_resume(self, seconds, n):
         """The wait before resume `n`: on the stream, on record for --watch (`waiting`), and cut
         short by a stop — a signal now ends the lane at once → False. The kill trap is the same
-        one: the handlers stay installed, and the caller goes straight to finish."""
+        one: the handlers stay installed, and the caller goes straight to finish. No codex runs
+        while it waits, so there is no group to forward a stop to — and the last attempt's group
+        id, its members gone, may already name another process's group."""
+        self.rec["pgid"] = None
         of = len(CAPACITY_WAITS)
         until = datetime.fromtimestamp(time.time() + seconds, timezone.utc)
         self.rec["waiting"] = {"resume": n, "of": of,
@@ -2880,11 +2891,12 @@ def run_lane(lane, run_once, raw, codex_args, deadline=None):
     """codex for one lane, launch to end (§3.6) → (rc, timed_out) of its last attempt.
     `run_once(tail)` runs codex once — as launched when `tail` is None, else as `codex exec
     <codex_args> <tail>` — and returns (rc, timed_out). An attempt that ended non-zero on a
-    CAPACITY_SIGNATURES line, unsignalled and in time, with a session to resume, is followed
-    by a resume of that session after the next wait in CAPACITY_WAITS — a harness loss
-    recovered, not a judgment: the verdict stays main's and every attempt is on record. It
-    stays one lane: one record (its `attempts`), one raw log (a separator line before each
-    resume), the last attempt's report, and the caller's one usage row and one triage."""
+    CAPACITY_SIGNATURES line (its last word, Lane.feed), unsignalled and in time, with a
+    session to resume, is followed by a resume of that session after the next wait in
+    CAPACITY_WAITS — a harness loss recovered, not a judgment: the verdict stays main's and
+    every attempt is on record. It stays one lane: one record (its `attempts`), one raw log (a
+    separator line before each resume), the last attempt's report, and the caller's one usage
+    row and one triage."""
     tail, of = None, len(CAPACITY_WAITS)
     while True:
         lane.attempt_started()
@@ -3040,7 +3052,10 @@ def run_dispatch(argv):
     on = jev_backend(hp) != "off"
     brief, report, own_report = None, None, False
     if on:
-        brief = prompt_of(rest)
+        # A dispatch that resumes a session (a `resume:` line) ends on a continuation, not the
+        # task — that is in the session. No brief, then: no notes priced on the continuation,
+        # and a triage that reads none rather than the wrong text (prompt_of).
+        brief = prompt_of(rest) if codex_resume_at(rest[:-1]) is None else None
         if brief is not None:
             dispatch_launch_notes(hp, kind, scope, brief, rest)
         report = output_last_message(rest)
@@ -3349,31 +3364,66 @@ def prompt_of(rest):
     return last if not last.startswith("-") and len(last) > 40 else None
 
 
+# The options of `codex exec` and `codex exec resume` that take a value (0.159.2 `--help`): the
+# token after one is its value, never a subcommand — `-o resume` names a file.
+CODEX_VALUE_OPTIONS = frozenset((
+    "-c", "--config", "--enable", "--disable", "-i", "--image", "-m", "--model",
+    "--local-provider", "-p", "--profile", "-s", "--sandbox", "-C", "--cd", "--add-dir",
+    "--thread-source", "--output-schema", "--color", "-o", "--output-last-message"))
+
+
+def codex_resume_at(args):
+    """Where codex's args start a `resume` subcommand, or None: the first `resume` that is not
+    an option's value, before any `--`."""
+    for i, a in enumerate(args):
+        if a == "--":
+            return None
+        if a == "resume" and (i == 0 or args[i - 1] not in CODEX_VALUE_OPTIONS):
+            return i
+    return None
+
+
 def codex_resume_args(args, cwd):
     """codex's arguments to resume a lane's session with → a list, or None when the last
     argument is no prompt. The prompt comes off where codex's grammar puts it — last, with a
     `--` before it — and so does a `resume …` the lane was itself launched with: `resume
     <session> "<prompt>"` is appended to what is left. codex's own options stay before
-    `resume`, as `codex exec resume --help` (0.159.2) takes them. With no `-C` they gain `-C
-    <cwd>`: a resume run from another directory still works where the lane did."""
+    `resume`, as `codex exec resume --help` (0.159.2) takes them. The working root is made
+    absolute — `-C <cwd>` added when they name none, a relative one resolved against `cwd` as
+    codex resolves it — so a resume run from another directory still works where the lane did."""
     if len(args) >= 2 and args[-2] == "--":
         base = args[:-2]
     elif args and not args[-1].startswith("-"):
         base = args[:-1]
     else:
         return None
-    if "resume" in base:
-        base = base[: base.index("resume")]
-    return base if codex_cd(base) is not None else [*base, "-C", str(cwd)]
+    at = codex_resume_at(base)
+    if at is not None:
+        base = base[:at]
+    if codex_cd(base) is None:
+        return [*base, "-C", str(cwd)]
+    out = []
+    for i, a in enumerate(base):
+        if i and base[i - 1] in ("-C", "--cd"):
+            a = str(Path(cwd) / a)
+        elif a.startswith("--cd="):
+            a = "--cd=" + str(Path(cwd) / a[len("--cd="):])
+        elif a.startswith("-C") and len(a) > 2:
+            a = "-C" + str(Path(cwd) / a[2:])
+        out.append(a)
+    return out
 
 
 def resume_command(rec):
     """The `hippo dispatch` command that resumes a lane's codex session, from its record — for
-    a lane that ended killed, or whose triage named a cause a resume can clear (transient,
-    environment) — or None. None too without a session id or the arguments to resume with:
-    no line rather than a broken command. It launches a new single dispatch — a batch lane's
-    included — with the lane's labels and " (resumed)" on its scope."""
-    if not (rec.get("status") == "killed" or rec.get("cause") in RELAUNCHABLE_CAUSES):
+    a lane that ended killed, on a model-capacity error the wrapper did not resume away (its
+    resumes used up, or a batch entry's timeout too near), or whose triage named a cause a
+    resume can clear (transient, environment) — or None. None too without a session id or the
+    arguments to resume with: no line rather than a broken command. It launches a new single
+    dispatch — a batch lane's included — with the lane's labels and " (resumed)" on its scope."""
+    at_capacity = (rec.get("attempts") or [{}])[-1].get("reason") == "capacity"
+    if not (rec.get("status") == "killed" or at_capacity
+            or rec.get("cause") in RELAUNCHABLE_CAUSES):
         return None
     sid, args, kind = rec.get("codex_session"), rec.get("codex_args"), rec.get("kind")
     if not sid or not isinstance(args, list) or not kind:
