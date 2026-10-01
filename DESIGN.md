@@ -334,8 +334,8 @@ hippo directive withdraw <id>
 hippo prior show
 hippo prior distill [--days N]
 hippo dispatch --kind K --scope S [--task T] [--depth N] [--fast] [--] <codex exec args…>
-hippo dispatch --batch <manifest.yaml> [--dry-run]
-hippo dispatch --watch <dispatch-id> [--for SECONDS]
+hippo dispatch --batch <manifest.yaml> [--dry-run | --entry <id>]
+hippo dispatch --watch <dispatch-id|batch-id> [--for SECONDS]
 # a bare noun reads: task → list, log → tail, directive → list, prior → show
 hippo scribe --transcript P --session S   # internal: the Stop hook calls it detached
 ```
@@ -1104,7 +1104,9 @@ last last_at log report` (paths absolute: the record is read from any cwd), then
 last, `ended` — rewritten whole at the stream's cadence, and a new lane start prunes lane files
 older than 7 days (no schedule, §4). Batch lanes run through the same machinery: `<id>.err`
 keeps its shape as the raw log, the compact lines join the batch's stderr, and each lane gets
-its record under its dispatch id. Without `.hippo/` there is no record, and the raw log goes to
+its record under its dispatch id — with `check_rc` and `check` (the check output's path) where
+the entry has a check, written before `ended`, and `face: "workflow"` when `--entry` launched
+it (1.16.0, "Two faces" below). Without `.hippo/` there is no record, and the raw log goes to
 a temp file the final line names.
 
 **The kill trap.** codex runs in a session of its own, so a signal reaches it only through the
@@ -1123,10 +1125,13 @@ agent's shells. Its kill is SIGTERM to the whole process tree, then SIGKILL 1.5s
 not fit in 1.5s is the part that may go missing.
 
 **Watching a lane.** `hippo dispatch --watch <id> [--for SECONDS]` blocks until the lane's
-record says it ended or SECONDS pass (default 540, under the Bash tool's 600s ceiling). Still
+record says it ended or the window passes. The record chooses the window: 540s (under the Bash
+tool's 600s ceiling), or 60s for a lane whose record says `face: "workflow"` (1.16.0, "Two
+faces" below); `--for` overrides it. Still
 running, it prints one line — `lane <id> running · <elapsed> · <cmds> cmds · last: <event>` —
 and exits 3; ended, it prints the final lines — `lane <id> exited rc=0 after 5m12s · 14 cmds ·
-<scope>`, the triage line when there is one, `report: <path>`, `raw log: <path>` — and exits 0;
+<scope>`, a batch entry's `check: pass|fail rc=N · <path>`, the triage line when there is one,
+`report: <path>`, `raw log: <path>` — and exits 0; a `batch:<bid>` id reads a batch record;
 no record is 2, outside a project too (like the launch, this surface is never silent: a
 watcher told nothing would read it as an end). It reads `.hippo/lanes/` and writes nothing.
 A record without `ended` whose
@@ -1140,7 +1145,8 @@ blocking foreground call, never a sleep, is what keeps it open.
 "hippo:lane", description: "<scope>", prompt: "<the hippo dispatch command>")` gets a row in the
 agent panel — Enter opens its transcript, x stops it, and the kill trap records the stop. The agent
 is sonnet at low effort with Bash alone (hippo's cheap Claude tier; it runs no haiku — §3.5.4): it
-runs the command verbatim in the background, reads the id off its output's `dispatch:<id>` line,
+runs the command verbatim in the background, reads the id off the first `dispatch:<id>` or
+`batch:<id>` in its output (a whole batch is one row, "Two faces" below),
 loops `--watch` in the foreground, and replies with the final lines, which reach main as the one
 completion notification. Measured before building (spike, 2026-09-24): an agent that ends its turn
 while its background job runs shows `completed` on its row, and main then gets an interim
@@ -1189,8 +1195,9 @@ the wrapper's lines and the host's `[exited with code 0]`), each Workflow's resu
 given, and main got one notification per plain agent. A Workflow script launches the agent as
 `agent("<command>", {agentType: 'hippo:lane'})`; with no schema it returns those lines as a
 string. The relays are no run of their own to the scribe (§3.5.3c): their cost — 38,801 sonnet
-tokens for the two above — is recorded nowhere, and a Workflow made of nothing else gets no row,
-which is why the dispatch skill sends a fan-out with nothing after it to `--batch`. Headless
+tokens for the two above — is recorded nowhere, and a Workflow made of nothing else gets no row
+— the Workflow face of a batch is one, so the dispatch skill quotes its relays' price and main
+pays it knowingly ("Two faces" below). Headless
 `-p` waits for a background Workflow only ten minutes past main's last turn, then kills it
 (`print wind-down … at the wait ceiling`; the lane is recorded `killed by SIGTERM`), which is
 why the Workflow's long lane was 570s.
@@ -1198,12 +1205,15 @@ why the Workflow's long lane was 570s.
 **The row** (`settings.json` → `subagentStatusLine` → `scripts/lane_status.py`). Claude Code
 runs a plugin's subagentStatusLine about every 5s with the visible agent rows on stdin. For each
 row whose `subagents/agent-<id>.meta.json` says `hippo:lane`, the script takes the lane's
-dispatch id from that agent's transcript (the last `dispatch:<id>` or `--watch <id>` in it —
-the prompt, which comes first, is main's text and may quote other ids), reads
+dispatch id from that agent's transcript (the last `dispatch:<id>`, `batch:<id>` or `--watch
+<id>` in it — the prompt, which comes first, is main's text and may quote other ids), reads
 `.hippo/lanes/<id>.json` walking up from the row's cwd, and prints `{"id": …, "content": "codex
 · <scope> · <elapsed> · <cmds> cmds · <last event>"}`, cut to the row's width; an ended lane
 shows its status, rc and duration instead, and one whose wrapper is gone with no status shows
-`lost` — never a timer still counting. Every other row is left out, which keeps Claude
+`lost` — never a timer still counting. A batch id draws the batch ("Two faces" below): `codex
+batch · <stem> · <elapsed> · <r> running · <d>/<t> done · <f> failed · last: <scope>: <event>`,
+from the batch record and the records it names as running — never a scan of the directory.
+Every other row is left out, which keeps Claude
 Code's own rendering (measured, 2.1.281: `◯ general-purpose  <description> … 15s · ↓ 20.3k
 tokens`; documented: an omitted id keeps the default, an empty content hides the row) — a
 printed row replaces the whole default, type, description and stats alike. Stdlib only and no
@@ -1408,7 +1418,87 @@ own model is still read, and only ever gets a note. **The manifest is not modifi
 suggestion that rewrote the file would be the frozen config of §4 with an extra step; this one
 is computed fresh per run and expires with it. With no key `--dry-run` still prints the ladder,
 what each entry already routes to and the priors evidence for it, with the difficulty columns
-as `-`.
+as `-`. Since 1.16.0 it also writes the batch's Workflow face (below).
+
+**Two faces in Claude Code** (1.16.0). Measured in a consuming project: a session launched
+`hippo dispatch --batch m.yaml 2>&1 | tail -40` as one background Bash call — one shell row,
+nothing visible until the batch ended; without the `tail`, every lane's compact lines
+interleave in one stream. What Claude Code draws was measured with probes (2026-10-01). Only
+agents get rows. A Workflow shows at three levels: one footer row per Workflow (name, an agents
+done/total bar, elapsed, tokens); `/workflows`, its phases with done/total and each agent as
+label · model · tokens; and one agent's detail — status, tool-call count, `idle Ns`, the head of
+its prompt, an Activity list showing each tool call as its *command* text, truncated (not its
+description), and the Outcome, its final reply. A blocking foreground Bash call shows only its
+command and `running` while `idle` keeps counting; an agent that makes a short call every ~10s
+shows each result as it lands. The plugin's subagentStatusLine ran about every 5s for plain
+Agent rows (stdin task: `{id, type: "local_agent", status, description, label, model,
+tokenCount, …, cwd}`) and not once during a 76s two-agent Workflow — so nothing hippo prints can
+change the first two levels, and a Workflow lane's live progress can only be its relay's own
+tool results, at the third. One short poll by a sonnet/low relay cost ~16.5k cache-read + ~200
+cache-write + 155 output tokens ≈ $0.005 (Sonnet 5.5: $2 in, $0.20 cache read, $2.50 5-minute
+cache write, $10 out per Mtok). So a batch has two faces, and the dispatch skill gives main both
+with their price:
+
+- **Watched lanes — the Workflow face.** `--dry-run` writes `<manifest dir>/<stem>.workflow.js`
+  and names it on stderr with the call that runs it — `Workflow({scriptPath: "<abs path>"})` —
+  and the harvest command after it. The script launches each entry as `agent("hippo dispatch
+  --batch <abs manifest, shell-quoted> --entry <id>", {agentType: 'hippo:lane', label: <scope,
+  ≤48 chars>, phase: <kind>})` through a promise pool holding at most the manifest's
+  `concurrency`, and returns `{entry id: the relay's reply}`. It keeps the rules a Workflow
+  script must: `meta` first and a pure literal — it is JSON, so a test parses it back — with
+  one phase per distinct kind in entry order; plain JavaScript; no clock, no randomness, no
+  global but `agent`. Every string from the manifest is JSON-encoded with `ensure_ascii`, so no
+  quote, backslash, newline or U+2028/2029 in a scope, kind or path can end a string early (a
+  test runs `node --check` on it and runs it under a stub `agent()` with such strings). Each
+  relay watches its lane's record, and that record says `face: "workflow"`, so `--watch` polls
+  every minute instead of every nine: one Activity line a minute per lane — `lane <id> running ·
+  3m12s · 14 cmds · last: exec: pytest -q` — at ≈$0.005 a minute on top of the relay's ≈$0.02
+  start and end (the 24s measurement above, at Sonnet 5.5 prices). The window is the record's
+  choice, not the relay's: `agents/lane.md` stays one fixed body with no number in it, and an
+  explicit `--for` still wins. A Workflow of relays is no run to the scribe (§3.5.3c), so that
+  cost is recorded nowhere — it is the price of watching. After the Workflow, `hippo dispatch
+  --batch <manifest>` harvests; like any rerun it first relaunches what failed with a cause a
+  relaunch could clear, so after a failure it goes the one-row way.
+- **One row — a wide batch.** `Agent(subagent_type: "hippo:lane", description: <batch scope>,
+  prompt: "hippo dispatch --batch <manifest>")`. A full run prints `batch:<bid>` (`b` + 32 hex)
+  first on stdout and keeps `.hippo/lanes/<bid>.json` — `id manifest stem pid started total
+  todo skipped launched running ok failed done running_ids last last_at journal harvest`, then
+  `status` (`exited|killed`), `signal`, `rc`, `error` when the run died before its lanes, and
+  `ended` last — rewritten whole by the batch process alone, at every lane start and exit and
+  at the end. The relay takes whichever of `batch:<id>` and `dispatch:<id>` comes first in its
+  output, and `--watch <bid>` reads the record: running, one line — `batch <stem> running ·
+  <elapsed> · <r> running · <d>/<t> done · <f> failed · last: <scope>: <event>`, the newest of
+  the batch's own events (a lane started, exited) and its running lanes' — and exit 3; ended,
+  `batch <stem> exited rc=1 after 12m03s · 7 launched · 5 ok · 2 failed · 3 skipped`, then the
+  harvest, and exit 0. The harvest is the run's stdout from the table on, kept as `<bid>.out`;
+  up to 40 lines it is printed whole, past that by path with the summary line — the relay
+  copies its last call's output into its reply verbatim, so a 222-row table would be paid
+  again as relay output and copied by a model, where a path costs nothing. The agent's row
+  reads the same (§3.6, "The row"). An x on it is SIGTERM to the relay's shells, which reaches
+  the batch's handler: the lanes are signalled as before, and the batch record says `killed`
+  within 0.5s — the main thread wakes twice a second while lanes run. Outside the lanes, in the
+  plan pass or the harvest, the signal now ends the run where it stands and is recorded, where
+  before it took its default action with nothing on record.
+
+Codex has no agent panel and keeps the plain Bash form of both.
+
+**One entry** (`--entry <id>`) is the Workflow face's call — its generated script makes it, and
+main never types it (§4). It runs exactly one entry through the batch machinery: manifest
+validation, the journal and its resume decision for that entry, the breaker, `check`, parent
+stamping, usage, triage, the kill trap — and prints `dispatch:<id>` first, as a single dispatch
+does, for the relay to grep. The journal decides as it does for a full run. A done entry
+launches nothing and prints `dispatch:<the lane that did it>` with that lane's final lines
+(exit 0), so its relay's watch ends at once on the same lines. A held entry — its latest triage
+named `capability` or `spec` — launches nothing and says so (exit 5). An entry whose latest
+launch has no exit while its lane still runs launches nothing and names that lane (exit 0), and
+a full run leaves such an entry alone too: two faces can now overlap on one journal. An entry
+with no `model` takes the routing its dry run recorded in `<manifest>.plan.jsonl`, or, with no
+record, is planned alone as a full run would plan it and its record merged into the file; with
+neither it stops before the launch (`model is required`). Several entry processes append to one
+journal, so every journal write — and every read a launch decision rests on, and the breaker's
+admit-then-record region — holds an `flock` on the manifest file beside the in-process lock: the
+manifest always exists, and locking it creates nothing the journal logic would read. Which exit
+or triage is an entry's latest is read off its attempt, never its place in the file.
 
 ### 3.6b The distiller split — the clerk writes the page, the code does the sums
 
@@ -1491,7 +1581,8 @@ the sheet, and shipping 300 JSONL lines only offers something to recompute from,
   directive sends to codex to a codex lane or `--batch` — and leaves the executor to that
   evidence: until 2026-09-26 no passage compared the three, while a live directive in this repo
   sent implementation to Claude subagents. The lane agent's Workflow form (§3.6) sits beside
-  its Agent form and `--batch`, which fans out with no relay agent at all.
+  its Agent form and `--batch`, whose two faces in Claude Code — a Workflow of relays, one per
+  lane, or one relay for the whole batch — it names with their price (1.16.0).
 
 ### 3.8 Hosts (Claude Code · Codex CLI)
 
@@ -1505,7 +1596,7 @@ engine (measured on 0.144.6).
 | Hooks | `hooks/hooks.json` (the default) plus `hooks/claude-hooks.json`, named by the manifest — all four (§3.4) | `hooks/hooks.json`, named by the manifest — SessionStart and Stop, **the same file**; event keys (PascalCase), matcher, stdin payload fields and the SessionStart `hookSpecificOutput.additionalContext` envelope are all identical (codex ≥0.146 rejects bare text, §3.4) |
 | Plugin `bin/` | added to PATH automatically | **not added** → a skill resolves `bin/hippo` relative to its own SKILL.md; a dispatched lane gets it from the wrapper (§3.6) |
 | Transcript | Claude JSONL | codex rollout JSONL — `digest_lite.py` detects the format from the first lines and reduces both to the same line vocabulary |
-| Agent panel | `agents/lane.md` (`hippo:lane`) + `settings.json` `subagentStatusLine` (§3.6) | none — a lane launches through plain Bash, and `hippo dispatch --watch` works the same |
+| Agent panel | `agents/lane.md` (`hippo:lane`) + `settings.json` `subagentStatusLine` (§3.6); a batch is a Workflow of relays (`--dry-run` writes it, each entry `--entry <id>`, polled each minute) or one relay row (`batch:<bid>`) | none — a lane or a batch launches through plain Bash, and `hippo dispatch --watch` works the same on a lane's or a batch's id |
 
 Constraints specific to codex (0.144.6):
 
@@ -1597,7 +1688,7 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 | typed refusal gates, frozen sidecars, remote verify | Record, never enforce (principle 3) |
 | installing a cron job automatically | A user who wants one sets it up. The plugin does not own a schedule — auto-distill rides the Stop-driven scribe instead: due-when rule, no schedule (§3.5.8) |
 | routing.yaml / depth-tier model config | Retired 1.11.0 before being built: prices are `prices.yaml` facts, tier-worth is PRIORS `$/accepted`, the decision between them is main's — frozen config is the stale-instruction shape (§1 principle 9). The runaway worry it addressed is handled by the fan-out circuit breaker (§3.6) instead. The shape it was retired in favour of is the batch plan (§3.6, `--batch --dry-run`, and ahead of every judged launch): the same question answered per batch, computed fresh from the price sheet and the ledger, printed as a suggestion — never a file that outlives the batch |
-| batch mode flags (`--harvest`, `--plan`, `--resume`, `--fresh`, `--concurrency`, `--causes`) | Retired 1.14.0. Measured across 28 projects (2026-09-23): zero calls to `--harvest`, `--resume`, `--fresh`, `--concurrency` and `--causes`, six to `--plan` in one project, against 11 `--batch` calls in two — while the flag-free single form carried 1,470 of 1,945 dispatch rows. A feature that needs a flag is a feature main does not use: the journal now decides launch / resume / harvest, the harvest ends every run, `--dry-run` is the plan, and concurrency is the manifest key (§3.6) |
+| batch mode flags (`--harvest`, `--plan`, `--resume`, `--fresh`, `--concurrency`, `--causes`) | Retired 1.14.0. Measured across 28 projects (2026-09-23): zero calls to `--harvest`, `--resume`, `--fresh`, `--concurrency` and `--causes`, six to `--plan` in one project, against 11 `--batch` calls in two — while the flag-free single form carried 1,470 of 1,945 dispatch rows. A feature that needs a flag is a feature main does not use: the journal now decides launch / resume / harvest, the harvest ends every run, `--dry-run` is the plan, and concurrency is the manifest key (§3.6). `--entry <id>` (1.16.0) is not a return of these: main never types it — the Workflow face `--dry-run` writes calls it, one entry per relay — and the journal still decides what it does |
 | directive lifetimes (`turn\|phase\|durable`) | Retired 1.14.0 (§3.2). Measured across 28 projects: 63 of 75 live `phase` directives were past 14 days and the aging nudge produced no withdrawals, 34 of 72 withdrawn went within 3 days, and 54 of 55 `turn` directives expired by the clock. One lifetime — until withdrawn — plus an age shown on every line (§6) |
 | generic bulk ledger ingest (`log --file`, a bulk endpoint) | It would enlarge the mutation grammar toward the retired ingest family above — facts enter through one door. The accepted shape is the journal-scoped `log outcome --from-batch` (§3.6), which narrows what a row may say instead of widening it |
 | `claude -p` dispatch lanes | Retired 1.15.0: ~28k tokens of fixed cache creation per call; 3 wrapper rows ever; native Agent/fork/Workflow do the same work and hippo records them (§3.5.3c). The clerk's own `claude -p` backend (§3.5.4) stays |

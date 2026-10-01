@@ -162,6 +162,9 @@ def test_dry_run_prints_the_plan_and_writes_nothing(tmp_project, tmp_path, run_h
     assert read_ledger(tmp_project) == []
     assert not _journal_path(manifest).exists()
     assert not _outdir(manifest).exists()
+    # The one thing it writes is the Workflow face (§3.6) — rewritten by every dry run.
+    face = tmp_project / "wave2.workflow.js"
+    assert s["workflow"] == str(face.resolve()) and face.is_file()
 
 
 # --------------------------------------------------------------------------
@@ -333,7 +336,8 @@ def test_a_finished_journal_harvests_only_until_it_is_deleted(tmp_project, tmp_p
     s = _summary(again)
     assert (s["launched"], s["skipped"], s["harvested"]) == (0, 1, 1)
     assert "resuming" not in again.stderr, "nothing is unfinished, so nothing resumes"
-    assert again.stdout.splitlines()[0].split()[:2] == ["id", "rc"], "the table still prints"
+    assert again.stdout.splitlines()[0].startswith("batch:b"), "the batch id comes first"
+    assert again.stdout.splitlines()[1].split()[:2] == ["id", "rc"], "the table still prints"
     assert len([e for e in read_ledger(tmp_project) if e.get("ev") == "dispatch"]) == 1
 
     _journal_path(manifest).unlink()

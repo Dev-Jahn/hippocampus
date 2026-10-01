@@ -343,10 +343,12 @@ def test_a_signal_to_a_batch_reaches_every_running_lane(tmp_project, tmp_path):
     assert "stopped by SIGTERM" in err.decode()
 
 
-def test_a_batch_gives_its_signals_back_before_the_harvest(tmp_project, tmp_path, monkeypatch,
-                                                           capsys):
-    """The harvest is a judge pass a signal must be able to stop: kept installed, the batch's
-    forwarding handler swallowed a SIGTERM there and the batch exited 0."""
+def test_a_signal_during_the_harvest_stops_the_batch_and_is_on_its_record(
+        tmp_project, tmp_path, monkeypatch, capsys):
+    """The harvest is a judge pass a signal must be able to stop: kept installed, the lanes'
+    forwarding handler swallowed a SIGTERM there and the batch exited 0. Now the signal ends the
+    run where it stands — 128+signal — and the batch record says killed; and the run gives the
+    handlers it found back."""
     manifest = _manifest(tmp_project, "calm.yaml", """\
         defaults: {kind: impl, executor: codex, model: gpt-6-luna, effort: low}
         entries:
@@ -355,17 +357,21 @@ def test_a_batch_gives_its_signals_back_before_the_harvest(tmp_project, tmp_path
     monkeypatch.chdir(tmp_project)
     monkeypatch.setenv("PATH", _stub_codex(tmp_path))
     before = {s: signal.getsignal(s) for s in hippo_cli.LANE_SIGNALS}
-    during, real = {}, hippo_cli.run_harvest
 
-    def harvest(*args, **kw):
-        during.update({s: signal.getsignal(s) for s in hippo_cli.LANE_SIGNALS})
-        return real(*args, **kw)
+    def harvest(*_args, **_kw):
+        handler = signal.getsignal(signal.SIGTERM)
+        handler(signal.SIGTERM, None)  # what the interpreter does when the signal lands
+        raise AssertionError("the harvest ran on past a SIGTERM")
 
     monkeypatch.setattr(hippo_cli, "run_harvest", harvest)
     with pytest.raises(SystemExit) as done:
         hippo_cli.run_batch(["--batch", str(manifest)])
-    assert done.value.code == 0, capsys.readouterr().err
-    assert during == before
+    assert done.value.code == 128 + signal.SIGTERM, capsys.readouterr().err
+    assert {s: signal.getsignal(s) for s in hippo_cli.LANE_SIGNALS} == before
+    bid = capsys.readouterr().out.splitlines()[0].removeprefix("batch:")
+    rec = _record(tmp_project, bid)
+    assert (rec["status"], rec["signal"], rec["rc"]) == ("killed", "SIGTERM", 143)
+    assert rec["ended"] and rec["ok"] == 1, "the lane itself had finished"
 
 
 def test_a_child_codex_left_writing_to_stderr_does_not_hold_the_lane(tmp_project, tmp_path,
@@ -554,7 +560,7 @@ def test_watch_names_a_lane_whose_wrapper_vanished(tmp_project, tmp_path):
 @pytest.mark.parametrize("args, says", [
     (["dnope"], "no lane record"),
     (["dnope", "--for", "soon"], "--for takes seconds"),
-    (["../../etc/passwd"], "a dispatch id is required"),
+    (["../../etc/passwd"], "an id is required"),
     (["dnope", "--kind", "x"], "unexpected argument"),
 ])
 def test_watch_refuses_what_it_cannot_read(tmp_project, args, says):
@@ -579,7 +585,7 @@ def test_the_lane_agent_is_a_low_effort_sonnet_relay_with_bash_alone():
     assert (front["name"], front["model"], front["effort"], front["tools"]) == (
         "lane", "sonnet", "low", "Bash")
     assert "run_in_background: true" in text and "hippo dispatch --watch <id>" in text
-    assert re.search(r"grep -m1 -o 'dispatch:d\[0-9a-f\]\*'", text)
+    assert "grep -m1 -oE '(batch:b|dispatch:d)[0-9a-f]{32}' <path>" in text
 
 
 def _lane_agent_wait(path, window=None):

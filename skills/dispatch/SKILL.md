@@ -47,8 +47,8 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   with the lane's latest command or message (x stops it, recorded), one notification at the
   end: rc, triage, report and raw-log paths. A Workflow script calls it as `agent("<command on
   one line>", {agentType: 'hippo:lane'})`, no schema, when a later step reads the lane's
-  result; many lanes with nothing after them go to `--batch` (§2b), which pays no relay (15–20k
-  sonnet tokens each). The plain Bash form stays for Codex and for a lane launched in a lane.
+  result; many lanes go to `--batch` (§2b). The plain Bash form stays for Codex and for a lane
+  launched in a lane.
 - **`--kind` is the PRIORS axis — reuse a tag**: `impl fix perf verify audit design research
   spike docs infra chore` (one ledger carried 26 tags over 108 dispatches, 19 used once). The
   subject goes in `--scope`.
@@ -92,6 +92,18 @@ entries:
      vars: {test: tests/test_fenwick.py}}
 ```
 
+- **On Claude Code, one of two ways — never a bare background Bash, never piped through
+  `tail`/`head`** (one shell row, nothing visible until the batch ends):
+  - *Watched lanes*: `hippo dispatch --batch m.yaml --dry-run`, then the
+    `Workflow({scriptPath: "…/m.workflow.js"})` it names — each lane an agent in `/workflows`,
+    its progress in that agent's Activity every minute — then `hippo dispatch --batch m.yaml`
+    for the harvest (one-row way if a lane failed: the rerun relaunches it first). Cost, in
+    relays: ≈ $0.02 per lane + ≈ $0.005 per minute of lane runtime.
+  - *A wide batch*: `Agent(subagent_type: "hippo:lane", description: "<batch scope>", prompt:
+    "hippo dispatch --batch m.yaml")` — one row (`codex batch · m · 6m02s · 4 running · 12/40
+    done · 1 failed · last: …`), one relay for the whole batch, the harvest in its reply (a
+    path when long).
+  - On Codex: plain Bash, as before.
 - **The journal decides**: no journal → everything launches; some entries unfinished → it
   resumes by itself (lanes whose triage named `capability` or `spec` are skipped — they need a
   new brief); all done → nothing launches. Every run ends with the harvest table. Delete the

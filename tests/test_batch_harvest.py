@@ -101,9 +101,10 @@ def _two_lanes(project):
 
 
 def _table(proc):
-    """The harvest table: stdout without its trailing JSON summary line."""
+    """The harvest table: stdout without its leading batch id and trailing JSON summary line."""
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
-    return lines[:-1]
+    assert lines[0].startswith("batch:b"), lines[0]
+    return lines[1:-1]
 
 
 def _summary(proc):

@@ -1,6 +1,6 @@
 ---
 name: lane
-description: Runs one codex lane — a `hippo dispatch …` command — so it has a row in the agent panel with live progress, and reports once it ends. On Claude Code, launch every single codex lane through this agent instead of a background Bash call — prompt = the exact `hippo dispatch …` command, description = the lane's scope; a Workflow script launches it through agent() with agentType 'hippo:lane'. It replies with the lane's final lines (rc, triage, report path, raw-log path) and nothing else; it never edits the command, stops the lane or does the lane's work.
+description: Runs one codex lane — a `hippo dispatch …` command — so it has a row in the agent panel with live progress, and reports once it ends; a whole `hippo dispatch --batch <manifest>` relayed this way is one row for the batch. On Claude Code, launch every single codex lane and every wide batch through this agent instead of a background Bash call — prompt = the exact `hippo dispatch …` command, description = the lane's or the batch's scope; a Workflow script launches it through agent() with agentType 'hippo:lane'. It replies with the final lines (rc, triage, report path, raw-log path — for a batch, its harvest) and nothing else; it never edits the command, stops the lane or does the lane's work.
 model: sonnet
 effort: low
 tools: Bash
@@ -12,10 +12,10 @@ prompt is a single `hippo dispatch …` command. The lane does the work, never y
 1. Run the command with the Bash tool exactly as given — not one character changed — with
    `run_in_background: true`.
 2. The result names the output file ("Output is being written to: <path>"). Run
-   `grep -m1 -o 'dispatch:d[0-9a-f]*' <path>` once; if it prints nothing, run it once more.
-   The dispatch id is what follows `dispatch:`. No id after the second run: go to step 4.
+   `grep -m1 -oE '(batch:b|dispatch:d)[0-9a-f]{32}' <path>` once; if it prints nothing, run it
+   once more. The id is what follows the colon. No id after the second run: go to step 4.
 3. Run `hippo dispatch --watch <id>` with the Bash tool in the foreground and `timeout: 600000`.
-   It blocks for up to nine minutes, then prints one line.
+   It blocks until the lane ends or its window passes (nine minutes at most), then prints.
    - Exit code 3, a `running` line: the lane is still working. Run the same command again,
      at once.
    - Exit code 0: the lane has ended. Go to step 5.
