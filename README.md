@@ -31,7 +31,9 @@ The plugin, its slash commands, and the CLI are all named `hippo`.
 - **lanes** (`.hippo/lanes/`) — `hippo dispatch` keeps each codex lane's raw stderr
   (`<id>.log`), its final message (`<id>.out`) and a small record (`<id>.json`); the shell
   sees one short line per command or message instead of megabytes of codex output, and
-  `hippo dispatch --watch <id>` blocks until a lane ends and prints its final lines.
+  `hippo dispatch --watch <id>` blocks until a lane ends and prints its final lines. A batch
+  keeps a record of its own (`batch:<id>`), so in Claude Code it is one agent row — or, through
+  the Workflow its `--dry-run` writes, one watched agent per lane.
 - **4 hooks** (`hooks/hooks.json` on both hosts, plus Claude Code's
   `hooks/claude-hooks.json`) — `SessionStart` re-injects a ≤6-line status
   block (survives compaction); `Stop` fires the scribe clerk detached, never
@@ -149,8 +151,8 @@ hippo directive withdraw <id>
 hippo prior show
 hippo prior distill [--days N]
 hippo dispatch --kind K --scope S [--task T] [--depth N] [--fast] [--] <codex exec args…>
-hippo dispatch --batch <manifest.yaml> [--dry-run]
-hippo dispatch --watch <dispatch-id> [--for SECONDS]
+hippo dispatch --batch <manifest.yaml> [--dry-run | --entry <id>]  # --entry: the Workflow face's call, never typed
+hippo dispatch --watch <dispatch-id|batch-id> [--for SECONDS]
 # a bare noun reads: task → list, log → tail, directive → list, prior → show
 ```
 

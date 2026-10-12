@@ -10,12 +10,14 @@ import concurrent.futures
 import contextlib
 import fcntl
 import fnmatch
+import functools
 import hashlib
 import io
 import json
 import os
 import queue
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -289,12 +291,52 @@ def read_ledger(hp):
     return out
 
 
+# What a delegation's end writes: the wrapper at a lane's exit, the scribe's own code at a
+# native run's (§3.5.3c). Any of them says the delegation has ended (`still_running`).
+EXIT_EVS = ("usage", "triage")
+# The ones that also say *when* (`verdict_rows`), being written only at the end itself. A
+# lane's triage is not one: a batch harvest asks the judge again for a lane whose triage failed
+# or was off at its exit (§3.6), on a later run of the batch — any time after the lane ended.
+END_ROWS = {("usage", "wrapper"), ("usage", "scribe"), ("triage", "scribe")}
+
+
+def verdict_rows(rows):
+    """The outcome rows that are verdicts, in ledger order. Two kinds of outcome row are not.
+
+    An executor's self-report (src=executor) is a claim, not a verdict (§9.2). And a scribe
+    outcome stamped before its delegation ended is a reading of a launch, not of work (§3.5.6b)
+    — measured (steno, 2026-10-01): "No verdict yet. I just launched two lanes" became two
+    `accepted` rows that PRIORS read as first-pass accepts, while the lanes ran on for 16 and 30
+    minutes and main later judged them `revised` and `lost`. The end is dated by the first row
+    written at it (END_ROWS): a lane's `usage`, which its wrapper writes at the exit, or a native
+    run's `usage` or `triage`, which the scribe's code writes in the run that saw the end. The
+    scribe writes the clerk's events, then a run's end rows, then its own `turn-scribe` meter,
+    so an end row of its own with no meter between it and the outcome came from the same scribe
+    run: the run ended in the window the verdict was read from, and the verdict stands. No end
+    row, no skip — nothing is guessed. The ledger is never rewritten; this is the one place
+    every reader of a verdict asks."""
+    run, end, outs = 0, {}, []  # run: how many scribe runs had closed before a row
+    for i, e in enumerate(rows):  # append-only, so file order is write order
+        ev, src = e.get("ev"), e.get("src")
+        if ev == "outcome" and src != "executor":
+            outs.append((i, run, e))
+        elif (ev, src) in END_ROWS:
+            end.setdefault(e.get("ref"), (i, run if src == "scribe" else None))
+        elif ev == "clerk" and e.get("name") == "turn-scribe" and src == "scribe":
+            run += 1
+
+    def early(i, r, e):
+        at, by_run = end.get(e.get("ref"), (None, None))
+        return e.get("src") == "scribe" and at is not None and at > i and by_run != r
+
+    return [e for i, r, e in outs if not early(i, r, e)]
+
+
 def judged_refs(rows):
-    """Dispatch ids that carry a *verdict*. An executor's self-report (src=executor) is a
-    claim, not a verdict (§9.2) — it never counts as judged anywhere that word matters: the
-    in-flight line, the scribe's re-judge rule, the task: ref resolution, the priors join."""
-    return {e.get("ref") for e in rows
-            if e.get("ev") == "outcome" and e.get("src") != "executor"}
+    """Dispatch ids that carry a *verdict* (`verdict_rows`). A lane's claim and a scribe reading
+    of a launch never count as judged anywhere that word matters: the in-flight line, the
+    scribe's re-judge rule, the task: ref resolution, the priors join."""
+    return {e.get("ref") for e in verdict_rows(rows)}
 
 
 def executor_claims(rows):
@@ -1631,26 +1673,73 @@ def validate_scribe_event(e):
     return None
 
 
-def check_scribe_outcome(hp, e):
-    """Scribe-only, like validate_scribe_event: a second verdict for a dispatch is rejected.
+def check_scribe_outcome(hp, e, native=None, held=None):
+    """Scribe-only, like validate_scribe_event: a second verdict for a dispatch is rejected, and
+    so is a verdict on a delegation in flight — when the roster was built (`held`, ref → why,
+    from `dispatch_roster`) or now (`still_running`). The roster's reading is the one the
+    clerk's window matches: a lane that ends while the clerk reads (steno: a median 7s, up to
+    88s) is still a launch in that window, and its exit row lands before the verdict, so no
+    view would set the verdict aside either.
 
     The prompt has always said "at most one outcome per dispatch", and the roster marks the
     judged ones — and the clerk re-judged anyway, measured on this repo's own ledger: one
     dispatch judged `revised` was re-judged `accepted` by two later scribe runs, and a verdict
     main had recorded through the CLI was restated by the scribe 26 seconds later. Same lesson
     as the dispatch roster (§3.5.5): a prompt cannot hold a rule its writer does not check.
+    The prompt also said "never attach an outcome to a delegation still in flight", and a
+    medium-effort clerk read "No verdict yet. I just launched two lanes" as two acceptances
+    (steno, 2026-10-01) — the same lesson again.
 
     Main is different on purpose. A deliberate re-verdict (say, `revised` upgraded after
     rework) is main's call to make; it gets a stderr note, never a refusal — and the priors
     read the first verdict either way (the routing table is a first-pass rate)."""
     if e.get("ev") != "outcome":
         return None
+    rows = read_ledger(hp)
     # A lane's self-report is a claim, not a verdict (§9.2): the scribe recording main's
     # explicit acceptance signal *after* a claim is the normal flow, not a re-judgment.
-    if e.get("ref") in judged_refs(read_ledger(hp)):
+    if e.get("ref") in judged_refs(rows):
         return (f"ev=outcome: ref={e.get('ref')!r} already has a verdict — the scribe does not "
                 "re-judge (at most one outcome per dispatch; a second verdict belongs to main)")
+    why = (held or {}).get(e.get("ref")) or still_running(hp, e.get("ref"), rows, native)
+    if why:
+        return (f"ev=outcome: ref={e.get('ref')!r} was still running when this window was read: "
+                f"{why}. A verdict needs an ended delegation; a launch or a progress line is "
+                "not one")
     return None
+
+
+def still_running(hp, ref, rows, native=None):
+    """Why the delegation `ref` names is in flight right now → a reason, or None once it has
+    ended — or when nothing can tell, since a guess here would block a real verdict.
+
+    A native run (§3.5.3c) is read from this window's index (`native`): a notification, a
+    TaskStop or a run file's end. A wrapper lane from its record, as `--watch` reads it: no
+    `ended` and the wrapper alive is running; a wrapper that is gone ended or was lost, and a
+    lost lane is not in flight — it must never hold a verdict off forever. With no record (it
+    could not be written, or was removed), a wrapper launch with no exit row in the ledger may
+    still run within the day the capsule calls in flight (IN_FLIGHT_WINDOW_H): measured over
+    454 wrapper launches in 13 ledgers (2026-10-02), the longest ran 3.6h to its exit row, and
+    11 never wrote one. Any other dispatch — main's own row, a clerk's — has no end to wait
+    for."""
+    runs = (native or {}).get("runs", {}).values()
+    run = next((r for r in runs if ref in (r["id"], r["ref"])), None)
+    if run is not None:
+        return None if run["ended"] else (f"native run {run['id']} has not ended (no "
+                                          "notification, TaskStop or end in its run file yet)")
+    if not isinstance(ref, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", ref):
+        return None
+    rec = _read_json(hp / "lanes" / f"{ref}.json")
+    if rec:
+        return (f"its lane record has no end and its wrapper (pid {rec.get('pid')}) is alive"
+                if watch_state(rec) == "running" else None)
+    launch = next((e for e in rows if e.get("ev") == "dispatch" and e.get("id") == ref
+                   and e.get("src") == "wrapper"), None)
+    t, now = event_time(launch or {}), datetime.now(timezone.utc)
+    if (t is None or now - t > timedelta(hours=IN_FLIGHT_WINDOW_H)
+            or any(e.get("ev") in EXIT_EVS and e.get("ref") == ref for e in rows)):
+        return None
+    return f"no lane record and no exit row yet, launched {age_label(t, now)} ago"
 
 
 def check_scribe_directive(hp, e, start):
@@ -1891,12 +1980,10 @@ def cmd_log(args):
             if getattr(args, k) is not None:
                 e[k] = getattr(args, k)
         # Claims (src=executor) do not make this "a second verdict" — main judging a claimed
-        # dispatch is the intended sequence, and the note would train the reader to skim.
-        prior_verdicts = [
-            x for x in read_ledger(args.hp)
-            if x.get("ev") == "outcome" and x.get("ref") == e["ref"]
-            and x.get("src") != "executor"
-        ]
+        # dispatch is the intended sequence, and the note would train the reader to skim. Nor
+        # does a scribe reading of the launch: PRIORS reads main's verdict as the first.
+        prior_verdicts = [x for x in verdict_rows(read_ledger(args.hp))
+                          if x.get("ref") == e["ref"]]
     elif args.ev == "review":
         e.update(id=args.id, base=args.base, source=args.source, findings=args.findings)
     elif args.ev == "review-status":
@@ -2046,11 +2133,10 @@ def prior_cells(rows, prices=None):
     implementation of the join would be a second answer to the same question."""
     prices = prices or load_prices()
     first = {}
-    # Self-reported outcomes are claims, not verdicts (§9.2): they enter no cell, no
-    # attribution count, no unjoined count. The scorecard folds only judgments.
-    for e in rows:  # the ledger is append-only, so file order is chronological
-        if e.get("ev") == "outcome" and e.get("src") != "executor":
-            first.setdefault(e.get("ref"), e)
+    # Claims and scribe readings of a launch are not verdicts (`verdict_rows`): they enter no
+    # cell, no attribution count, no unjoined count. The scorecard folds only judgments.
+    for e in verdict_rows(rows):  # the ledger is append-only, so file order is chronological
+        first.setdefault(e.get("ref"), e)
     usage = {}
     for e in rows:  # the last row per (dispatch, model): a native run's rows are cumulative,
         if e.get("ev") == "usage":  # one per model (§3.5.3c); a codex lane has one model
@@ -2107,13 +2193,16 @@ def triage_agreement(rows):
     Stop — §3.5.3c) counts wherever it lands: it is written after a verdict main typed that
     same turn, main never sees it, and it never reaches the clerk that reads the verdict off
     the transcript, so it is an independent reading either way. A ledger with no triage row
-    gets no section: with no key the page is exactly what it was."""
+    gets no section: with no key the page is exactly what it was. The verdict is the first of
+    `verdict_rows`: a scribe reading of the launch is not one, and a route recorded after it is
+    still before the verdict."""
     tri, first = {}, {}
+    counted = {id(e) for e in verdict_rows(rows)}
     for e in rows:  # chronological, so "before the verdict" is file order
         ref = e.get("ref")
         if e.get("ev") == "triage" and (ref not in first or e.get("src") == "scribe"):
             tri[ref] = e.get("route")
-        elif e.get("ev") == "outcome" and e.get("src") != "executor":
+        elif id(e) in counted:
             first.setdefault(ref, e.get("result"))
     if not tri:
         return []
@@ -2158,9 +2247,9 @@ def prior_facts(rows, now, prices=None):
     does the sums, and it is no longer handed the raw ledger to do them from."""
     prices = prices or load_prices()
     disp = [e for e in rows if e.get("ev") == "dispatch"]
-    # Self-reported outcomes are claims, not verdicts (§9.2): they enter no cell, no
-    # attribution count, no unjoined count. The scorecard folds only judgments.
-    outs = [e for e in rows if e.get("ev") == "outcome" and e.get("src") != "executor"]
+    # Claims and scribe readings of a launch are not verdicts (`verdict_rows`): they enter no
+    # cell, no attribution count, no unjoined count. The scorecard folds only judgments.
+    outs = verdict_rows(rows)
     first = {}
     for e in outs:  # the ledger is append-only, so file order is chronological
         first.setdefault(e.get("ref"), e)
@@ -2335,17 +2424,19 @@ def cmd_distill(args):
 
 def distill_due(hp):
     """§3.5.8: PRIORS is missing or older than DISTILL_STALE_DAYS, and DISTILL_MIN_NEW verdicts
-    (outcomes that are not executor claims — the ones PRIORS reads) landed after the last
-    distiller row. Counted from the ledger, never a counter file. A failed run resets the count
-    too: a dead clerk must not be re-billed at every Stop (the cursor rule of §3.5.6)."""
+    (`verdict_rows` — the ones PRIORS reads) landed after the last distiller row. Counted from
+    the ledger, never a counter file. A failed run resets the count too: a dead clerk must not
+    be re-billed at every Stop (the cursor rule of §3.5.6)."""
     p = hp / "PRIORS.md"
     if p.exists() and time.time() - p.stat().st_mtime < DISTILL_STALE_DAYS * 86400:
         return False
+    rows = read_ledger(hp)
+    counted = {id(e) for e in verdict_rows(rows)}
     new = 0
-    for e in read_ledger(hp):
+    for e in rows:
         if e.get("ev") == "clerk" and e.get("name") == "distiller":
             new = 0
-        elif e.get("ev") == "outcome" and e.get("src") != "executor":
+        elif id(e) in counted:
             new += 1
     return new >= DISTILL_MIN_NEW
 
@@ -2398,9 +2489,10 @@ DISPATCH_USAGE = (
     "       children, which start at depth 0 (§9.5 — the clause is indexed, never enforced)\n"
     '       --fast: launch on codex\'s fast service tier (-c service_tier="fast"); '
     "the exec axis is unchanged\n"
-    "       batch form: hippo dispatch --batch <manifest.yaml> [--dry-run]\n"
-    "       watch form: hippo dispatch --watch <dispatch-id> [--for SECONDS] — blocks until the\n"
-    "       lane ends (exit 0, its final lines) or SECONDS pass (default 540; exit 3, its state)"
+    "       batch form: hippo dispatch --batch <manifest.yaml> [--dry-run | --entry <id>]\n"
+    "       watch form: hippo dispatch --watch <dispatch-id|batch-id> [--for SECONDS] — blocks\n"
+    "       until the lane or batch ends (exit 0, its final lines) or SECONDS pass (exit 3, its\n"
+    "       state); default 540, or 60 for a lane launched by --entry (the Workflow face)"
 )
 
 
@@ -2573,6 +2665,19 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 # command's output never does.
 CODEX_EXEC_RE = re.compile(r"^(?:\S*/)?(?:ba|z|da|k)?sh -l?c (['\"])(.*?)(?:\1 in [/~].*)?$")
 SENTENCE_RE = re.compile(r"^(.+?[.!?。！？])(?=\s|$)")
+# A model-capacity failure, as codex prints it: its own `ERROR: ` line on stderr as the
+# attempt's last word — nothing after it but the footer — then a non-zero exit. Measured once
+# (b200-cluster, 2026-10-01T15:59Z, codex-cli 0.159.2, gpt-6.1-sol high, 5 minutes in): an
+# agent message, `ERROR: Selected model is at capacity. Please try a different model.` twice,
+# the footer, rc 1 — and the same session resumed by hand was accepted at once. Only a line
+# seen in a real log joins this tuple: a guessed one would resume a lane whose failure a resume
+# repeats.
+CAPACITY_SIGNATURES = ("Selected model is at capacity",)
+CAPACITY_WAITS = (60, 120, 240)  # seconds before resume 1, 2, 3 of a lane at capacity
+RESUME_CONTINUE = ("Continue the same task from where you stopped; do not redo finished steps; "
+                   "end with the report your original prompt asked for.")
+CAPACITY_CONTINUE = ("Your previous turn stopped on a server capacity error before you "
+                     "finished. " + RESUME_CONTINUE)
 
 
 def lane_elapsed(seconds):
@@ -2656,19 +2761,35 @@ class Lane:
     turns it into two things: the compact event stream on the wrapper's stderr (one line per
     command and per agent message, at most one per LANE_EVERY), and the record in
     .hippo/lanes/<id>.json — the few facts the rollout cannot give back cheaply. It also owns
-    the lane's signal: codex runs in a session of its own, so a signal reaches it only here."""
+    the lane's signal: codex runs in a session of its own, so a signal reaches it only here.
 
-    def __init__(self, did, scope, exec_, record, log, report, out=None):
+    `kind`, `task`, `depth` and `codex_args` (codex's arguments without the prompt — None when
+    there is no prompt to take off) are what a `resume:` line is made of (resume_command):
+    on record from the start, because a killed wrapper may not live to print one."""
+
+    def __init__(self, did, scope, exec_, record, log, report, kind, task="", depth=0,
+                 codex_args=None, out=None, face=None):
         self.path = record  # None: no .hippo/, no record — the stream still runs
         self.out = out or sys.stderr
         self.label = one_line(scope, LANE_SCOPE_CHARS)
         self.t0 = time.monotonic()
-        self.rec = {"id": did, "scope": scope, "exec": exec_, "pid": os.getpid(), "pgid": None,
-                    "started": now_iso(), "codex_session": None, "cmds": 0, "last": None,
-                    "last_at": None, "log": str(Path(log).absolute()),
+        self.since = time.time()  # what the session's rollout held before this is not its cost
+        self.rec = {"id": did, "scope": scope, "kind": kind, "exec": exec_, "pid": os.getpid(),
+                    "pgid": None, "started": now_iso(), "codex_session": None, "cmds": 0,
+                    "last": None, "last_at": None, "log": str(Path(log).absolute()),
                     "report": str(Path(report).absolute()) if report else None}
+        if task:
+            self.rec["task"] = task
+        if depth:
+            self.rec["depth"] = depth
+        if codex_args is not None:
+            self.rec["codex_args"] = codex_args
+        self.rec["attempts"] = []
+        if face:  # `workflow`: launched by `--batch … --entry`, so --watch polls each minute
+            self.rec["face"] = face
         self.session_id = self.model = ""
         self.footer_total = None
+        self.capacity = False  # this attempt's stderr ends on a CAPACITY_SIGNATURES line (feed)
         self.tail = collections.deque(maxlen=400)  # what triage reads of stderr — never more
         self.signal = None
         self._signal_at = None
@@ -2690,7 +2811,16 @@ class Lane:
         """One raw stderr line: the banner facts usage collection has always read, then the
         two event shapes."""
         self.tail.append(line)
-        s = ANSI_RE.sub("", line).strip()
+        bare = ANSI_RE.sub("", line).rstrip()
+        s = bare.strip()
+        # A capacity line counts while it is the attempt's last word: codex's own, at the start
+        # of the line, followed by nothing but blank lines and the footer. Any other line ends
+        # it — so a command whose output quotes one (a lane reading another lane's log), then a
+        # failure of some other kind, is never taken for a capacity loss and resumed.
+        if any(bare.startswith(f"ERROR: {sig}") for sig in CAPACITY_SIGNATURES):
+            self.capacity = True
+        elif s and s != "tokens used" and self._prev != "tokens used":
+            self.capacity = False
         if not self.session_id and s.startswith("session id:"):
             self.session_id = s.split(":", 1)[1].strip()
             self.rec["codex_session"] = self.session_id
@@ -2727,6 +2857,48 @@ class Lane:
         line = f"lane {self.label} · {lane_elapsed(time.monotonic() - self.t0)} · {text}"
         self.out.write(unprompt(line) + "\n")
         self.out.flush()
+
+    def announce(self, text):
+        """An event of the wrapper's own, on the stream and the record at once — after any
+        event still pending, so the stream keeps its order."""
+        if self._pending is not None:
+            self.say(self._pending)
+            self._pending = None
+        self._said = time.monotonic()
+        self.rec["last"], self.rec["last_at"] = text, now_iso()
+        self.say(text)
+        self.write()
+
+    def attempt_started(self):
+        self.capacity, self._prev, self._header = False, "", None
+        self.rec.pop("waiting", None)
+        self.rec["attempts"].append({"started": now_iso(), "rc": None, "reason": None})
+        self.write()
+
+    def attempt_ended(self, rc, timed_out):
+        """→ why this attempt ended: `signal`, `timeout`, `capacity` (non-zero, its stderr
+        ending on a CAPACITY_SIGNATURES line) or `exit`. On record with the next write."""
+        reason = ("signal" if self.signal is not None else "timeout" if timed_out else
+                  "capacity" if rc != 0 and self.capacity else "exit")
+        self.rec["attempts"][-1].update(rc=rc, reason=reason)
+        return reason
+
+    def wait_to_resume(self, seconds, n):
+        """The wait before resume `n`: on the stream, on record for --watch (`waiting`), and cut
+        short by a stop — a signal now ends the lane at once → False. The kill trap is the same
+        one: the handlers stay installed, and the caller goes straight to finish. No codex runs
+        while it waits, so there is no group to forward a stop to — and the last attempt's group
+        id, its members gone, may already name another process's group."""
+        self.rec["pgid"] = None
+        of = len(CAPACITY_WAITS)
+        until = datetime.fromtimestamp(time.time() + seconds, timezone.utc)
+        self.rec["waiting"] = {"resume": n, "of": of,
+                               "until": until.strftime("%Y-%m-%dT%H:%M:%SZ")}
+        self.announce(f"model at capacity — resuming in {seconds:g}s (resume {n} of {of})")
+        end = time.monotonic() + seconds
+        while self.signal is None and (left := end - time.monotonic()) > 0:
+            time.sleep(min(0.2, left))
+        return self.signal is None
 
     def tick(self):
         """Emit the newest pending event and write the record, when the cadence allows — and a
@@ -2786,18 +2958,58 @@ class Lane:
         if self._pending is not None:
             self.say(self._pending)
             self._pending = None
+        self.rec.pop("waiting", None)
         self.rec.update({"status": status, "rc": rc})
         if self.signal is not None:
             self.rec["signal"] = signal.Signals(self.signal).name
             self.kill(signal.SIGKILL)  # a stopped lane leaves nothing of its group behind
         self.write()
 
-    def close(self, triage_line=None):
-        """`ended` is written last, so a reader that sees it has every final line."""
-        if triage_line:
-            self.rec["triage"] = triage_line
+    def close(self, t=None):
+        """The triage `t` (the judge's reading, or None) as its line and its cause, then
+        `ended`, written last: a reader that sees it has every final line."""
+        if t and t.get("route"):
+            self.rec["triage"] = triage_line(t)
+        if t and triage_cause(t) in CAUSES:
+            self.rec["cause"] = triage_cause(t)
         self.rec["ended"] = now_iso()
         self.write()
+
+
+def run_lane(lane, run_once, raw, codex_args, deadline=None):
+    """codex for one lane, launch to end (§3.6) → (rc, timed_out) of its last attempt.
+    `run_once(tail)` runs codex once — as launched when `tail` is None, else as `codex exec
+    <codex_args> <tail>` — and returns (rc, timed_out). An attempt that ended non-zero on a
+    CAPACITY_SIGNATURES line (its last word, Lane.feed), unsignalled and in time, with a
+    session to resume, is followed by a resume of that session after the next wait in
+    CAPACITY_WAITS — a harness loss recovered, not a judgment: the verdict stays main's and
+    every attempt is on record. It stays one lane: one record (its `attempts`), one raw log (a
+    separator line before each resume), the last attempt's report, and the caller's one usage
+    row and one triage."""
+    tail, of = None, len(CAPACITY_WAITS)
+    while True:
+        lane.attempt_started()
+        rc, timed_out = run_once(tail)
+        n = len(lane.rec["attempts"])  # the resume this one would be
+        if (lane.attempt_ended(rc, timed_out) != "capacity" or codex_args is None
+                or not lane.session_id):
+            return rc, timed_out
+        if n > of:
+            lane.announce(f"model at capacity — all {of} resumes used; the lane ends")
+            return rc, timed_out
+        wait = CAPACITY_WAITS[n - 1]
+        if deadline is not None and time.monotonic() + wait >= deadline:
+            lane.announce("model at capacity — not resumed: the entry's timeout ends first")
+            return rc, timed_out
+        if not lane.wait_to_resume(wait, n):
+            return rc, timed_out
+        sep = (f"\n--- hippo: resume {n} of {of} of session {lane.session_id} after a "
+               f"model-capacity error · {now_iso()} ---\n")
+        raw.write(sep.encode())
+        raw.flush()
+        lane.tail.append(sep)  # the judge reads where one attempt ends and the next begins
+        lane.announce(f"resumed: session {lane.session_id} (resume {n} of {of})")
+        tail = ["resume", lane.session_id, CAPACITY_CONTINUE]
 
 
 def pump_lane(child, lane, raw, deadline=None):
@@ -2912,7 +3124,8 @@ def run_dispatch(argv):
         fd, name = tempfile.mkstemp(prefix=f"hippo-{did}-", suffix=".log")
         os.close(fd)
         log, report_copy, record = Path(name), None, None
-    lane = Lane(did, scope, exec_label(rest), record, log, report_copy)
+    lane = Lane(did, scope, exec_label(rest), record, log, report_copy, kind, task, depth,
+                codex_resume_args(rest, Path.cwd()))
     print(f"dispatch:{did}", flush=True)
     # The lane inherits its own dispatch id (§9.2): every hippo write it makes arrives as
     # src=executor, and `log outcome` needs no --ref. Set even when the record failed — the
@@ -2928,7 +3141,10 @@ def run_dispatch(argv):
     on = jev_backend(hp) != "off"
     brief, report, own_report = None, None, False
     if on:
-        brief = prompt_of(rest)
+        # A dispatch that resumes a session (a `resume:` line) ends on a continuation, not the
+        # task — that is in the session. No brief, then: no notes priced on the continuation,
+        # and a triage that reads none rather than the wrong text (prompt_of).
+        brief = prompt_of(rest) if codex_resume_at(rest[:-1]) is None else None
         if brief is not None:
             dispatch_launch_notes(hp, kind, scope, brief, rest)
         report = output_last_message(rest)
@@ -2947,32 +3163,42 @@ def run_dispatch(argv):
     # than being swallowed while codex starts anyway only to be killed.
     for s in LANE_SIGNALS:
         signal.signal(s, lambda signum, _frame: lane.stop(signum))
-    try:
-        child = subprocess.Popen(
-            ["codex", "exec", *rest], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, start_new_session=True,
-        )
-    except OSError as err:
-        lane.finish(127, "exited")
-        lane.close()
-        die(f"dispatch: could not run codex: {err}", 127)
-    lane.launched(child.pid)
-    with contextlib.ExitStack() as files:
-        copy = files.enter_context(report_copy.open("wb")) if report_copy else None
-        tee = threading.Thread(target=tee_stdout, args=(child.stdout, copy), daemon=True)
-        tee.start()
-        pump_lane(child, lane, files.enter_context(log.open("wb")))
-        rc = child.wait()
-        tee.join(timeout=LANE_DRAIN)
+    capture = rest[:2] if own_report else []
+    with log.open("wb") as raw:
+
+        def run_once(tail):
+            if tail is not None and own_report:
+                report.write_bytes(b"")  # the last attempt's message, never an earlier one's
+            argv = rest if tail is None else [*capture, *lane.rec["codex_args"], *tail]
+            try:
+                child = subprocess.Popen(
+                    ["codex", "exec", *argv], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, start_new_session=True,
+                )
+            except OSError as err:
+                print(f"dispatch: could not run codex: {err}", file=sys.stderr)
+                raw.write(f"could not run codex: {err}\n".encode())
+                return 127, False
+            lane.launched(child.pid)
+            with contextlib.ExitStack() as files:
+                copy = files.enter_context(report_copy.open("wb")) if report_copy else None
+                tee = threading.Thread(target=tee_stdout, args=(child.stdout, copy), daemon=True)
+                tee.start()
+                pump_lane(child, lane, raw)
+                rc = child.wait()
+                tee.join(timeout=LANE_DRAIN)
+            return rc, False
+
+        rc, _ = run_lane(lane, run_once, raw, lane.rec.get("codex_args"))
     status = "killed" if lane.signal is not None else "exited"
     lane.finish(rc, status)
-    usage = collect_usage(lane.session_id, lane.model, lane.footer_total)
+    usage = collect_usage(lane.session_id, lane.model, lane.footer_total, lane.since)
     if bad is None and usage is not None:
         append_event(hp, {"ev": "usage", "ref": did, **usage}, src="wrapper")
     how = f"killed by {lane.rec['signal']}" if lane.signal is not None else "exited"
     tokens = f" · {usage['tokens']:,} tokens" if usage else ""
     lane.say(f"{how} rc={rc} · {lane.rec['cmds']} cmds{tokens} · raw log {log}")
-    line = None
+    t = None
     if on:
         ex = {"rc": rc, "check_rc": None}
         state = triage_state(scope, kind, brief, ex,
@@ -2980,24 +3206,36 @@ def run_dispatch(argv):
                              _read_text(report) or None, strip_codex_noise("".join(lane.tail)),
                              None, lane_dir(rest, Path.cwd()))
         t = triage(hp, state, ex, did if bad is None else None)
-        line = triage_line(t) if t["route"] else None
-        print(f"dispatch: {line}" if line else
+        print(f"dispatch: {triage_line(t)}" if t["route"] else
               f"dispatch: no triage — the judge did not answer ({t['jev']['reason']})",
               file=sys.stderr)
         if own_report:
             report.unlink(missing_ok=True)
-    lane.close(line)
+    lane.close(t)
+    cmd = resume_command(lane.rec)
+    if cmd:  # last: what main runs to go on from here, read off the record as --watch reads it
+        print(f"resume: {cmd}", file=sys.stderr)
     sys.exit(128 + lane.signal if lane.signal is not None else rc)
 
 
 WATCH_FOR = 540  # seconds: under the Bash tool's 600s ceiling, so one call never outlives it
+# A lane launched through `--entry` is relayed from inside a Workflow, where nothing hippo prints
+# draws a row (the subagentStatusLine is not run for a Workflow's agents — measured, 2026-10-01)
+# and the relay's own tool results are the only live view: one a minute, at ~$0.005 a call.
+WATCH_FOR_WORKFLOW = 60
 WATCH_POLL = 1.0
 WATCH_RUNNING = 3  # exit status while the lane runs on; 0 once it ended, 2 for no such lane
-WATCH_USAGE = "usage: hippo dispatch --watch <dispatch-id> [--for SECONDS]"
+WATCH_USAGE = "usage: hippo dispatch --watch <dispatch-id|batch-id> [--for SECONDS]"
+# A batch's harvest up to this many lines is printed by --watch; a longer one is named by path.
+# The relay copies its last call's output into its reply verbatim, so a 222-row table would be
+# paid again as relay output tokens and copied by a model — the file costs nothing to name.
+HARVEST_INLINE_LINES = 40
+SAFE_ID_RE = re.compile(r"[A-Za-z0-9_-]+")  # an id that is a filename and nothing else
 
 
 def parse_watch_argv(argv):
-    did, secs, i = None, float(WATCH_FOR), 0
+    """→ (id, seconds or None). None leaves the window to the record (watch_window)."""
+    did, secs, i = None, None, 0
     while i < len(argv):
         a = argv[i]
         if a in ("--watch", "--for") and i + 1 < len(argv):
@@ -3008,7 +3246,7 @@ def parse_watch_argv(argv):
         else:
             die(f"dispatch --watch: unexpected argument {a!r}\n{WATCH_USAGE}", 2)
         if a == "--watch":
-            did = val.removeprefix("dispatch:")
+            did = val.removeprefix("dispatch:").removeprefix("batch:")
             continue
         try:
             secs = float(val)
@@ -3016,10 +3254,17 @@ def parse_watch_argv(argv):
             secs = -1.0
         if secs < 0:
             die(f"dispatch --watch: --for takes seconds, 0 or more: {val!r}\n{WATCH_USAGE}", 2)
-    if not did or not re.fullmatch(r"[A-Za-z0-9_-]+", did):
-        die(f"dispatch --watch: a dispatch id is required, as printed on `dispatch:<id>`\n"
-            f"{WATCH_USAGE}", 2)
+    if not did or not SAFE_ID_RE.fullmatch(did):
+        die(f"dispatch --watch: an id is required, as printed on `dispatch:<id>` or "
+            f"`batch:<id>`\n{WATCH_USAGE}", 2)
     return did, secs
+
+
+def watch_window(rec):
+    """How long one --watch call blocks when `--for` does not say: a minute for a lane the
+    Workflow face launched (its relay's tool results are its only live view), nine minutes
+    otherwise (a plain agent row is drawn by lane_status.py, so its relay need not poll)."""
+    return WATCH_FOR_WORKFLOW if rec.get("face") == "workflow" else WATCH_FOR
 
 
 def pid_alive(pid):
@@ -3037,7 +3282,8 @@ def pid_alive(pid):
 def watch_state(rec):
     """ended | running | lost. `ended` is the wrapper's last write (Lane.close), and a wrapper
     that died after recording its status — SIGKILLed before codex exited, or while the judge
-    was still reading — has ended too; one that recorded nothing and is gone is lost."""
+    was still reading — has ended too; one that recorded nothing and is gone is lost. A batch
+    record reads the same way."""
     if rec.get("ended"):
         return "ended"
     if pid_alive(rec.get("pid")):
@@ -3061,6 +3307,11 @@ def watch_lines(rec, state):
     last = rec.get("last") or "no event yet"
     if state == "running":
         took = lane_elapsed(_iso_seconds(rec.get("started")))
+        wait = rec.get("waiting")
+        if isinstance(wait, dict):  # between attempts: the wait is what it is doing
+            left = lane_elapsed(-_iso_seconds(wait.get("until")))
+            return [f"lane {did} running · {took} · {cmds} cmds · model at capacity — resume "
+                    f"{wait.get('resume')} of {wait.get('of')} in {left}"]
         return [f"lane {did} running · {took} · {cmds} cmds · last: {last}"]
     if state == "lost":
         return [f"lane {did} lost — its wrapper (pid {rec.get('pid')}) is gone and recorded no "
@@ -3070,6 +3321,15 @@ def watch_lines(rec, state):
            "timed out" if rec.get("timed_out") else rec.get("status", "ended"))
     rc = "" if rec.get("rc") is None else f" rc={rec['rc']}"  # none: SIGKILLed before codex exited
     lines = [f"lane {did} {how}{rc} after {took} · {cmds} cmds · {rec.get('scope')}"]
+    attempts = rec.get("attempts") or []
+    if len(attempts) > 1:  # the wrapper resumed it: every attempt, as it ended
+        lines.append("attempts: " + " · ".join(
+            f"rc={a.get('rc')}" + (" model at capacity" if a.get("reason") == "capacity" else "")
+            for a in attempts))
+    if "check_rc" in rec:  # a batch entry's check — evidence its relay's reply must carry
+        crc = rec["check_rc"]
+        lines.append(f"check: {check_mark(crc)}{'' if crc in (None, 0) else f' rc={crc}'} · "
+                     f"{rec.get('check')}")
     if rec.get("triage"):
         lines.append(rec["triage"])
     report = rec.get("report")
@@ -3078,41 +3338,109 @@ def watch_lines(rec, state):
     else:
         lines.append("report: none — the lane printed no final message")
     lines.append(f"raw log: {rec.get('log')}")
+    cmd = resume_command(rec)
+    if cmd:
+        lines.append(f"resume: {cmd}")
     return lines
 
 
+def read_record(path):
+    """A lane or batch record, or None — absent, or caught mid-replace (a passing moment)."""
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def batch_last(rec, lanes):
+    """A batch's newest event, as `<scope>: <event>` — its own (a lane started or exited) or a
+    running lane's latest command or message. Only the lanes the batch record names as running
+    are read, never every file in .hippo/lanes/."""
+    best, at = rec.get("last"), rec.get("last_at") or ""
+    for did in rec.get("running_ids") or []:
+        lane = read_record(lanes / f"{did}.json") if SAFE_ID_RE.fullmatch(str(did)) else None
+        if lane and lane.get("last") and (lane.get("last_at") or "") >= at:
+            best = f"{one_line(lane.get('scope'), LANE_SCOPE_CHARS)}: {lane['last']}"
+            at = lane.get("last_at") or ""
+    return best or "no event yet"
+
+
+def batch_counts(rec):
+    return (f"{rec.get('running', 0)} running · {rec.get('done', 0)}/{rec.get('todo', 0)} done · "
+            f"{rec.get('failed', 0)} failed")
+
+
+def batch_watch_lines(rec, state, lanes):
+    """`--watch` on a batch id: one line while it runs; once it ended, its final lines and the
+    harvest — inline up to HARVEST_INLINE_LINES, named by path past that."""
+    stem = rec.get("stem")
+    if state == "running":
+        took = lane_elapsed(_iso_seconds(rec.get("started")))
+        return [f"batch {stem} running · {took} · {batch_counts(rec)} · "
+                f"last: {batch_last(rec, lanes)}"]
+    journal = f"journal: {rec.get('journal')}"
+    if state == "lost":
+        return [f"batch {stem} lost — its process (pid {rec.get('pid')}) is gone and recorded no "
+                f"end · {batch_counts(rec)}", journal]
+    took = lane_elapsed(_iso_seconds(rec.get("started"), rec.get("ended") or rec.get("last_at")))
+    how = f"killed by {rec['signal']}" if rec.get("signal") else rec.get("status", "ended")
+    rc = "" if rec.get("rc") is None else f" rc={rec['rc']}"
+    lines = [f"batch {stem} {how}{rc} after {took} · {rec.get('launched', 0)} launched · "
+             f"{rec.get('ok', 0)} ok · {rec.get('failed', 0)} failed · "
+             f"{rec.get('skipped', 0)} skipped"]
+    if rec.get("error"):
+        lines.append(f"error: {rec['error']}")
+    if rec.get("signal"):
+        lines.append(f"the journal holds every exit; `hippo dispatch --batch "
+                     f"{rec.get('manifest')}` resumes")
+    harvest = _read_text(Path(rec["harvest"])) if rec.get("harvest") else None
+    if harvest is None:
+        return lines + [journal]
+    table = harvest.splitlines()
+    if len(table) <= HARVEST_INLINE_LINES:
+        return lines + table
+    # The run's summary line still rides along: its counts and paths fit in one line.
+    return lines + [f"harvest: {rec['harvest']} · {len(table)} lines — read it before any lane",
+                    table[-1]]
+
+
 def run_watch(argv):
-    """`hippo dispatch --watch <id> [--for SECONDS]` (§3.6): block until the lane's record says
-    it ended or SECONDS pass, then print its state. Reads .hippo/lanes/ only and writes
-    nothing, so the hippo:lane agent can loop it in the foreground — a blocking call is what
-    keeps that agent's turn open, and an open turn is one final notification instead of an
-    interim one plus an extra wake-up (measured)."""
+    """`hippo dispatch --watch <id> [--for SECONDS]` (§3.6): block until the lane's — or the
+    batch's — record says it ended or the window passes, then print its state. Reads
+    .hippo/lanes/ only and writes nothing, so the hippo:lane agent can loop it in the
+    foreground — a blocking call is what keeps that agent's turn open, and an open turn is one
+    final notification instead of an interim one plus an extra wake-up (measured). The record
+    chooses the window (watch_window) unless `--for` names one."""
     did, secs = parse_watch_argv(argv)
     hp = find_hippo()
     if hp is None:
         die("dispatch --watch: no .hippo/ found from here — lane records live in .hippo/lanes/", 2)
-    path = hp / "lanes" / f"{did}.json"
-    deadline = time.monotonic() + secs
+    lanes = hp / "lanes"
+    path = lanes / f"{did}.json"
+    t0, window = time.monotonic(), secs
     while True:
-        try:
-            rec = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
+        if not path.exists():
             die(f"dispatch --watch: no lane record {path}", 2)
-        except (OSError, json.JSONDecodeError):
-            rec = None  # replaced whole on every write, so this is a passing moment
-        state = watch_state(rec) if isinstance(rec, dict) else "running"
-        if state != "running":
-            # The wrapper exits right after its last write; waiting for that lets the shell that
-            # ran it finish inside this call, not after the caller's turn.
-            gone_by = time.monotonic() + LANE_DRAIN
-            while pid_alive(rec.get("pid")) and time.monotonic() < gone_by:
-                time.sleep(0.1)
-            print("\n".join(watch_lines(rec, state)))
-            sys.exit(0)
-        left = deadline - time.monotonic()
+        rec = read_record(path)  # None: replaced whole on every write, so a passing moment
+        if rec is not None:
+            if window is None:
+                window = watch_window(rec)
+            lines = (functools.partial(batch_watch_lines, lanes=lanes) if "manifest" in rec
+                     else watch_lines)
+            state = watch_state(rec)
+            if state != "running":
+                # The wrapper exits right after its last write; waiting for that lets the shell
+                # that ran it finish inside this call, not after the caller's turn.
+                gone_by = time.monotonic() + LANE_DRAIN
+                while pid_alive(rec.get("pid")) and time.monotonic() < gone_by:
+                    time.sleep(0.1)
+                print("\n".join(lines(rec, state)))
+                sys.exit(0)
+        left = t0 + (WATCH_FOR if window is None else window) - time.monotonic()
         if left <= 0:
-            if isinstance(rec, dict):
-                print(watch_lines(rec, state)[0])
+            if rec is not None:
+                print(lines(rec, state)[0])
             sys.exit(WATCH_RUNNING)
         time.sleep(min(WATCH_POLL, left))
 
@@ -3123,6 +3451,81 @@ def prompt_of(rest):
     worse than none."""
     last = rest[-1] if rest else ""
     return last if not last.startswith("-") and len(last) > 40 else None
+
+
+# The options of `codex exec` and `codex exec resume` that take a value (0.159.2 `--help`): the
+# token after one is its value, never a subcommand — `-o resume` names a file.
+CODEX_VALUE_OPTIONS = frozenset((
+    "-c", "--config", "--enable", "--disable", "-i", "--image", "-m", "--model",
+    "--local-provider", "-p", "--profile", "-s", "--sandbox", "-C", "--cd", "--add-dir",
+    "--thread-source", "--output-schema", "--color", "-o", "--output-last-message"))
+
+
+def codex_resume_at(args):
+    """Where codex's args start a `resume` subcommand, or None: the first `resume` that is not
+    an option's value, before any `--`."""
+    for i, a in enumerate(args):
+        if a == "--":
+            return None
+        if a == "resume" and (i == 0 or args[i - 1] not in CODEX_VALUE_OPTIONS):
+            return i
+    return None
+
+
+def codex_resume_args(args, cwd):
+    """codex's arguments to resume a lane's session with → a list, or None when the last
+    argument is no prompt. The prompt comes off where codex's grammar puts it — last, with a
+    `--` before it — and so does a `resume …` the lane was itself launched with: `resume
+    <session> "<prompt>"` is appended to what is left. codex's own options stay before
+    `resume`, as `codex exec resume --help` (0.159.2) takes them. The working root is made
+    absolute — `-C <cwd>` added when they name none, a relative one resolved against `cwd` as
+    codex resolves it — so a resume run from another directory still works where the lane did."""
+    if len(args) >= 2 and args[-2] == "--":
+        base = args[:-2]
+    elif args and not args[-1].startswith("-"):
+        base = args[:-1]
+    else:
+        return None
+    at = codex_resume_at(base)
+    if at is not None:
+        base = base[:at]
+    if codex_cd(base) is None:
+        return [*base, "-C", str(cwd)]
+    out = []
+    for i, a in enumerate(base):
+        if i and base[i - 1] in ("-C", "--cd"):
+            a = str(Path(cwd) / a)
+        elif a.startswith("--cd="):
+            a = "--cd=" + str(Path(cwd) / a[len("--cd="):])
+        elif a.startswith("-C") and len(a) > 2:
+            a = "-C" + str(Path(cwd) / a[2:])
+        out.append(a)
+    return out
+
+
+def resume_command(rec):
+    """The `hippo dispatch` command that resumes a lane's codex session, from its record — for
+    a lane that ended killed, on a model-capacity error the wrapper did not resume away (its
+    resumes used up, or a batch entry's timeout too near), or whose triage named a cause a
+    resume can clear (transient, environment) — or None. None too without a session id or the
+    arguments to resume with: no line rather than a broken command. It launches a new single
+    dispatch — a batch lane's included — with the lane's labels and " (resumed)" on its scope."""
+    at_capacity = (rec.get("attempts") or [{}])[-1].get("reason") == "capacity"
+    if not (rec.get("status") == "killed" or at_capacity
+            or rec.get("cause") in RELAUNCHABLE_CAUSES):
+        return None
+    sid, args, kind = rec.get("codex_session"), rec.get("codex_args"), rec.get("kind")
+    if not sid or not isinstance(args, list) or not kind:
+        return None
+    scope = str(rec.get("scope") or "")
+    argv = ["hippo", "dispatch", "--kind", kind, "--scope",
+            scope if scope.endswith(" (resumed)") else f"{scope} (resumed)"]
+    if rec.get("task"):
+        argv += ["--task", rec["task"]]
+    if rec.get("depth"):
+        argv += ["--depth", str(rec["depth"])]
+    # The continuation is fixed text with nothing a shell expands, so double quotes hold it.
+    return f'{shlex.join([*argv, "--", *args, "resume", sid])} "{RESUME_CONTINUE}"'
 
 
 def output_last_message(rest):
@@ -3157,13 +3560,18 @@ def dispatch_launch_notes(hp, kind, scope, brief, rest):
 # --- batch dispatch (DESIGN §3.6) -----------------------------------------------
 
 BATCH_USAGE = (
-    "usage: hippo dispatch --batch <manifest.yaml> [--dry-run]\n"
+    "usage: hippo dispatch --batch <manifest.yaml> [--dry-run | --entry <id>]\n"
     "       the manifest is per-batch data, authored fresh like a brief — never standing config\n"
     "       the journal beside it decides what a run does: none yet → launch every entry; some\n"
     "       entries unfinished → relaunch those a relaunch could clear; all done → launch\n"
     "       nothing. Every run ends with the harvest table. To start over, delete\n"
-    "       <manifest>.journal.jsonl\n"
-    "       --dry-run launches nothing: it prints the plan (difficulty, suggested exec, notes)"
+    "       <manifest>.journal.jsonl. stdout's first line is batch:<id> (watch it with --watch)\n"
+    "       --dry-run launches nothing: it prints the plan (difficulty, suggested exec, notes)\n"
+    "       and writes <manifest>.workflow.js, the Workflow face — one hippo:lane per entry\n"
+    "       --entry <id>: that one entry, as the Workflow face launches it — never typed. Its\n"
+    "       lane's dispatch:<id> comes first; done or running elsewhere, it launches nothing and\n"
+    "       names the lane that did or does (exit 0); held — its last triage named capability\n"
+    "       or spec — or stopped by the breaker, it says why with no id (exit 5, or 2)"
 )
 # Retired in 1.14.0 with zero measured calls across 28 projects (DESIGN §4): named so a caller
 # typing one learns what replaced it instead of reading a bare usage line.
@@ -3188,7 +3596,8 @@ CHECK_TIMEOUT = 600
 # validate — the slug alphabet plus the separators an author would reasonably type — and an
 # unbounded one must not either: past the filesystem's 255-byte name cap the launch OSErrors
 # mid-batch, after the dispatch row already landed.
-ENTRY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# fullmatch, never match: `$` would let a trailing newline through, into a shell command.
+ENTRY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 ENTRY_ID_MAX = 100
 
 # append_event was written for one writer per process; batch is the one multi-writer surface.
@@ -3196,18 +3605,63 @@ ENTRY_ID_MAX = 100
 # whole lines, AND the breaker's admit-then-record region re-acquires it through the append
 # helpers — RLock keeps it one lock serving both duties.
 BATCH_LOCK = threading.RLock()
+# Since 1.16.0 one manifest's journal has several writers: the Workflow face runs every entry
+# as a process of its own (`--entry`). So BATCH_LOCK also takes an flock on the manifest file —
+# it always exists, and locking it creates nothing whose presence the journal logic would
+# read. Held once per process however deep the nesting (a second flock on another descriptor
+# of the same file would wait on this process's own lock).
+_MANIFEST_FLOCK = {"fd": None, "depth": 0}
+BATCH_HELD = 5  # `--entry` exit status: the entry's last triage named capability or spec
+
+
+@contextlib.contextmanager
+def batch_lock(mp):
+    """The journal's lock across threads (BATCH_LOCK) and across processes (an flock on the
+    manifest): every journal append, every read a launch decision rests on, and the breaker's
+    admit-then-record region."""
+    with BATCH_LOCK:
+        held = _MANIFEST_FLOCK
+        if held["depth"] == 0:
+            fd = os.open(mp, os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except BaseException:
+                os.close(fd)
+                raise
+            held["fd"] = fd
+        held["depth"] += 1
+        try:
+            yield
+        finally:
+            held["depth"] -= 1
+            if held["depth"] == 0:
+                os.close(held["fd"])  # closing the last descriptor releases the flock
+                held["fd"] = None
+
+
+def journal_append(mp, journal, rec):
+    """One journal line, whole, under the batch lock: an append from another process's lane
+    can never land inside it, whatever its length."""
+    with batch_lock(mp):
+        with journal.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
 def parse_batch_argv(argv):
-    """→ (manifest, dry_run). The whole surface: what a run does is read off the journal."""
-    manifest, dry_run = None, False
+    """→ (manifest, dry_run, entry). What a run does is read off the journal; `--entry` is the
+    Workflow face's call (its generated script makes it), never a mode main chooses."""
+    manifest, dry_run, entry = None, False, None
     i, n = 0, len(argv)
     while i < n:
         a = argv[i]
-        if a == "--batch":
+        if a in ("--batch", "--entry"):
             if i + 1 >= n:
-                die(f"dispatch --batch: --batch has no value\n{BATCH_USAGE}", 2)
-            manifest, i = argv[i + 1], i + 2
+                die(f"dispatch --batch: {a} has no value\n{BATCH_USAGE}", 2)
+            if a == "--batch":
+                manifest = argv[i + 1]
+            else:
+                entry = argv[i + 1]
+            i += 2
         elif a == "--dry-run":
             dry_run, i = True, i + 1
         elif a.split("=", 1)[0] in RETIRED_BATCH_FLAGS:
@@ -3215,9 +3669,9 @@ def parse_batch_argv(argv):
                 f"does, and concurrency is the manifest key\n{BATCH_USAGE}", 2)
         else:
             die(BATCH_USAGE, 2)
-    if not manifest:
+    if not manifest or (dry_run and entry is not None):
         die(BATCH_USAGE, 2)
-    return manifest, dry_run
+    return manifest, dry_run, entry
 
 
 def load_manifest(mp, plan=False):
@@ -3283,7 +3737,7 @@ def load_manifest(mp, plan=False):
             eid = re.sub(r"[^a-z0-9]+", "-", scope.lower()).strip("-")
             if scope and not eid:
                 problems.append(f"{where}: scope slugs to nothing — an explicit id is required")
-        elif not isinstance(eid, str) or not ENTRY_ID_RE.match(eid):
+        elif not isinstance(eid, str) or not ENTRY_ID_RE.fullmatch(eid):
             problems.append(f"{where}: id must be [A-Za-z0-9._-] and start with an "
                             f"alphanumeric: {eid!r}")
             eid = ""
@@ -3383,52 +3837,45 @@ def adapter_argv(en):
             f"model_reasoning_effort={en['effort']}", *en["args"], "--", en["prompt"]]
 
 
-def codex_usage(err_path):
-    """Banner and footer land in <id>.err (measured 0.144.6: "session id: …", "model: …" and
-    the two-line "tokens used" footer all ride stderr) — the same prev-line walk as
-    run_dispatch, then the same rollout/footer collection."""
-    try:
-        text = err_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    session_id = model = ""
-    footer_total = None
-    prev = ""
-    for line in text.splitlines():
-        s = line.strip()
-        if not session_id and s.startswith("session id:"):
-            session_id = s.split(":", 1)[1].strip()
-        elif not model and s.startswith("model:"):
-            model = s.split(":", 1)[1].strip()
-        elif prev == "tokens used":
-            try:
-                footer_total = int(s.replace(",", ""))
-            except ValueError:
-                pass
-        prev = s
-    return collect_usage(session_id, model, footer_total)
-
-
 def journal_state(journal):
     """Previous attempts per id, the ids that are DONE (latest exit line has rc==0 and
     check_rc null-or-0), and the latest exit and triage record per id. A relaunch mints a NEW
     dispatch id — two launches are two facts, and two triages of one lane are two facts too:
-    the latest is what a reader reads, and neither replaces the other in the file."""
+    the latest is what a reader reads, and neither replaces the other in the file. Several
+    processes append to one journal (the Workflow face), so a record's place in the file says
+    nothing about its attempt: attempts are compared, never positions."""
     attempts, latest_exit, latest_triage = {}, {}, {}
     for line in journal.read_text(encoding="utf-8").splitlines():
         try:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if rec.get("event") in ("launch", "exit") and isinstance(rec.get("attempt"), int):
-            attempts[rec.get("id")] = max(attempts.get(rec.get("id"), 0), rec["attempt"])
+        eid, n = rec.get("id"), rec.get("attempt")
+        if rec.get("event") in ("launch", "exit") and isinstance(n, int):
+            attempts[eid] = max(attempts.get(eid, 0), n)
         if rec.get("event") == "exit":
-            latest_exit[rec.get("id")] = rec
+            if (latest_exit.get(eid) or {}).get("attempt", 0) <= (n or 0):
+                latest_exit[eid] = rec
         elif rec.get("event") == "triage":
-            latest_triage[rec.get("id")] = rec
+            if (latest_triage.get(eid) or {}).get("attempt", 0) <= (n or 0):
+                latest_triage[eid] = rec
     done = {i for i, r in latest_exit.items()
             if r.get("rc") == 0 and r.get("check_rc") in (None, 0)}
     return attempts, done, latest_exit, latest_triage
+
+
+def journal_launches(journal):
+    """Each entry's latest launch record, by attempt — what an exit may still be owed by."""
+    out = {}
+    for line in journal.read_text(encoding="utf-8").splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("event") == "launch" and isinstance(rec.get("attempt"), int):
+            if rec["attempt"] >= (out.get(rec.get("id")) or {}).get("attempt", 0):
+                out[rec.get("id")] = rec
+    return out
 
 
 # --- harvest triage (DESIGN §3.6 — the judge reads, main routes) --------------
@@ -3497,23 +3944,28 @@ def strip_codex_noise(text, limit=TRIAGE_STDERR_TAIL):
     return "\n".join(keep)[-limit:]
 
 
+def codex_cd(args):
+    """The working root codex's args name with `-C`/`--cd`, as given, or None."""
+    for i, a in enumerate(args or []):
+        if a == "--":
+            break
+        if a in ("-C", "--cd") and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith("--cd="):
+            return a[len("--cd="):]
+        if a.startswith("-C") and len(a) > 2:
+            return a[2:]
+    return None
+
+
 def lane_dir(args, cwd):
     """Where the lane worked: `-C <worktree>` when its codex args carry one (dispatch skill §5),
     resolved the way codex resolves it — against the child's own cwd — else that cwd: the
     entry's `cwd` in a batch."""
-    for i, a in enumerate(args or []):
-        if a == "--":
-            break
-        raw = None
-        if a in ("-C", "--cd") and i + 1 < len(args):
-            raw = args[i + 1]
-        elif a.startswith("--cd="):
-            raw = a[len("--cd="):]
-        elif a.startswith("-C") and len(a) > 2:
-            raw = a[2:]
-        if raw:
-            p = Path(raw)
-            return p if p.is_absolute() else Path(cwd) / p
+    raw = codex_cd(args)
+    if raw:
+        p = Path(raw)
+        return p if p.is_absolute() else Path(cwd) / p
     return Path(cwd)
 
 
@@ -3720,12 +4172,17 @@ def triage(hp, state, ex, ref, src="wrapper"):
 
 
 def triage_line(t):
-    """The route and the numbers behind it, as one stderr line reads them."""
+    """The route, the cause when the judge named one — what the ev:triage row records — and
+    the numbers behind the route, as one line reads them: `triage failed · cause transient
+    (done .03 · blocked .23 · ask .14 · creep .15 · verify yes)`. The one shape every surface
+    prints: the wrapper's stream, the lane record, --watch."""
     a = t["answers"] or {}
     nums = " · ".join(f"{label} {_pp(a.get(q))}" for label, q in
                       (("done", "claims_done"), ("blocked", "reports_blocked"),
                        ("ask", "needs_decision"), ("creep", "scope_creep")))
-    return f"triage {t['route']} ({nums} · verify {'yes' if t['verify'] else 'no'})"
+    cause = triage_cause(t)
+    named = f" · cause {cause}" if cause in CAUSES else ""
+    return f"triage {t['route']}{named} ({nums} · verify {'yes' if t['verify'] else 'no'})"
 
 
 def lane_report(en, outdir):
@@ -3846,7 +4303,10 @@ def harvest_row(r, clusters, outdir, cwd):
         route = f"failed {clusters.get(en['id'], '-')} {cause.get('choice') or '-'}"
         numbers = f"cause {_pp(cause.get('confidence'))}"
     elif ans:
-        route = r["route"] or "-"
+        # A lane that did not fail may still carry a cause (an escalation over a missing tool):
+        # named where the judge named one, as on every triage line.
+        named = cause.get("choice") in CAUSES
+        route = (r["route"] or "-") + (f" {cause['choice']}" if named else "")
         numbers = (f"done {_pp(ans.get('claims_done'))} "
                    f"blocked {_pp(ans.get('reports_blocked'))} "
                    f"ask {_pp(ans.get('needs_decision'))} "
@@ -3951,18 +4411,23 @@ def run_harvest(mp, entries, journal, outdir, hp, fresh=()):
         print("harvest: judge off — no TYPESAFE_API_KEY; showing the deterministic part only",
               file=sys.stderr)
     cwd = Path.cwd()
-    _, _, exits, triages = journal_state(journal)
+    with batch_lock(mp):
+        state, launches = journal_state(journal), journal_launches(journal)
+    _, _, exits, triages = state
+    # A newer attempt live in another process (the Workflow face) makes the latest exit stale:
+    # read now, it would be triaged and counted as a failure a rerun relaunches.
+    running = [en["id"] for en in entries
+               if entry_decision(state, launches, en["id"])[0] == "running"]
     claims = executor_claims(read_ledger(hp)) if hp is not None else {}
 
     def jrnl(rec):
-        with journal.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        journal_append(mp, journal, rec)
 
     rows, failed = [], []
     for en in entries:
         ex = exits.get(en["id"])
-        if ex is None:
-            continue  # never exited: there is nothing to read yet
+        if ex is None or en["id"] in running:
+            continue  # never exited, or running again: there is nothing to read yet
         r = {"en": en, "ex": ex, "claim": claims.get(ex.get("dispatch")),
              "route": None, "verify": None, "answers": {}, "findings": []}
         rec = triages.get(en["id"])
@@ -4002,6 +4467,8 @@ def run_harvest(mp, entries, journal, outdir, hp, fresh=()):
         # one read, and the ranking is next to the lane it is about.
         for f in r["findings"][:top]:
             print(finding_line(f))
+    if running:
+        print(f"not in the table — running in another process: {', '.join(running)}")
 
     counts = collections.Counter(r["route"] or "-" for r in rows)
     verdicts = mp.parent / f"{mp.stem}.verdicts.jsonl"
@@ -4260,9 +4727,10 @@ def plan_entry(hp, en, cells, ladder, policy, prices, live):
     return {"id": en["id"], "row": row, "notes": notes, "rec": rec, "tier": tier}
 
 
-def plan_pass(mp, entries, hp, out):
+def plan_pass(mp, entries, hp, out, write=True):
     """The plan (DESIGN §3.6): the judge measures each brief, code prices it → the rows, printed
-    to `out` — stdout for a dry run, stderr ahead of a launch.
+    to `out` — stdout for a dry run, stderr ahead of a launch. `write=False` leaves
+    `<manifest>.plan.jsonl` to the caller (one `--entry` merges its own record into it).
 
     §9.6 turned routing into "the cheapest exec that clears the bar", and PRIORS answers half
     of it — what a kind × exec has cost and returned. The half it cannot know before a launch
@@ -4304,7 +4772,7 @@ def plan_pass(mp, entries, hp, out):
         for eid, note in notes:
             print(f"{eid}: {note}", file=out)
 
-    if on:
+    if on and write:
         # Rewritten every run, never appended to: a batch has one routing decision, and a
         # stale record beside a fresh one would be joined as this one's.
         plan = mp.parent / f"{mp.stem}.plan.jsonl"
@@ -4313,201 +4781,395 @@ def plan_pass(mp, entries, hp, out):
     return rows
 
 
-def run_dry(mp, entries, hp):
-    """`--batch <manifest> --dry-run`: launches nothing, prints the plan. The manifest is not
-    modified — main edits it, or launches it as it is and lets an unrouted entry take the
-    suggestion."""
+def plan_records(mp):
+    """`<manifest>.plan.jsonl` → {entry id: record}; empty when there is none."""
+    out = {}
+    for line in (_read_text(mp.parent / f"{mp.stem}.plan.jsonl") or "").splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict):
+            out[rec.get("id")] = rec
+    return out
+
+
+def js(value):
+    """A JSON value as JavaScript source. ensure_ascii, so no quote, backslash, newline or
+    U+2028/2029 a manifest carries can end a string or a line early."""
+    return json.dumps(value, ensure_ascii=True)
+
+
+def workflow_face(mp, concurrency, entries):
+    """`<manifest>.workflow.js`, the batch's Workflow face (§3.6): every entry runs as `hippo
+    dispatch --batch <manifest> --entry <id>` under a hippo:lane relay, at most `concurrency`
+    at once, and the run returns {entry id: the relay's reply}. Rules a Workflow script must
+    keep: `meta` first and a pure literal (here, JSON), plain JavaScript, no clock or randomness,
+    nothing but the agent() global — and every string from the manifest is JSON-encoded."""
+    mp = mp.resolve()
+    kinds = list(dict.fromkeys(en["kind"] for en in entries))
+    meta = {"name": "hippo-batch-" + (re.sub(r"[^a-z0-9]+", "-", mp.stem.lower()).strip("-")
+                                      or "manifest"),
+            "description": f"{len(entries)} codex lanes of {mp.name}, "
+                           f"{min(concurrency, len(entries))} at once — "
+                           "hippo dispatch --batch, one hippo:lane relay per entry",
+            "phases": [{"title": k} for k in kinds]}
+    lanes = [{"id": en["id"], "label": one_line(en["scope"], LANE_SCOPE_CHARS),
+              "phase": en["kind"],
+              "cmd": f"hippo dispatch --batch {shlex.quote(str(mp))} --entry "
+                     f"{shlex.quote(en['id'])}"}
+             for en in entries]
+    path = mp.parent / f"{mp.stem}.workflow.js"
+    path.write_text(
+        f"export const meta = {js(meta)}\n\n"
+        "// Written by hippo dispatch --batch <manifest> --dry-run (hippo DESIGN 3.6) and\n"
+        "// rewritten by every dry run. The harvest is hippo dispatch --batch <manifest>, after.\n"
+        f"const CONCURRENCY = {concurrency}\n"
+        "const LANES = [\n" + "".join(f"  {js(lane)},\n" for lane in lanes) + "]\n\n"
+        "const replies = Object.fromEntries(LANES.map(lane => [lane.id, null]))\n"
+        "let next = 0\n"
+        "async function relay() {\n"
+        "  while (next < LANES.length) {\n"
+        "    const lane = LANES[next++]\n"
+        "    replies[lane.id] = await agent(lane.cmd,\n"
+        "      {agentType: 'hippo:lane', label: lane.label, phase: lane.phase})\n"
+        "  }\n"
+        "}\n"
+        "await Promise.all(Array.from({length: Math.min(CONCURRENCY, LANES.length)}, relay))\n"
+        "return replies\n", encoding="utf-8")
+    return path
+
+
+def run_dry(mp, entries, hp, concurrency):
+    """`--batch <manifest> --dry-run`: launches nothing, prints the plan, and writes the
+    Workflow face. The manifest is not modified — main edits it, or launches it as it is and
+    lets an unrouted entry take the suggestion."""
     on = jev_backend(hp) != "off"
     if not on:
         print("--dry-run: judge off — no TYPESAFE_API_KEY; showing the deterministic part only",
               file=sys.stderr)
     rows = plan_pass(mp, entries, hp, sys.stdout)
+    face = workflow_face(mp, concurrency, entries)
+    # What `--entry` would route each model-less entry by (route_one), read off the plan file
+    # this dry run just wrote — or, with the judge off, one an earlier dry run left.
+    plan = plan_records(mp)
+    bare = [en["id"] for en in entries if en["model"] is None
+            and not ((plan.get(en["id"]) or {}).get("suggested") or {}).get("model")]
+    if bare:
+        why = ("the judge suggested none" if on else
+               "no plan record routes them and the judge is off (no TYPESAFE_API_KEY)")
+        print(f"dispatch --batch: no model for {', '.join(bare)} — {why}: their relays would "
+              "stop at `model is required`; set model in defaults or the entry, then dry-run "
+              "again", file=sys.stderr)
+    print(f"dispatch --batch: Workflow face written — run it as Workflow({{scriptPath: "
+          f"{json.dumps(str(face), ensure_ascii=False)}}}), then `hippo dispatch --batch "
+          f"{shlex.quote(str(mp))}` for the harvest", file=sys.stderr)
     tiers = collections.Counter(r["tier"] for r in rows if r["tier"])
     summary = {"total": len(entries), "suggested": sum(tiers.values()),
                "plan": str(mp.parent / f"{mp.stem}.plan.jsonl") if on else None,
-               "manifest": str(mp)}
+               "manifest": str(mp), "workflow": str(face)}
     if tiers:
         summary["tiers"] = dict(tiers)
     print(json.dumps(summary, ensure_ascii=False))
     sys.exit(0)
 
 
-def resume_split(entries, journal):
-    """What a run over an existing journal relaunches → (attempts, done, todo, held).
+def held_cause(triage):
+    """The cause a relaunch cannot clear that the latest triage named, or None."""
+    cause = triage_cause(triage)
+    return cause if cause in CAUSES and cause not in RELAUNCHABLE_CAUSES else None
 
-    Done entries (last exit and check passed) stay done. The rest relaunch unless their latest
-    triage named a cause a relaunch cannot clear — `capability` or `spec` needs a different
-    brief, and running it unchanged buys the same failure twice. No triage, or a triage that
-    named no cause, relaunches: a filter that cannot read the cause must not be the reason a
-    lane is dropped."""
-    attempts, done, _, triages = journal_state(journal)
-    todo, held = [], []
+
+def entry_decision(state, launches, eid):
+    """What the journal says to do with one entry → (what, detail):
+
+    - `done` and its exit record: the latest exit and its check passed;
+    - `running` and that lane's dispatch id: the latest launch has no exit yet, and the process
+      that launched it still runs — another process's lane, live (the Workflow face runs each
+      entry in a process of its own, beside any full run);
+    - `held` and the cause: the latest triage named one a relaunch cannot clear — `capability`
+      or `spec` needs a different brief, and running it unchanged buys the same failure twice;
+    - `launch` and the attempt it would be. No triage, or a triage that named no cause,
+      relaunches: a filter that cannot read the cause must not be the reason a lane is dropped,
+      and a launch whose process died before its exit line (SIGKILLed) relaunches too."""
+    attempts, done, exits, triages = state
+    if eid in done:
+        return "done", exits[eid]
+    launch = launches.get(eid)
+    if (launch is not None and isinstance(launch.get("dispatch"), str)
+            and (exits.get(eid) or {}).get("attempt", 0) < launch["attempt"]
+            and pid_alive(launch.get("pid"))):
+        return "running", launch["dispatch"]
+    cause = held_cause(triages.get(eid))
+    if cause:
+        return "held", cause
+    return "launch", attempts.get(eid, 0) + 1
+
+
+def journal_decisions(journal, ids):
+    """{id: entry_decision} off one read of the journal; with none yet, every id launches as
+    attempt 1. Read under the batch lock — and before a launch, in the very region that appends
+    the launch line (BatchRun.run_entry), so no two processes launch one entry, and an attempt
+    number names one launch."""
+    if not journal.exists():
+        return {eid: ("launch", 1) for eid in ids}
+    state, launches = journal_state(journal), journal_launches(journal)
+    return {eid: entry_decision(state, launches, eid) for eid in ids}
+
+
+def resume_split(entries, journal):
+    """What a run over an existing journal relaunches → (done, todo, held, running): the
+    entries in entry_decision's four answers — done ids, entries to launch, (entry, cause)
+    pairs and {id: dispatch id of the live lane}."""
+    ids = journal_decisions(journal, [en["id"] for en in entries])
+    done, todo, held, running = set(), [], [], {}
     for en in entries:
-        if en["id"] in done:
-            continue
-        cause = triage_cause(triages.get(en["id"]))
-        if cause in CAUSES and cause not in RELAUNCHABLE_CAUSES:
-            held.append((en, cause))
+        what, detail = ids[en["id"]]
+        if what == "done":
+            done.add(en["id"])
+        elif what == "running":
+            running[en["id"]] = detail
+        elif what == "held":
+            held.append((en, detail))
         else:
             todo.append(en)
-    return attempts, done, todo, held
+    return done, todo, held, running
 
 
-def run_batch(argv):
-    """DESIGN §3.6, batch: the deterministic half of a batch of lanes — fan-out, concurrency,
-    id capture, parent stamping, usage collection, breaker checks, journaling, resume and the
-    harvest — in one wrapper call, with no mode flags: the journal beside the manifest decides
-    what a run does. Selection (the manifest) and judgment (verdicts) stay with the model: a
-    check result or a triage route is journal evidence, and batch never writes ev:outcome."""
-    manifest, dry_run = parse_batch_argv(argv)
-    mp = Path(manifest)
-    hp = find_hippo()
-    on = jev_backend(hp) != "off"
-    # An unrouted entry is valid exactly when the plan pass will run over it before launch.
-    concurrency, entries = load_manifest(mp, plan=dry_run or on)
-    if hp is None:
-        print("dispatch --batch: no .hippo/ — skipping the ledger records", file=sys.stderr)
-    if dry_run:
-        run_dry(mp, entries, hp)
-    journal = mp.parent / f"{mp.stem}.journal.jsonl"
-    outdir = mp.parent / f"{mp.stem}.out"
-    total = len(entries)
+class BatchRecord:
+    """`.hippo/lanes/<bid>.json` — a full batch run as one row (§3.6): the counts, the lanes
+    running now, the newest event, and at the end its status and where its harvest is. Written
+    whole, by this process alone, at every lane start and exit and at the end; `--watch <bid>`
+    and lane_status.py read it with the running lanes' own records. Without .hippo/ there is
+    no record, as there is none for a lane."""
 
-    attempts, done_ids, todo, held = {}, set(), entries, []
-    if journal.exists():
-        attempts, done_ids, todo, held = resume_split(entries, journal)
-        if todo or held:
-            print(f"resuming {mp}: {len(todo)} to relaunch, {len(held)} skipped",
-                  file=sys.stderr)
-        by_cause = {}
-        for en, cause in held:
-            by_cause.setdefault(cause, []).append(en["id"])
-        for cause, ids in by_cause.items():
-            print(f"skipped {len(ids)} (cause {cause}): {', '.join(ids)} — a different brief, "
-                  "then a new entry", file=sys.stderr)
+    def __init__(self, bid, ld, mp, journal, total, todo):
+        self.path = ld / f"{bid}.json" if ld is not None else None
+        self.out = ld / f"{bid}.out" if ld is not None else None
+        self.rec = {"id": bid, "manifest": str(mp.absolute()), "stem": mp.stem,
+                    "pid": os.getpid(), "started": now_iso(), "total": total, "todo": todo,
+                    "skipped": total - todo, "launched": 0, "running": 0, "ok": 0, "failed": 0,
+                    "done": 0, "running_ids": [], "last": None, "last_at": None,
+                    "journal": str(journal.absolute()), "harvest": None}
+        self._write_failed = False
+        self.write()
 
-    if todo and on:
-        # Auto-routing: the plan runs over what is about to launch, and an entry that left
-        # model unset takes the suggestion. The table goes to stderr — stdout is the harvest's.
-        rows = {r["id"]: r for r in plan_pass(mp, todo, hp, sys.stderr)}
-        unrouted = []
-        for en in todo:
-            if en["model"] is None:
-                suggested = rows[en["id"]]["rec"]["suggested"]
-                if suggested["model"] is None:
-                    unrouted.append(en["id"])
-                else:
-                    en["model"], en["effort"] = suggested["model"], suggested["effort"]
-        if unrouted:
-            die(f"dispatch --batch: {mp}: model is required — the judge suggested none for "
-                f"{', '.join(unrouted)}; set it in defaults or the entry", 2)
-    outdir.mkdir(parents=True, exist_ok=True)
-
-    parent = os.environ.get("HIPPO_DISPATCH", "")
-    stop = threading.Event()
-    state = {"launched": 0, "ok": 0, "failed": 0, "done": 0, "warned": False,
-             "stopped": False}
-    ld = lanes_dir_or_note(hp) if hp is not None else None
-    # A signal to the batch (§3.6) stops further launches and is forwarded to every running
-    # lane's process group; each lane then records itself killed, as a single dispatch does.
-    running, signaled = set(), []
-
-    def on_signal(signum, _frame):
+    def write(self):
+        if self.path is None:
+            return
         with BATCH_LOCK:
-            if not signaled:
-                signaled.append(signum)
-            stop.set()
-            for lane in running:
+            try:
+                write_durable(self.path, json.dumps(self.rec, ensure_ascii=False))
+            except OSError as err:
+                if not self._write_failed:  # a lost record makes a sound, once
+                    self._write_failed = True
+                    print(f"dispatch --batch: batch record not written ({err}) — the batch "
+                          "runs on", file=sys.stderr)
+
+    def event(self, text, counts):
+        with BATCH_LOCK:
+            self.rec.update(counts, last=text, last_at=now_iso())
+            self.write()
+
+    def killed(self, signum):
+        """On record at once, not when the lanes have exited: Claude Code SIGKILLs the tree
+        1.5s after its SIGTERM (§3.6, the kill trap)."""
+        with BATCH_LOCK:
+            if "status" not in self.rec:
+                self.rec.update(status="killed", signal=signal.Signals(signum).name)
+                self.write()
+
+    def close(self, rc, harvest=None, error=None):
+        """The harvest is kept beside the record — the table main reads, after the run's own
+        shell is gone — and `ended` is written last."""
+        if harvest is not None and self.out is not None:
+            try:
+                write_durable(self.out, harvest)
+                self.rec["harvest"] = str(self.out.absolute())
+            except OSError as err:
+                print(f"dispatch --batch: harvest not kept ({err}) — it was printed above",
+                      file=sys.stderr)
+        if error:
+            self.rec["error"] = one_line(error, 400)
+        self.rec.setdefault("status", "exited")
+        self.rec.update(rc=rc, ended=now_iso())
+        self.write()
+
+
+class BatchRun:
+    """One process's share of a batch (§3.6): the journal, the lanes it runs, the signal that
+    stops them, and the counts. A full run and an `--entry` run are the same machinery over a
+    different set of entries; `face` marks the lanes the Workflow face launched."""
+
+    def __init__(self, mp, hp, on, n, ld, record=None, face=None):
+        self.mp, self.hp, self.on, self.n, self.ld = mp, hp, on, n, ld
+        self.journal = mp.parent / f"{mp.stem}.journal.jsonl"
+        self.outdir = mp.parent / f"{mp.stem}.out"
+        self.parent = os.environ.get("HIPPO_DISPATCH", "")
+        self.record, self.face = record, face
+        self.stop = threading.Event()
+        self.state = {"launched": 0, "ok": 0, "failed": 0, "done": 0, "warned": False,
+                      "stopped": False}
+        self.running, self.signaled = set(), []
+        self.refused = {}  # id → (what, detail): the journal said no at the launch (run_entry)
+        self.lanes_phase = False
+
+    def jrnl(self, rec):
+        journal_append(self.mp, self.journal, rec)
+
+    def on_signal(self, signum, _frame):
+        """While lanes can run, a signal stops further launches and is forwarded to every
+        running lane's process group — each lane records itself killed, as a single dispatch
+        does — and the run exits 128+signal once they have. Outside that phase (the plan pass,
+        the harvest) it stops the run where it stands, and the batch record says so: kept
+        swallowed there, a SIGTERM during the harvest once let the batch exit 0."""
+        with BATCH_LOCK:
+            if not self.signaled:
+                self.signaled.append(signum)
+            if not self.lanes_phase:
+                raise SystemExit(128 + signum)
+            self.stop.set()
+            for lane in self.running:
                 lane.stop(signum)
 
-    # Only while lanes can run: the harvest after them is a judge pass that a signal must be
-    # able to stop, as it could before 1.15.0 (measured: kept installed, a SIGTERM during the
-    # harvest was swallowed and the batch exited 0).
-    prev = {s: signal.signal(s, on_signal) for s in LANE_SIGNALS}
-
-    def jrnl(rec):
-        with BATCH_LOCK:
-            with journal.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-    def run_entry(en, attempt):
-        if stop.is_set():
+    def note(self, text):
+        """The batch record learns of a lane start or exit."""
+        if self.record is None:
             return
+        with BATCH_LOCK:
+            ids = [lane.rec["id"] for lane in sorted(self.running, key=lambda lane: lane.t0)]
+            todo = self.n - len(self.refused)
+            self.record.event(text, {"running": len(ids), "running_ids": ids, "todo": todo,
+                                     "skipped": self.record.rec["total"] - todo,
+                                     **{k: self.state[k] for k in
+                                        ("launched", "ok", "failed", "done")}})
+
+    def refuse(self, en, what, detail):
+        """An entry the journal says not to launch: done or held is journaled as a skip, as at
+        a run's start. A full run says so on stderr; an `--entry` run's caller answers the
+        relay (entry_answer)."""
+        if what in ("done", "held"):
+            self.jrnl({"t": now_iso(), "event": "skip", "id": en["id"],
+                       **({"why": f"cause {detail}"} if what == "held" else {})})
+        with BATCH_LOCK:
+            self.refused[en["id"]] = (what, detail)
+        if self.face:
+            return
+        why = {"done": "another process finished it meanwhile",
+               "running": f"running in another process since, as lane {detail} — a later "
+                          "harvest reads it",
+               "held": f"its latest triage named cause {detail} meanwhile"}[what]
+        print(f"dispatch --batch: {en['id']} not launched — {why}", file=sys.stderr)
+        self.note(f"{one_line(en['scope'], LANE_SCOPE_CHARS)}: not launched ({what})")
+
+    def run_entry(self, en):
+        """One entry's lane, start to finish: the launch decision, breaker, ledger row,
+        journal, launch, check, usage, triage — the deterministic half of one delegation."""
+        if self.stop.is_set():
+            return
+        hp = self.hp
         did = "d" + os.urandom(16).hex()
         e = {"ev": "dispatch", "id": did, "kind": en["kind"],
              "exec": f"{en['executor']}/{en['model']}/{en['effort']}",
              "scope": en["scope"], "depth": en["depth"]}
         if en["task"]:
             e["task"] = en["task"]
-        if parent:
-            e["parent"] = parent
+        if self.parent:
+            e["parent"] = self.parent
         bad = validate_event(e)
-        # Verdict and dispatch record are ONE locked region: the verdict prices the batch from
-        # the ledger, so each admitted child's row must land before the next verdict reads.
-        # Priced outside the lock, every worker admits against the pre-batch total (measured:
-        # 4 sol children through a $20 budget).
-        with BATCH_LOCK:
-            verdict, msg = fanout_verdict(hp, parent, en["model"])
+        # Decision, verdict, dispatch record and launch line are ONE locked region. The verdict
+        # prices the batch from the ledger, so each admitted child's row must land before the
+        # next verdict reads — priced outside the lock, every worker admits against the
+        # pre-batch total (measured: 4 sol children through a $20 budget). And the journal is
+        # read again here: what this process read before — at a full run's start, before an
+        # `--entry` was routed — may be stale, since other processes run this manifest's
+        # entries too (the Workflow face). The lock spans processes, so a decision and its
+        # launch line can never be split by another process's launch.
+        with batch_lock(self.mp):
+            what, detail = journal_decisions(self.journal, [en["id"]])[en["id"]]
+            if what != "launch":
+                self.refuse(en, what, detail)
+                return
+            attempt = detail
+            verdict, msg = fanout_verdict(hp, self.parent, en["model"])
             if verdict == "stop":
-                first = not state["stopped"]
-                state["stopped"] = True
-                stop.set()
+                first = not self.state["stopped"]
+                self.state["stopped"] = True
+                self.stop.set()
                 if first:
                     print(msg, file=sys.stderr)
-                    jrnl({"t": now_iso(), "event": "stopped", "reason": msg})
+                    self.jrnl({"t": now_iso(), "event": "stopped", "reason": msg})
                 return
             if verdict == "warn":
-                first = not state["warned"]
-                state["warned"] = True
+                first = not self.state["warned"]
+                self.state["warned"] = True
                 if first:
                     print(msg, file=sys.stderr)
             if bad:
                 # Same stance as single dispatch: a lost record makes a sound, never a blocked launch.
                 print(f"dispatch --batch: {en['id']}: record failed ({bad}) — the launch "
                       "proceeds anyway", file=sys.stderr)
-                jrnl({"t": now_iso(), "event": "record_failed", "id": en["id"],
-                      "dispatch": did, "reason": bad})
+                self.jrnl({"t": now_iso(), "event": "record_failed", "id": en["id"],
+                           "dispatch": did, "reason": bad})
             elif hp is not None:
                 append_event(hp, e, src="wrapper")
-
-        jrnl({"t": now_iso(), "event": "launch", "id": en["id"], "attempt": attempt,
-              "dispatch": did})
+            # `pid`: while that process runs and no exit line follows, the launch is live.
+            self.jrnl({"t": now_iso(), "event": "launch", "id": en["id"], "attempt": attempt,
+                       "dispatch": did, "pid": os.getpid()})
         with BATCH_LOCK:
-            state["launched"] += 1
-        out_p, err_p = outdir / f"{en['id']}.out", outdir / f"{en['id']}.err"
+            self.state["launched"] += 1
+        out_p, err_p = self.outdir / f"{en['id']}.out", self.outdir / f"{en['id']}.err"
         env = {**os.environ, "HIPPO_DISPATCH": did, "HIPPO_DEPTH": str(en["depth"]),
                "PATH": lane_path(), **({"HIPPO_DIR": str(hp)} if hp is not None else {})}
         cmd = adapter_argv(en)
-        timed_out = False
         # The same lane machinery as a single dispatch (§3.6): <id>.err keeps its shape (the
         # raw stderr, byte for byte), the compact stream joins the batch's own stderr, and the
         # record lands in .hippo/lanes/ under the dispatch id.
-        lane = Lane(did, en["scope"], e["exec"], ld / f"{did}.json" if ld else None, err_p, out_p)
-        with out_p.open("wb") as fo, err_p.open("wb") as fe:
-            try:
-                child = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=fo,
-                                         stderr=subprocess.PIPE, env=env, cwd=en["cwd"],
-                                         start_new_session=True)
-            except OSError as oe:
-                fe.write(f"could not run {cmd[0]}: {oe}\n".encode())
-                rc = 127
-            else:
-                with BATCH_LOCK:
-                    running.add(lane)
-                    if signaled:  # it launched as the signal landed
-                        lane.stop(signaled[0])
+        lane = Lane(did, en["scope"], e["exec"], self.ld / f"{did}.json" if self.ld else None,
+                    err_p, out_p, en["kind"], en["task"], en["depth"],
+                    codex_resume_args(cmd[2:], en["cwd"]), face=self.face)
+        if self.face:
+            # The Workflow face's relay greps this, as it does a single dispatch's — printed
+            # once the record exists, so a watcher never races it into existence.
+            print(f"dispatch:{did}", flush=True)
+        # The entry's timeout bounds the whole lane, capacity waits and resumes included.
+        deadline = None if en["timeout"] is None else time.monotonic() + en["timeout"]
+
+        def run_once(tail):
+            argv = cmd if tail is None else ["codex", "exec", *lane.rec["codex_args"], *tail]
+            with out_p.open("wb") as fo:  # the report is the last attempt's
+                try:
+                    child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=fo,
+                                             stderr=subprocess.PIPE, env=env, cwd=en["cwd"],
+                                             start_new_session=True)
+                except OSError as oe:
+                    fe.write(f"could not run {argv[0]}: {oe}\n".encode())
+                    return 127, False
                 lane.launched(child.pid)
-                deadline = None if en["timeout"] is None else time.monotonic() + en["timeout"]
+                if tail is None:
+                    self.note(f"{lane.label}: started")
                 timed_out = pump_lane(child, lane, fe, deadline)
-                rc = child.wait()
-                with BATCH_LOCK:
-                    running.discard(lane)
+                return child.wait(), timed_out
+
+        # Running from before the launch to after the last attempt: a signal reaches the lane
+        # in a capacity wait too, and one that lands before codex starts kills it as it starts.
+        with BATCH_LOCK:
+            self.running.add(lane)
+            if self.signaled:
+                lane.stop(self.signaled[0])
+        try:
+            with err_p.open("wb") as fe:
+                rc, timed_out = run_lane(lane, run_once, fe, lane.rec.get("codex_args"),
+                                         deadline)
+        finally:
+            with BATCH_LOCK:
+                self.running.discard(lane)
         if timed_out:
             lane.rec["timed_out"] = True
         lane.finish(rc, "killed" if lane.signal is not None or timed_out else "exited")
 
         # Cost was incurred whatever rc says; a parse gap stays a gap in the ledger too.
-        usage = codex_usage(err_p)
+        usage = collect_usage(lane.session_id, lane.model, lane.footer_total, lane.since)
         # A usage row must join to a dispatch row: when the dispatch record failed, the
         # tokens still reach the journal below, just not the ledger.
         if usage is not None and hp is not None and bad is None:
@@ -4522,65 +5184,277 @@ def run_batch(argv):
                 check_rc, check_out = r.returncode, (r.stdout or "") + (r.stderr or "")
             except subprocess.TimeoutExpired:
                 check_rc, check_out = -1, f"timeout {CHECK_TIMEOUT}s\n"
-            (outdir / f"{en['id']}.check").write_text(check_out, encoding="utf-8")
+            check_p = self.outdir / f"{en['id']}.check"
+            check_p.write_text(check_out, encoding="utf-8")
+            # On the lane's record too: its relay's reply is what main reads of this lane.
+            lane.rec.update(check_rc=check_rc, check=str(check_p.absolute()))
 
         rec = {"t": now_iso(), "event": "exit", "id": en["id"], "attempt": attempt,
                "dispatch": did, "rc": rc, "check_rc": check_rc}
         if timed_out:
             rec["timed_out"] = True
         rec["tokens"] = usage["tokens"] if usage else None
-        jrnl(rec)
+        self.jrnl(rec)
 
         # Triage at lane exit (§3.6): one calibrated read of the whole report, while the
         # files are hot and main is not in the loop. With the judge off it does not exist —
         # no record, no column, no changed line.
-        route = None
-        if on:
+        route = t = None
+        if self.on:
             claim = executor_claims(read_ledger(hp)).get(did) if hp is not None else None
-            t = triage_entry(hp, en, rec, outdir, claim, jrnl)
+            t = triage_entry(hp, en, rec, self.outdir, claim, self.jrnl)
             route = t["route"]
-        lane.close(triage_line(t) if route else None)
+        lane.close(t)
 
         ok = rc == 0 and check_rc in (None, 0)
         with BATCH_LOCK:
-            state["ok" if ok else "failed"] += 1
-            state["done"] += 1
-            line = (f"[{state['done']}/{len(todo)}] {en['id']} rc={rc} "
+            self.state["ok" if ok else "failed"] += 1
+            self.state["done"] += 1
+            line = (f"[{self.state['done']}/{self.n}] {en['id']} rc={rc} "
                     f"check={check_mark(check_rc)} {did}")
-            if on:
+            if self.on:
                 # A triage that failed shows as "-": the gap is a fact about the batch too.
                 line += f" triage={route or '-'}"
+                if lane.rec.get("cause"):
+                    line += f" cause={lane.rec['cause']}"
             print(line, file=sys.stderr)
+        how = (f"killed by {lane.rec['signal']}" if lane.rec.get("signal") else
+               "timed out" if timed_out else f"exited rc={rc}")
+        self.note(f"{lane.label}: {how}"
+                  + (f" · check {check_mark(check_rc)}" if en["check"] else ""))
 
-    for en in entries:
-        if en["id"] in done_ids:
-            jrnl({"t": now_iso(), "event": "skip", "id": en["id"]})
-    for en, cause in held:
-        jrnl({"t": now_iso(), "event": "skip", "id": en["id"], "why": f"cause {cause}"})
-    if todo:
+    def run_all(self, todo, concurrency):
+        """The fan-out. The main thread wakes twice a second, so a signal is on the batch
+        record within 0.5s, as it is on each lane's."""
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futs = [pool.submit(run_entry, en, attempts.get(en["id"], 0) + 1) for en in todo]
-            for f in concurrent.futures.as_completed(futs):
-                f.result()  # a wrapper bug dies loudly, never as a silently thinner batch
-    for s, handler in prev.items():
-        signal.signal(s, handler)
-    if signaled:
-        # The harvest is a judge pass over every lane; a batch being stopped does not start one.
-        # The journal holds every exit, so the same command resumes.
-        print(f"dispatch --batch: stopped by {signal.Signals(signaled[0]).name} — running lanes "
-              f"were signalled and recorded; `hippo dispatch --batch {mp}` resumes",
-              file=sys.stderr)
-        sys.exit(128 + signaled[0])
+            pending = {pool.submit(self.run_entry, en) for en in todo}
+            while pending:
+                finished, pending = concurrent.futures.wait(pending, timeout=0.5)
+                for f in finished:
+                    f.result()  # a wrapper bug dies loudly, never as a silently thinner batch
+                if self.signaled and self.record is not None:
+                    self.record.killed(self.signaled[0])
 
-    harvest = run_harvest(mp, entries, journal, outdir, hp, {en["id"] for en in todo})
-    summary = {"total": total, "launched": state["launched"], "ok": state["ok"],
-               "failed": state["failed"], "skipped": total - len(todo),
-               "stopped": state["stopped"], **harvest, "journal": str(journal),
-               "outdir": str(outdir)}
-    print(json.dumps(summary, ensure_ascii=False))
-    # The rc is about this run's launches: a harvest-only run launched nothing, so nothing
-    # it did failed — what the lanes did is in the table.
-    sys.exit(2 if state["stopped"] else (1 if state["failed"] else 0))
+    def full(self, entries, split, concurrency, resumed):
+        """A full run: the resume decision said, the plan ahead of the launch, the lanes, and
+        the harvest → (rc, the harvest as printed)."""
+        done_ids, todo, held, running = split
+        mp = self.mp
+        if resumed and (todo or held):
+            print(f"resuming {mp}: {len(todo)} to relaunch, {len(held)} skipped",
+                  file=sys.stderr)
+        by_cause = {}
+        for en, cause in held:
+            by_cause.setdefault(cause, []).append(en["id"])
+        for cause, ids in by_cause.items():
+            print(f"skipped {len(ids)} (cause {cause}): {', '.join(ids)} — a different brief, "
+                  "then a new entry", file=sys.stderr)
+        if running:
+            print(f"left alone {len(running)} still running in another process: "
+                  f"{', '.join(running)} — a later harvest reads them",
+                  file=sys.stderr)
+
+        if todo and self.on:
+            # Auto-routing: the plan runs over what is about to launch, and an entry that left
+            # model unset takes the suggestion. The table goes to stderr — stdout is the harvest's.
+            self.note(f"planning {len(todo)} entries")
+            rows = {r["id"]: r for r in plan_pass(mp, todo, self.hp, sys.stderr)}
+            unrouted = []
+            for en in todo:
+                if en["model"] is None:
+                    suggested = rows[en["id"]]["rec"]["suggested"]
+                    if suggested["model"] is None:
+                        unrouted.append(en["id"])
+                    else:
+                        en["model"], en["effort"] = suggested["model"], suggested["effort"]
+            if unrouted:
+                msg = (f"dispatch --batch: {mp}: model is required — the judge suggested none "
+                       f"for {', '.join(unrouted)}; set it in defaults or the entry")
+                if self.record is not None:
+                    self.record.rec["error"] = msg
+                die(msg, 2)
+        self.outdir.mkdir(parents=True, exist_ok=True)
+
+        for en in entries:
+            if en["id"] in done_ids:
+                self.jrnl({"t": now_iso(), "event": "skip", "id": en["id"]})
+        for en, cause in held:
+            self.jrnl({"t": now_iso(), "event": "skip", "id": en["id"], "why": f"cause {cause}"})
+        if todo:
+            self.lanes_phase = True
+            try:
+                self.run_all(todo, concurrency)
+            finally:
+                self.lanes_phase = False
+        if self.signaled:
+            # The harvest is a judge pass over every lane; a batch being stopped does not start
+            # one. The journal holds every exit, so the same command resumes.
+            print(f"dispatch --batch: stopped by {signal.Signals(self.signaled[0]).name} — "
+                  f"running lanes were signalled and recorded; `hippo dispatch --batch {mp}` "
+                  "resumes", file=sys.stderr)
+            return 128 + self.signaled[0], None
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            harvest = run_harvest(mp, entries, self.journal, self.outdir, self.hp,
+                                  {en["id"] for en in todo} - set(self.refused))
+        total = len(entries)
+        summary = {"total": total, "launched": self.state["launched"], "ok": self.state["ok"],
+                   "failed": self.state["failed"],
+                   "skipped": total - len(todo) + len(self.refused),
+                   "stopped": self.state["stopped"], **harvest, "journal": str(self.journal),
+                   "outdir": str(self.outdir)}
+        text = buf.getvalue() + json.dumps(summary, ensure_ascii=False) + "\n"
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        # The rc is about this run's launches: a harvest-only run launched nothing, so nothing
+        # it did failed — what the lanes did is in the table.
+        return 2 if self.state["stopped"] else (1 if self.state["failed"] else 0), text
+
+
+def run_full(mp, hp, on, concurrency, entries):
+    """`hippo dispatch --batch <manifest>`: every entry the journal leaves to launch, then the
+    harvest. stdout's first line is `batch:<bid>` — the one-row face: a hippo:lane relay greps
+    it and watches the batch record, so a batch of any width is one agent row."""
+    journal = mp.parent / f"{mp.stem}.journal.jsonl"
+    resumed = journal.exists()
+    split = (set(), entries, [], {})
+    if resumed:
+        with batch_lock(mp):
+            split = resume_split(entries, journal)
+    ld = lanes_dir_or_note(hp) if hp is not None else None
+    bid = "b" + os.urandom(16).hex()
+    record = BatchRecord(bid, ld, mp, journal, len(entries), len(split[1]))
+    print(f"batch:{bid}", flush=True)
+    run = BatchRun(mp, hp, on, len(split[1]), ld, record)
+    prev = {s: signal.signal(s, run.on_signal) for s in LANE_SIGNALS}
+    try:
+        rc, harvest = run.full(entries, split, concurrency, resumed)
+        if run.signaled:
+            record.killed(run.signaled[0])
+        record.close(rc, harvest)
+    except BaseException as ex:  # die(), a signal outside the lanes, or a wrapper bug
+        if run.signaled:
+            record.killed(run.signaled[0])
+        code = ex.code if isinstance(ex, SystemExit) else None
+        record.close(code if isinstance(code, int) else 1,
+                     error=None if isinstance(ex, SystemExit) else f"{type(ex).__name__}: {ex}")
+        raise
+    finally:
+        for s, handler in prev.items():
+            signal.signal(s, handler)
+    sys.exit(rc)
+
+
+def route_one(mp, hp, on, en):
+    """An `--entry` with no model takes the routing the plan recorded for it — the dry run
+    that wrote the Workflow face — or, with no record, is planned alone as a full run would
+    plan it, and its record merged into the plan file. Never launched unrouted."""
+    suggested = (plan_records(mp).get(en["id"]) or {}).get("suggested") or {}
+    if not suggested.get("model") and on:
+        (row,) = plan_pass(mp, [en], hp, sys.stderr, write=False)
+        suggested = row["rec"]["suggested"]
+        with batch_lock(mp):
+            recs = {**plan_records(mp), en["id"]: row["rec"]}
+            write_durable(mp.parent / f"{mp.stem}.plan.jsonl",
+                          "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in recs.values()))
+    if not suggested.get("model"):
+        why = (f"the judge suggested none for {en['id']}" if on else
+               f"no plan record routes {en['id']} and the judge is off (no TYPESAFE_API_KEY)")
+        die(f"dispatch --batch: {mp}: model is required — {why}; set it in defaults or the "
+            "entry", 2)
+    en["model"], en["effort"] = suggested["model"], suggested.get("effort") or en["effort"]
+
+
+def entry_answer(hp, outdir, eid, what, detail):
+    """What `--entry` prints when the journal says not to launch → its exit status. A done or
+    running entry names its lane first, as `dispatch:<id>`, so its relay watches that lane —
+    ended, its final lines at once. A held entry has no lane to watch: it says why on stdout,
+    and its relay, finding no id, passes the text on (agents/lane.md step 4)."""
+    if what == "held":
+        print(f"entry {eid} held — its last triage named cause {detail}: a relaunch buys the "
+              "same failure; a different brief, then a new entry")
+        return BATCH_HELD
+    if what == "running":
+        print(f"dispatch:{detail}")
+        print(f"entry {eid} is running already, launched by another process — nothing "
+              f"launched; its lane is {detail}")
+        return 0
+    did = detail.get("dispatch")
+    did = did if isinstance(did, str) and SAFE_ID_RE.fullmatch(did) else None
+    print(f"dispatch --batch: {eid} is done (attempt {detail.get('attempt')}) — nothing "
+          "launched", file=sys.stderr)
+    rec = read_record(hp / "lanes" / f"{did}.json") if hp is not None and did else None
+    if did:
+        print(f"dispatch:{did}")
+    print("\n".join(watch_lines(rec, watch_state(rec)) if rec else [
+        f"entry {eid} done · attempt {detail.get('attempt')} · {did or 'no dispatch id'} rc=0 · "
+        f"check {check_mark(detail.get('check_rc'))}",
+        f"report: {(outdir / f'{eid}.out').absolute()}"]))
+    return 0
+
+
+def run_one(mp, hp, on, entries, eid):
+    """`hippo dispatch --batch <manifest> --entry <id>`: the Workflow face's call — one entry
+    through the batch machinery, in a process of its own, beside the other entries' processes.
+    When a lane runs, stdout's first line is its `dispatch:<id>`, as a single dispatch prints
+    it. The journal decides as it does for a full run: a done entry launches nothing and prints
+    its lane's final lines (exit 0), a held one launches nothing and says why (exit
+    BATCH_HELD), one running in another process launches nothing and names that lane (exit 0).
+    Read here first, so a done entry is never routed, and again where the launch line is
+    written (run_entry), so a process that launched it meanwhile is never doubled."""
+    en = next((e for e in entries if e["id"] == eid), None)
+    if en is None:
+        die(f"dispatch --batch: {mp}: no entry {eid!r}\n{BATCH_USAGE}", 2)
+    run = BatchRun(mp, hp, on, 1, lanes_dir_or_note(hp) if hp is not None else None,
+                   face="workflow")
+    with batch_lock(mp):
+        what, detail = journal_decisions(run.journal, [eid])[eid]
+    if what == "launch":
+        if en["model"] is None:
+            route_one(mp, hp, on, en)
+        run.outdir.mkdir(parents=True, exist_ok=True)
+        # Only while the lane can run, as for a single dispatch: a signal during the plan above
+        # took its default action.
+        run.lanes_phase = True
+        prev = {s: signal.signal(s, run.on_signal) for s in LANE_SIGNALS}
+        try:
+            run.run_entry(en)
+        finally:
+            for s, handler in prev.items():
+                signal.signal(s, handler)
+        if run.signaled:
+            sys.exit(128 + run.signaled[0])
+        if eid not in run.refused:
+            sys.exit(2 if run.state["stopped"] else (1 if run.state["failed"] else 0))
+        what, detail = run.refused[eid]  # another process launched it while this one routed
+    else:
+        run.refuse(en, what, detail)
+    sys.exit(entry_answer(hp, run.outdir, eid, what, detail))
+
+
+def run_batch(argv):
+    """DESIGN §3.6, batch: the deterministic half of a batch of lanes — fan-out, concurrency,
+    id capture, parent stamping, usage collection, breaker checks, journaling, resume and the
+    harvest — with no mode flags: the journal beside the manifest decides what a run does.
+    Selection (the manifest) and judgment (verdicts) stay with the model: a check result or a
+    triage route is journal evidence, and batch never writes ev:outcome. Two faces in Claude
+    Code: the full run as one row (`batch:<bid>`), or `--dry-run`'s Workflow face, which runs
+    each entry as `--entry <id>` under a relay of its own."""
+    manifest, dry_run, entry = parse_batch_argv(argv)
+    mp = Path(manifest)
+    hp = find_hippo()
+    on = jev_backend(hp) != "off"
+    # An unrouted entry is valid exactly when something will route it before its launch: the
+    # plan pass, or for one entry the plan record its dry run left (route_one).
+    concurrency, entries = load_manifest(mp, plan=dry_run or on or entry is not None)
+    if hp is None:
+        print("dispatch --batch: no .hippo/ — skipping the ledger records", file=sys.stderr)
+    if dry_run:
+        run_dry(mp, entries, hp, concurrency)
+    if entry is not None:
+        run_one(mp, hp, on, entries, entry)
+    run_full(mp, hp, on, concurrency, entries)
 
 
 def _find_key(obj, key):
@@ -4600,13 +5474,33 @@ def _find_key(obj, key):
     return None
 
 
-def collect_usage(session_id, model, footer_total):
+def _rollout_time(row):
+    """A rollout row's own timestamp in epoch seconds, or None when it has none."""
+    try:
+        return datetime.fromisoformat(row["timestamp"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def collect_usage(session_id, model, footer_total, since=None):
     """What the lane cost, from the best witness available (§9.6).
 
-    Preferred: the rollout's final cumulative token count — it carries the billing breakdown
-    (input / cached / output+reasoning). Fallback: the "tokens used" footer, total only.
-    Neither there → None; a gap is a gap, and no number is ever invented."""
-    u = None
+    Preferred: the rollout's cumulative token count — it carries the billing breakdown
+    (input / cached / output+reasoning). A resumed session appends to its rollout and the
+    count runs on (measured, codex-cli 0.159.2: 416,650 when a lane stopped at capacity,
+    7,653,151 at the end of its resume, no reset in between), so a lane's cost is the count
+    at its end less the last one written before it started (`since`, epoch seconds): a lane
+    that resumes another's session is not billed that lane's tokens again, and the attempts
+    of a lane that resumed itself are one count. Fallback: the "tokens used" footer, total
+    only — the session's running count too, so it carries no such baseline. Neither there →
+    None; a gap is a gap, and no number is ever invented."""
+    def counts(c):
+        return {"tokens": int(c["total_tokens"]), "tin": int(c["input_tokens"]),
+                "tcached": int(c.get("cached_input_tokens") or 0),
+                "tout": (int(c.get("output_tokens") or 0)
+                         + int(c.get("reasoning_output_tokens") or 0))}
+
+    u = base = None
     if session_id:
         hits = sorted((Path.home() / ".codex" / "sessions").glob(
             f"*/*/*/rollout-*-{session_id}.jsonl"))
@@ -4617,25 +5511,25 @@ def collect_usage(session_id, model, footer_total):
                     if "total_token_usage" not in line:
                         continue
                     try:
-                        found = _find_key(json.loads(line), "total_token_usage")
+                        row = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    found = _find_key(row, "total_token_usage")
                     if isinstance(found, dict):
-                        u = found  # cumulative — the last one is the lane's total
+                        u = found  # cumulative — the last one is the session's total
+                        t = _rollout_time(row)
+                        if since is not None and t is not None and t < since:
+                            base = found
             except OSError:
                 u = None
     if u is not None:
         try:
-            out = {
-                "tokens": int(u["total_tokens"]),
-                "tin": int(u["input_tokens"]),
-                "tcached": int(u.get("cached_input_tokens") or 0),
-                "tout": (int(u.get("output_tokens") or 0)
-                         + int(u.get("reasoning_output_tokens") or 0)),
-            }
+            out, past = counts(u), counts(base) if base is not None else None
         except (KeyError, TypeError, ValueError):
-            out = None
+            out = past = None
         if out is not None:
+            if past is not None and out["tokens"] >= past["tokens"]:  # less: a restarted count
+                out = {k: out[k] - past[k] for k in out}
             if model:
                 out["model"] = model
             return out
@@ -4697,10 +5591,13 @@ def directive_roster(hp):
 
 
 DISPATCH_ROSTER_N = 12
+ROSTER_RUNNING = "[running — no verdict yet]"  # turn-scribe.md rule 2 names it verbatim
 
 
-def dispatch_roster(hp, native=None):
-    """The recent dispatches handed to the scribe with the digest.
+def dispatch_roster(hp, native=None, held=None):
+    """The recent dispatches handed to the scribe with the digest. `held`, when given, collects
+    the ids marked running and why, so the writer holds the clerk to what it was shown
+    (`check_scribe_outcome`).
 
     The clerk is told not to record a launch the wrapper already recorded, and until now its only
     way to tell was spotting the wrapper's trace in the digest — which is not something a digest
@@ -4741,9 +5638,15 @@ def dispatch_roster(hp, native=None):
 
     def marker(did):
         # A claimed dispatch is still awaiting the verdict — and naming the claim keeps the
-        # clerk from reading the lane's own report in the digest as an acceptance signal.
+        # clerk from reading the lane's own report in the digest as an acceptance signal. One
+        # still in flight takes no verdict at all, whatever it has claimed (§3.5.6b).
         if did in judged:
             return ""
+        why = still_running(hp, did, rows, native)
+        if why:
+            if held is not None:
+                held[did] = why
+            return f"  {ROSTER_RUNNING}"
         if did in claims:
             return f"  [claims {claims[did]} — verdict pending]"
         return "  [no outcome yet]"
@@ -6398,9 +7301,10 @@ def cmd_scribe(args):
                     + "\n\n"
                 )
 
+    held = {}  # the roster's running lines, ref → why (`check_scribe_outcome`)
     payload = (
         f"# live directives\n\n{directive_roster(hp)}\n\n"
-        f"# dispatches already recorded\n\n{dispatch_roster(hp, native)}\n\n"
+        f"# dispatches already recorded\n\n{dispatch_roster(hp, native, held)}\n\n"
         f"{native_section(native)}"
         f"{hints}"
         f"# transcript digest\n\n{digest}"
@@ -6482,7 +7386,8 @@ def cmd_scribe(args):
         taken, verr = native_guard(hp, native_take, hp, e, native, alias) or (False, None)
         if not taken:
             verr = (validate_event(e) or validate_scribe_event(e) or check_ref(hp, e)
-                    or check_scribe_outcome(hp, e) or check_scribe_directive(hp, e, start))
+                    or check_scribe_outcome(hp, e, native, held)
+                    or check_scribe_directive(hp, e, start))
             if not verr:
                 append_event(hp, e, src="scribe")
         if verr:

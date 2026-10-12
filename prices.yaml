@@ -10,7 +10,7 @@
 # bump `as_of` — PRIORS prints it, so a stale sheet is visible instead of silently
 # wrong. Sources: https://developers.openai.com/api/docs/pricing ,
 # https://platform.claude.com/docs/en/about-claude/pricing
-as_of: "2026-09-30"
+as_of: "2026-10-12"
 models:
   # OpenAI, standard tier, short context (the page prices long context at 2x, batch at 0.5x,
   # and the fast tier separately).
@@ -26,9 +26,13 @@ models:
   gpt-5.6-sol:   {input: 4.00, cached: 0.40, output: 20.00, legacy: true}
   gpt-5.6-terra: {input: 2.00, cached: 0.20, output: 12.00, legacy: true}
   gpt-5.6-luna:  {input: 0.20, cached: 0.02, output: 1.20, legacy: true}
-  # Anthropic (cached = cache-read rate: 0.1x input; 0.025x on Fable 5.1, 0.05x on Opus 5.5).
+  # Anthropic (cached = cache-read rate: 0.1x input; 0.025x on Fable 5.1, 0.05x on Opus 5.5 and
+  # Sonnet 5.5).
   claude-fable-5-1: {input: 10.00, cached: 0.25, output: 50.00}
   claude-opus-5-5:  {input: 4.00, cached: 0.20, output: 20.00}
+  # Sonnet 5.5 is what `sonnet` resolves to since 2026-10 (native runs the scribe records); its
+  # usage was unpriced until this row. (Its 5m cache write, $2.50, has no column here.)
+  claude-sonnet-5-5: {input: 2.00, cached: 0.10, output: 10.00}
   # Sonnet 5 launch pricing became the standard price; the 2026-09-01 increase was cancelled.
   claude-sonnet-5:  {input: 2.00, cached: 0.20, output: 10.00}
   claude-haiku-4-5: {input: 1.00, cached: 0.10, output: 5.00}
