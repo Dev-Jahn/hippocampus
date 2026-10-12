@@ -110,7 +110,7 @@ entries:
     `Workflow({scriptPath: "…/m.workflow.js"})` it names — each lane an agent in `/workflows`,
     its progress in that agent's Activity every minute — then `hippo dispatch --batch m.yaml`
     for the harvest (one-row way if a lane failed: the rerun relaunches it first). Cost, in
-    relays: ≈ $0.02 per lane + ≈ $0.005 per minute of lane runtime.
+    relays: ≈ $0.02 per lane + ≈ $0.004 per minute of lane runtime.
   - *A wide batch*: `Agent(subagent_type: "hippo:lane", description: "<batch scope>", prompt:
     "hippo dispatch --batch m.yaml")` — one row (`codex batch · m · 6m02s · 4 running · 12/40
     done · 1 failed · last: …`), one relay for the whole batch, the harvest in its reply (a

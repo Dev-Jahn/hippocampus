@@ -1564,8 +1564,8 @@ Agent rows (stdin task: `{id, type: "local_agent", status, description, label, m
 tokenCount, …, cwd}`) and not once during a 76s two-agent Workflow — so nothing hippo prints can
 change the first two levels, and a Workflow lane's live progress can only be its relay's own
 tool results, at the third. One short poll by a sonnet/low relay cost ~16.5k cache-read + ~200
-cache-write + 155 output tokens ≈ $0.005 (Sonnet 5.5: $2 in, $0.20 cache read, $2.50 5-minute
-cache write, $10 out per Mtok). So a batch has two faces, and the dispatch skill gives main both
+cache-write + 155 output tokens ≈ $0.004 (Sonnet 5.5: $2 in, $0.10 cache read — $0.20 when
+measured, cut by 2026-10-12 — $2.50 5-minute cache write, $10 out per Mtok). So a batch has two faces, and the dispatch skill gives main both
 with their price:
 
 - **Watched lanes — the Workflow face.** `--dry-run` writes `<manifest dir>/<stem>.workflow.js`
@@ -1581,7 +1581,7 @@ with their price:
   test runs `node --check` on it and runs it under a stub `agent()` with such strings). Each
   relay watches its lane's record, and that record says `face: "workflow"`, so `--watch` polls
   every minute instead of every nine: one Activity line a minute per lane — `lane <id> running ·
-  3m12s · 14 cmds · last: exec: pytest -q` — at ≈$0.005 a minute on top of the relay's ≈$0.02
+  3m12s · 14 cmds · last: exec: pytest -q` — at ≈$0.004 a minute on top of the relay's ≈$0.02
   start and end (the 24s measurement above, at Sonnet 5.5 prices). The window is the record's
   choice, not the relay's: `agents/lane.md` stays one fixed body with no window in it, and an
   explicit `--for` still wins. A Workflow of relays is no run to the scribe (§3.5.3c), so that
