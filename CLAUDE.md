@@ -6,7 +6,8 @@ Before adding any runtime surface (hook, script, CLI subcommand), check the
 NOT-list in `DESIGN.md` §4 — it names what was tried and removed, and why.
 
 `hooks/hooks.json` never moves — codex keys hook trust by that path. A new hook
-needs a measured reason in `DESIGN.md` §3.4 first; per-call hooks stay out (§4).
+needs a measured reason in `DESIGN.md` §3.4 first; one that fires per tool call or
+prompt also needs its cost on the calls it passes measured (§3.4, §4).
 
 Clerk output contract (strict JSON, validated like `hippo log`) is defined
 in `clerks/turn-scribe.md` and `clerks/distiller.md`.

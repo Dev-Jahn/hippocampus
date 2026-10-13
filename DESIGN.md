@@ -374,8 +374,13 @@ hippo scribe --transcript P --session S   # internal: the Stop hook calls it det
 
 ### 3.4 Hooks (four — each one here with its measured reason)
 
-A hook runs on the host's clock, so each one needs a reason measured and written here; a hook that
-fires on every tool call or prompt stays out (§4). `hooks/hooks.json` carries SessionStart and
+A hook runs on the host's clock, so each one is admitted on four conditions, written here: (1) a
+measured reason; (2) its cost measured on the events it passes, not only on those it acts on — a
+hook on every tool call or prompt pays that cost on all of them, so a shell process per call
+(0.x, §4) does not pass, while an in-process handler that hands the rest on unchanged may, once
+measured; (3) where most of its runs say nothing, that silence shown to cost next to nothing
+(0.x's Stop hook ran 259 times, every run silent); (4) it records and never refuses — a hook
+that blocks a call is the gate principle 3 rules out. `hooks/hooks.json` carries SessionStart and
 Stop for both hosts, unchanged since 1.14 — the Codex manifest names it, and codex keys a
 hook's trust by that plugin-relative path (`hippo@<marketplace>:hooks/hooks.json:session_start:0:0`
 in `~/.codex/config.toml`, 0.156.1), so a moved file would come back untrusted and be skipped
@@ -825,7 +830,7 @@ an agent's own (PreCompact, below).
 3d. **Worker writes** (every mode, no judge; after 3c's usage and triage, on every path). A
    native worker's shell carries exactly main's environment (§3.4), so a `hippo task done` it
    runs lands as main's, and nothing at write time can tell — a per-call hook is the only other
-   place that could, and §4 keeps those out. The scribe reads it afterwards, from the runs 3c
+   place that could, and none has been admitted (§3.4). The scribe reads it afterwards, from the runs 3c
    indexed: for each run the window touched or ended (a TaskStop, or a run file saying `killed`
    or `failed`, ends one with no notification, 3c; past 24h that window is the last to read it)
    and each still running (launched within 24h), the run's own transcript(s) — an agent's, a
@@ -1858,7 +1863,7 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 | review packet, ingest, receipt, attestation | Replies stay raw in the chat (a review saved to a file dies in attention — demonstrated across 6 rounds of whack-a-mole). One field, `ev:review.base`, is enough pinning |
 | a delegate surface, role-binding config | Routing comes from main's judgment plus the evidence in PRIORS. Freezing it in config is the source of stale-instruction incidents |
 | typed brief facts, assurance DAG | Intent belongs in short documents and conversation. Drift is handled by making it visible, not by control |
-| PreToolUse/PostToolUse/UserPromptSubmit hooks | Latency on every call, plus hooks measured to produce no output. The four in §3.4 fire once per session, subagent, compaction or turn, each for a measured reason |
+| per-call shell hooks and silent hooks (0.x: a PreToolUse read nudge and a PostToolUse guard on `tasks.yaml`, a Stop boundary hook) | The two per-call hooks started bash on every tool call and python on a match — latency on every call — and the guard was the enforcement principle 3 refuses; the Stop hook ran 259 times with no output. What stays out is that cost, that silence and that gate, not the event: a hook on any event, per call or per prompt included, comes in through §3.4's four conditions. (Reworded 2026-10-14: the founding row banned the PreToolUse/PostToolUse/UserPromptSubmit events themselves, wider than its evidence.) The four in §3.4 fire once per session, subagent, compaction or turn |
 | OPERATING CONTRACT-style resident injection | 8–14KB re-injected, measured. The only resident thing is the one block in §6 |
 | a hand-written PROGRESS.md | It goes stale. Replaced by worklog (generated) + ledger (facts) + PRIORS (distilled) |
 | typed refusal gates, frozen sidecars, remote verify | Record, never enforce (principle 3) |
