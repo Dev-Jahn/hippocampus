@@ -2665,6 +2665,17 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 # command's output never does.
 CODEX_EXEC_RE = re.compile(r"^(?:\S*/)?(?:ba|z|da|k)?sh -l?c (['\"])(.*?)(?:\1 in [/~].*)?$")
 SENTENCE_RE = re.compile(r"^(.+?[.!?。！？])(?=\s|$)")
+# The rest of a command codex prints over several lines (a heredoc) ends on `<quote> in <cwd>`.
+CODEX_EXEC_END_RE = re.compile(r"['\"] in [/~][^'\"]*$")
+CODEX_EXEC_FULL_RE = re.compile(r"^(\S*sh -l?c (['\"]).*\2) in ([/~][^'\"]*)$", re.S)
+# How codex ends a command (0.159–0.160: 9,228 of 9,228 ends in 86 real lane logs are the first two).
+CODEX_DONE_RE = re.compile(r"^ (succeeded|exited (-?\d+)|declined\b.*?) in (\d+)ms:$")
+CODEX_NOISE_RE = re.compile(r"^\d{4}-\d\d-\d\dT\S+ +(ERROR|WARN|INFO) ")
+# The headers that open an item block, by the kind LaneItems writes ("skip": read past, unwritten).
+LANE_ITEM_HEADERS = {"codex": "said", "thinking": "thinking", "apply patch": "patch",
+                     "user": "skip", "tokens used": "skip", "context compacted": "skip"}
+LANE_ITEMS_CHARS = 4000  # one output or message in <id>.events.jsonl; the raw log keeps the rest
+LANE_ITEMS_IDLE = 0.3  # seconds of stderr silence that close the open block
 # A model-capacity failure, as codex prints it: its own `ERROR: ` line on stderr as the
 # attempt's last word — nothing after it but the footer — then a non-zero exit. Measured once
 # (b200-cluster, 2026-10-01T15:59Z, codex-cli 0.159.2, gpt-6.1-sol high, 5 minutes in): an
@@ -2756,12 +2767,135 @@ def lanes_dir_or_note(hp):
         return None
 
 
+class LaneItems:
+    """codex's items, one JSON line each, in .hippo/lanes/<id>.events.jsonl (§3.6): what a viewer
+    draws as rows without reading codex's log grammar itself — the hippo:lane mod (`mods/lane.ts`)
+    shows them as the relay agent's own transcript. Fed every raw stderr line by Lane.feed:
+
+      exec      a command as it starts — `n`, `cmd` (the shell's argument, exact), `cwd`
+      done      its end — `n`, `rc`, `ms`, `out`. codex prints no id, so among the commands still
+                running it is the one whose age is nearest the printed duration (the newest on a
+                tie: the shorter of two calls made together ends first)
+      said      an agent message, `text`
+      thinking  a reasoning summary, `text`
+      patch     an applied patch, `text` (its status line, files and diff)
+      end       the wrapper is done — `status`, `rc` (Lane.finish; a SIGKILLed wrapper writes none)
+
+    A block (an output, a message) closes at the next header or after LANE_ITEMS_IDLE of silence:
+    codex prints each item whole, so its lines arrive in one burst. Texts past LANE_ITEMS_CHARS
+    keep their head and tail; the raw log keeps everything. A lost write costs the viewer its rows,
+    never the lane, and makes one sound."""
+
+    def __init__(self, path):
+        self.path = path
+        self.n = 0
+        self.running = {}  # command number → monotonic start, until its `done`
+        self.block = None  # [kind, lines, started, extra]
+        self.seen = time.monotonic()
+        self.exec_header = False  # the last line was a bare `exec`
+        self.failed = False
+
+    def feed(self, bare):
+        now = self.seen = time.monotonic()
+        s = bare.strip()
+        if self.exec_header:
+            self.exec_header = False
+            if CODEX_EXEC_RE.match(s):
+                self.close()
+                self.block = ["exec", [s], now, None]
+                if CODEX_EXEC_END_RE.search(s):
+                    self.close()
+                return
+            self.add("exec")  # an `exec` inside some output, not a header
+        if s == "exec":
+            self.exec_header = True
+            return
+        kind = LANE_ITEM_HEADERS.get(s)
+        m = None if kind else CODEX_DONE_RE.match(bare)
+        if kind or m:
+            self.close()
+            self.block = [kind or "done", [], now, m]
+            return
+        if bare.startswith("hook: ") or CODEX_NOISE_RE.match(bare):
+            return
+        self.add(bare)
+        if self.block and self.block[0] == "exec" and CODEX_EXEC_END_RE.search(s):
+            self.close()
+
+    def add(self, line):
+        if self.block:
+            self.block[1].append(line)
+
+    def idle(self):
+        """Close a block codex has gone quiet on (Lane.tick, at least twice a second)."""
+        if self.block and time.monotonic() - self.seen >= LANE_ITEMS_IDLE:
+            self.close()
+
+    def close(self):
+        if self.block is None:
+            return
+        kind, lines, at, m = self.block
+        self.block = None
+        text = "\n".join(lines).strip("\n")
+        if kind == "exec":
+            self.n += 1
+            self.running[self.n] = at
+            self.write({"k": "exec", "n": self.n, **codex_exec_parts(text)})
+        elif kind == "done":
+            ms = int(m.group(3))
+            n = min(self.running, default=None,
+                    key=lambda k: (abs((at - self.running[k]) * 1000 - ms), -k))
+            self.running.pop(n, None)
+            rc = 0 if m.group(1) == "succeeded" else int(m.group(2)) if m.group(2) else None
+            self.write({"k": "done", "n": n, "rc": rc, "ms": ms, "out": cut_middle(text),
+                        "lines": len(lines)})
+        elif kind != "skip" and text.strip():
+            self.write({"k": kind, "text": cut_middle(text.strip())})
+
+    def end(self, status, rc):
+        self.close()
+        self.write({"k": "end", "status": status, "rc": rc})
+
+    def write(self, item):
+        if self.path is None or self.failed:
+            return
+        try:
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"t": now_iso(), **item}, ensure_ascii=False) + "\n")
+        except OSError as err:
+            self.failed = True
+            print(f"dispatch: lane items not written ({err}) — the lane runs on", file=sys.stderr)
+
+
+def codex_exec_parts(text):
+    """{cmd, cwd} from codex's `<shell> -lc '<command>' in <cwd>` (the command may span lines):
+    the command as the shell received it, quoting undone, or as printed when it will not split."""
+    m = CODEX_EXEC_FULL_RE.match(text)
+    if m is None:
+        return {"cmd": text}
+    try:
+        argv = shlex.split(m.group(1))
+    except ValueError:
+        argv = []
+    return {"cmd": argv[2] if len(argv) == 3 else m.group(1), "cwd": m.group(3)}
+
+
+def cut_middle(text, limit=None):
+    limit = limit or LANE_ITEMS_CHARS
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return (f"{text[:half]}\n… {len(text) - 2 * half:,} characters cut here — the raw log has "
+            f"them …\n{text[-half:]}")
+
+
 class Lane:
     """A codex lane as its wrapper sees it (§3.6). It reads codex's raw stderr line by line and
-    turns it into two things: the compact event stream on the wrapper's stderr (one line per
-    command and per agent message, at most one per LANE_EVERY), and the record in
-    .hippo/lanes/<id>.json — the few facts the rollout cannot give back cheaply. It also owns
-    the lane's signal: codex runs in a session of its own, so a signal reaches it only here.
+    turns it into three things: the compact event stream on the wrapper's stderr (one line per
+    command and per agent message, at most one per LANE_EVERY), the record in
+    .hippo/lanes/<id>.json — the few facts the rollout cannot give back cheaply — and codex's
+    items as rows for a viewer (LaneItems). It also owns the lane's signal: codex runs in a
+    session of its own, so a signal reaches it only here.
 
     `kind`, `task`, `depth` and `codex_args` (codex's arguments without the prompt — None when
     there is no prompt to take off) are what a `resume:` line is made of (resume_command):
@@ -2799,6 +2933,7 @@ class Lane:
         self._pending = None
         self._said = float("-inf")
         self._write_failed = False
+        self.items = LaneItems(record.with_name(f"{did}.events.jsonl") if record else None)
         self.write()
 
     def launched(self, pgid):
@@ -2812,6 +2947,7 @@ class Lane:
         two event shapes."""
         self.tail.append(line)
         bare = ANSI_RE.sub("", line).rstrip()
+        self.items.feed(bare)
         s = bare.strip()
         # A capacity line counts while it is the attempt's last word: codex's own, at the start
         # of the line, followed by nothing but blank lines and the footer. Any other line ends
@@ -2903,6 +3039,7 @@ class Lane:
     def tick(self):
         """Emit the newest pending event and write the record, when the cadence allows — and a
         stop at once, whatever the cadence (see stop)."""
+        self.items.idle()
         stopped = self.signal is not None and "status" not in self.rec
         if stopped:
             self.rec.update(status="killed", signal=signal.Signals(self.signal).name)
@@ -2964,6 +3101,7 @@ class Lane:
             self.rec["signal"] = signal.Signals(self.signal).name
             self.kill(signal.SIGKILL)  # a stopped lane leaves nothing of its group behind
         self.write()
+        self.items.end(status, rc)
 
     def close(self, t=None):
         """The triage `t` (the judge's reading, or None) as its line and its cause, then

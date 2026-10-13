@@ -145,6 +145,52 @@ def test_raw_stderr_goes_to_the_lane_log_and_the_shell_gets_the_compact_stream(
     assert rec["log"].endswith(f"{did}.log") and rec["report"].endswith(f"{did}.out")
 
 
+def _items(project, did):
+    path = _lanes(project) / f"{did}.events.jsonl"
+    return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_codexs_items_are_written_as_rows_a_viewer_can_draw(tmp_project, tmp_path):
+    """<id>.events.jsonl is the one reading of codex's log grammar a viewer needs (the hippo:lane
+    mod draws it): each command with its exact text, its result paired to it, each message, and
+    an `end` last. The prompt echo (its bare `exec` too) and the footer are no rows."""
+    proc = _run(tmp_project, tmp_path, _stub_body(REAL_STDERR))
+    assert proc.returncode == 0, proc.stderr
+    items = [{k: v for k, v in i.items() if k != "t"} for i in _items(tmp_project,
+                                                                      _did(proc.stdout))]
+    assert items == [
+        {"k": "said", "text": "I will read the parser first. Then the tests."},
+        {"k": "exec", "n": 1, "cmd": "sed -n 1,80p src/parser.py", "cwd": "/work"},
+        {"k": "done", "n": 1, "rc": 0, "ms": 3, "out": "def parse(x):\n    return x", "lines": 2},
+        {"k": "exec", "n": 2, "cmd": "rg -n 'parse\\(' tests | head -5", "cwd": "/work"},
+        {"k": "done", "n": 2, "rc": 1, "ms": 12, "out": "", "lines": 1},
+        {"k": "said", "text": "Would you like me to continue with the tokenizer?"},
+        {"k": "exec", "n": 3, "cmd": "cat > src/tok.py <<'EOF'\nprint(1)\nEOF", "cwd": "/work"},
+        {"k": "done", "n": 3, "rc": 0, "ms": 1, "out": "", "lines": 1},
+        {"k": "end", "status": "exited", "rc": 0},
+    ]
+
+
+def test_a_result_goes_to_the_running_command_its_duration_fits(tmp_path, monkeypatch):
+    """codex prints no id on a result: two commands made together end in either order, and the
+    output must land under the one that ran that long. A long output keeps its head and tail."""
+    now = [0.0]
+    monkeypatch.setattr(hippo_cli.time, "monotonic", lambda: now[0])
+    items = hippo_cli.LaneItems(tmp_path / "x.events.jsonl")
+    for at, ln in [(0, "exec"), (0, "/bin/zsh -lc 'pytest -q' in /w"), (0, "exec"),
+                   (0.01, "/bin/zsh -lc 'git log -1' in /w"), (0.05, " succeeded in 41ms:"),
+                   (0.05, "abc123 fix"), (9, " exited 1 in 8990ms:"), (9, "x" * 9000)]:
+        now[0] = at
+        items.feed(ln)
+    items.end("exited", 1)
+    done = [json.loads(ln) for ln in (tmp_path / "x.events.jsonl").read_text().splitlines()
+            if '"done"' in ln]
+    assert [(d["n"], d["rc"]) for d in done] == [(2, 0), (1, 1)]
+    out = done[1]["out"]
+    assert len(out) < hippo_cli.LANE_ITEMS_CHARS + 100 and out.startswith("x" * 100)
+    assert out.endswith("x" * 100) and "characters cut here" in out
+
+
 def test_the_compact_stream_is_throttled_but_the_record_counts_every_command(
         tmp_project, tmp_path):
     blocks = "".join(f"exec\n/bin/zsh -lc 'echo {i}' in /work\n succeeded in 0ms:\n{i}\n"
