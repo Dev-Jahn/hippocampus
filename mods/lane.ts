@@ -41,7 +41,7 @@ type Item =
   | { k: 'end'; status: string; rc: number | null }
   | { k: 'unreadable' }
 
-type Phase = 'launch' | 'id' | 'grep' | 'follow' | 'watch' | 'done' | 'model'
+type Phase = 'launch' | 'id' | 'grep' | 'follow' | 'watch' | 'model'
 
 type Relay = {
   command: string
@@ -300,7 +300,7 @@ async function* drive($, e, relay: Relay, signal: AbortSignal) {
   if (relay.phase === 'watch') {
     const last = relay.last
     if (last && !last.isError) {
-      relay.phase = 'done'
+      relays.delete(e.agentId) // done: a later message to this agent is its model's
       return yield* reply(e, last.text.replace(/\n+$/, ''))
     }
     // Exit 3: the window passed with the lane (or batch) still running — the same call again.
@@ -338,16 +338,11 @@ export const register: Register = (on) => {
     return started
   })
 
-  on('turn.complete', { agentId: /./ }, async ($, e, next) => {
-    if (relays.get(e.agentId!)?.phase === 'done') relays.delete(e.agentId!)
-    return next(e)
-  })
-
   // Only a subagent's requests reach this hook (the matcher is checked before the plugin is
   // entered: main's never do); of those, only a hippo:lane relay's are answered.
   on('turn.step', { agentId: /./ }, async function* ($, e, next) {
     const relay = relays.get(e.agentId!)
-    if (!relay || relay.phase === 'model' || relay.phase === 'done') return yield* next(e)
+    if (!relay || relay.phase === 'model') return yield* next(e)
     let yielded = false
     try {
       const it = drive($, e, relay, next.signal)
