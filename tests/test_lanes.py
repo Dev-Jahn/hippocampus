@@ -627,15 +627,18 @@ def test_watch_outside_a_project_says_where_records_live(uninitialized_dir):
     assert proc.returncode == 2 and "lane records live in .hippo/lanes/" in proc.stderr
 
 
-def test_the_lane_agent_is_a_low_effort_sonnet_relay_with_bash_alone():
+def test_the_lane_agent_is_a_low_effort_sonnet_relay_with_bash_and_the_mods_codex_rows():
     """A frontmatter Claude Code cannot parse drops the agent without a word, and every lane
-    launched through it would fail to start."""
+    launched through it would fail to start. `mcp__hippo__codex` is the tool mods/lane.ts
+    registers to draw codex's commands as the relay's rows: a subagent is refused a call to a
+    tool its `tools:` does not name (measured, 2.1.296), and without mods the name matches
+    nothing and the relay has Bash alone."""
     import yaml
     text = (REPO_ROOT / "agents" / "lane.md").read_text(encoding="utf-8")
     m = re.match(r"---\n(.*?)\n---\n", text, re.S)
     front = yaml.safe_load(m.group(1))
     assert (front["name"], front["model"], front["effort"], front["tools"]) == (
-        "lane", "sonnet", "low", "Bash")
+        "lane", "sonnet", "low", "Bash, mcp__hippo__codex")
     assert "run_in_background: true" in text and "hippo dispatch --watch <id>" in text
     assert "grep -m1 -oE '(batch:b|dispatch:d)[0-9a-f]{32}' <path>" in text
 
