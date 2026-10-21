@@ -385,6 +385,53 @@ def test_a_printed_resume_runs_under_the_lanes_recorded_name(tmp_project, tmp_pa
     assert _record(tmp_project, _did(again))["khala"] == "x-2@mbp"
 
 
+def test_a_lane_that_ended_well_still_ends_on_a_resume_line_that_keeps_its_name_and_parent(
+        tmp_project, tmp_path):
+    """A finished lane can still have letters waiting: khala tells main, its parent, the lane
+    has unread letters and no live session, and the lane reads them as it starts. So a lane
+    with a khala name ends on its `resume:` line however it ended — last on the stream, last
+    from --watch — and that line, run as printed, starts it as the same name under the same
+    parent."""
+    lanes = tmp_project / ".hippo" / "lanes"
+    lanes.mkdir(exist_ok=True)
+    holder = lanes / "dholder.json"  # a running lane named x: the first lane becomes x-2
+    holder.write_text(json.dumps({"id": "dholder", "pid": os.getpid(), "khala": "x@mbp"}))
+    env = _env(tmp_path, FAKE_KHALA, STUB_SESSION=SID)
+    first = _dispatch(tmp_project, env, "go", task="feat/x")
+    assert first.returncode == 0, first.stderr
+    did = _did(first)
+    rec = _record(tmp_project, did)
+    assert (rec["status"], rec["rc"], rec.get("cause")) == ("exited", 0, None)
+    line = first.stderr.splitlines()[-1]
+    assert line == f"resume: {hippo_cli.resume_command(rec)}"
+    assert line.startswith("resume: hippo dispatch --kind impl --scope 's (resumed)' "
+                           f"--task feat/x -- -C {tmp_project} resume {SID} ")
+    watch = subprocess.run([str(HIPPO_BIN), "dispatch", "--watch", did, "--for", "0"],
+                           cwd=tmp_project, env=env, capture_output=True, text=True, timeout=30)
+    assert watch.returncode == 0, watch.stderr
+    assert watch.stdout.splitlines()[-2:] == ["khala: x-2@mbp · parent main@mbp", line], \
+        "the relay's reply is these lines, verbatim"
+    holder.unlink()  # x is free now, and a fresh lane of feat/x would take it
+    again = subprocess.run(["/bin/sh", "-c", line.removeprefix("resume: ")], cwd=tmp_project,
+                           env={**env, "PATH": f"{HIPPO_BIN.parent}{os.pathsep}{env['PATH']}"},
+                           capture_output=True, text=True, timeout=60)
+    assert again.returncode == 0, again.stderr
+    rid = _did(again)
+    child = _child_env(tmp_path, rid)
+    assert (child["KHALA_SESSION"], child["KHALA_PARENT"]) == ("x-2", "main@mbp")
+    rrec, row = _record(tmp_project, rid), _row(tmp_project, rid)
+    assert (rrec["khala"], rrec["khala_parent"]) == ("x-2@mbp", "main@mbp")
+    assert (row["khala"], row["khala_parent"]) == ("x-2@mbp", "main@mbp")
+    assert rrec["scope"] == "s (resumed)"
+
+
+def test_a_lane_without_a_khala_name_that_ended_well_has_no_resume_line(tmp_project, tmp_path):
+    proc = _dispatch(tmp_project, _env(tmp_path, None, STUB_SESSION=SID), "go")
+    assert proc.returncode == 0, proc.stderr
+    assert not [ln for ln in proc.stderr.splitlines() if ln.startswith("resume:")]
+    assert hippo_cli.resume_command(_record(tmp_project, _did(proc))) is None
+
+
 def test_batch_lanes_of_one_task_get_distinct_names_and_no_claude_variables(
         tmp_project, tmp_path, run_hippo):
     manifest = _manifest(tmp_project, "m.yaml", """\

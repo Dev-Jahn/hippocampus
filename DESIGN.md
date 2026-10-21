@@ -1162,8 +1162,14 @@ worktree, never tracked; created when missing) — the tracked `.gitignore` is t
 is never touched, and an exclude that cannot be written is a note, not an error. The address
 rides the launch stream (`lane <scope> · 0s · khala: <name>@<node> · parent <main>@<node>`),
 the lane record, `--watch`'s final lines and the `ev:dispatch` row (§3.2), so main knows where
-to write to a lane. With no khala on `PATH` none of this exists — no call, no variable, no field —
-and the lane's environment is what it was, less the Claude session's variables.
+to write to a lane. A lane with an address ends on its `resume:` line however it ended
+("Resuming a lane" below): one that finished can still have letters waiting — khala then tells
+main, its parent, that the lane has unread letters and no live session — and the resumed lane
+reads them as it starts. Measured in D18's end-to-end run (2026-10-21): with no line, main
+built the command by hand. Run as printed, the resume takes the name off the lane's record and
+the parent from `khala whoami` again — the same pair when main runs it. With no khala on
+`PATH` none of this exists — no call, no variable, no field — and the lane's environment is
+what it was, less the Claude session's variables.
 
 **The lane's own record** (1.15.0). In Claude Code a background `hippo dispatch` showed as a
 shell row labelled with its raw command, and nobody could see what the lane was doing: codex's
@@ -1406,8 +1412,9 @@ whenever the judge named one — `triage failed · cause transient (done .03 · 
 .14 · creep .15 · verify yes)`, one shape on the stream, in the record's `triage` (with `cause`
 beside it) and from `--watch`; the harvest's route column, which named a failure's cause
 already, now names any lane's. And a lane that ended killed, on a model-capacity error the
-wrapper did not resume away ("A model at capacity" below — known with the judge off too), or
-whose cause is one a resume can clear (`transient`, `environment`), ends on one more line:
+wrapper did not resume away ("A model at capacity" below — known with the judge off too),
+whose cause is one a resume can clear (`transient`, `environment`), or that has a khala name,
+however it ended ("A lane's environment and its khala name" above), ends on one more line:
 `resume: hippo dispatch --kind <kind> --scope '<scope> (resumed)' [--task <task>] [--depth N] -- <codex args> resume <session>
 "Continue the same task from where you stopped; do not redo finished steps; end with the report
 your original prompt asked for."`. It is built from the record alone — `kind`, `task`, `depth`

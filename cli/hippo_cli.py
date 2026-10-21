@@ -3740,12 +3740,14 @@ def resume_command(rec):
     """The `hippo dispatch` command that resumes a lane's codex session, from its record — for
     a lane that ended killed, on a model-capacity error the wrapper did not resume away (its
     resumes used up, or a batch entry's timeout too near), or whose triage named a cause a
-    resume can clear (transient, environment) — or None. None too without a session id or the
-    arguments to resume with: no line rather than a broken command. It launches a new single
-    dispatch — a batch lane's included — with the lane's labels and " (resumed)" on its scope."""
+    resume can clear (transient, environment), and for a lane with a khala name however it
+    ended: one that finished can still have letters waiting, and a resume is how it reads them
+    (§3.6) — or None. None too without a session id or the arguments to resume with: no line
+    rather than a broken command. It launches a new single dispatch — a batch lane's included —
+    with the lane's labels and " (resumed)" on its scope; khala_lane gives it the lane's name."""
     at_capacity = (rec.get("attempts") or [{}])[-1].get("reason") == "capacity"
     if not (rec.get("status") == "killed" or at_capacity
-            or rec.get("cause") in RELAUNCHABLE_CAUSES):
+            or rec.get("cause") in RELAUNCHABLE_CAUSES or rec.get("khala")):
         return None
     sid, args, kind = rec.get("codex_session"), rec.get("codex_args"), rec.get("kind")
     if not sid or not isinstance(args, list) or not kind:

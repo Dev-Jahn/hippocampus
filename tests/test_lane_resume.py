@@ -3,15 +3,15 @@ that continues a lane's codex session, and the wrapper's own resume of a session
 on a model-capacity error.
 
 Contract under test: the triage line names the cause the judge named, in the one shape every
-surface prints; a lane that ended killed, or whose cause a resume can clear, ends on the exact
-`hippo dispatch … -- <codex args> resume <session> "<continuation>"` command — single dispatch
-and batch lane alike, quoted so a hostile scope cannot break it, and absent when there is no
-session to resume; and a lane whose codex exited non-zero on the measured capacity line is
-resumed in place — the same session, up to len(CAPACITY_WAITS) times — staying one lane: one
-record with its attempts, one raw log, the last attempt's report, one usage row (the rollout
-is cumulative across a resume, so nothing is counted twice), one triage. A signal during the
-wait ends it at once, killed, one during a resume reaches the resumed codex, and any other
-failure is never resumed.
+surface prints; a lane that ended killed, or whose cause a resume can clear, or that has a
+khala name however it ended, ends on the exact `hippo dispatch … -- <codex args> resume
+<session> "<continuation>"` command — single dispatch and batch lane alike, quoted so a
+hostile scope cannot break it, and absent when there is no session to resume; and a lane
+whose codex exited non-zero on the measured capacity line is resumed in place — the same
+session, up to len(CAPACITY_WAITS) times — staying one lane: one record with its attempts, one
+raw log, the last attempt's report, one usage row (the rollout is cumulative across a resume,
+so nothing is counted twice), one triage. A signal during the wait ends it at once, killed, one
+during a resume reaches the resumed codex, and any other failure is never resumed.
 
 The lanes run in-process (hippo_cli.run_dispatch / run_batch) so CAPACITY_WAITS can be cut to
 hundredths of a second by monkeypatch; no test here sleeps for the real schedule. The stub
@@ -709,6 +709,10 @@ def test_which_lanes_get_a_resume_line():
     assert line({**rec, "status": "exited", "cause": "environment"})
     assert line({**rec, "status": "exited", "cause": "capability"}) is None
     assert line({**rec, "status": "exited"}) is None
+    # A lane with a khala name, however it ended: a finished one can still have letters waiting.
+    assert line({**rec, "status": "exited", "khala": "x@mbp"})
+    assert line({**rec, "status": "exited", "cause": "capability", "khala": "x@mbp"})
+    assert line({**rec, "status": "exited", "khala": "x@mbp", "codex_session": None}) is None
     assert line({**rec, "status": "killed", "codex_session": None}) is None, "no session"
     assert line({**rec, "status": "killed", "codex_args": None}) is None, "no prompt found"
     assert line({k: v for k, v in rec.items() if k != "kind"} | {"status": "killed"}) is None
