@@ -18,6 +18,7 @@ import os
 import queue
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -74,7 +75,10 @@ ALLOWED = {
     # depth: how far this lane may re-delegate (§9.5 — 0 = leaf, told not to spawn; the clause
     # is indexed, not deleted). parent: the dispatch id of the lane that launched this one —
     # an unintended depth-2 becomes an event in the ledger, not a prohibition nobody can check.
-    "dispatch": ("id", "kind", "exec", "scope", "task", "depth", "parent"),
+    # khala / khala_parent: the lane's khala address and its launcher's, where khala is
+    # installed (§3.6) — so main knows where to write to a lane.
+    "dispatch": ("id", "kind", "exec", "scope", "task", "depth", "parent", "khala",
+                 "khala_parent"),
     "outcome": ("ref", "result", "attr", "rework", "by", "note"),
     "review": ("id", "base", "source", "findings"),
     "review-status": ("ref", "addressed", "at"),
@@ -2768,7 +2772,7 @@ class Lane:
     on record from the start, because a killed wrapper may not live to print one."""
 
     def __init__(self, did, scope, exec_, record, log, report, kind, task="", depth=0,
-                 codex_args=None, out=None, face=None):
+                 codex_args=None, out=None, face=None, khala=None):
         self.path = record  # None: no .hippo/, no record — the stream still runs
         self.out = out or sys.stderr
         self.label = one_line(scope, LANE_SCOPE_CHARS)
@@ -2787,6 +2791,7 @@ class Lane:
         self.rec["attempts"] = []
         if face:  # `workflow`: launched by `--batch … --entry`, so --watch polls each minute
             self.rec["face"] = face
+        self.rec.update(khala_fields(khala))  # its khala address, as its claim wrote it
         self.session_id = self.model = ""
         self.footer_total = None
         self.capacity = False  # this attempt's stderr ends on a CAPACITY_SIGNATURES line (feed)
@@ -3077,6 +3082,224 @@ def tee_stdout(src, copy):
                 return
 
 
+# --- a lane's environment: no Claude session, and a khala name of its own (§3.6) -----------
+
+# A Claude Code session's own variables: every CLAUDE_CODE_* (its id, messaging socket and
+# token, bridge id, entrypoint, …), CLAUDECODE, CLAUDE_PID and CLAUDE_EFFORT (the effort of
+# that session's current turn). Main's Bash calls carry them, and a codex lane is not that
+# session: one that bound khala's Claude path with them would ring main's doorbell for its own
+# mail. Nothing in hippo reads them inside a lane. Other CLAUDE_* names (CLAUDE_CONFIG_DIR,
+# CLAUDE_PLUGIN_ROOT, …) are configuration, not the session: they pass.
+CLAUDE_SESSION_PREFIX = "CLAUDE_CODE_"
+CLAUDE_SESSION_VARS = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT")
+KHALA_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")  # khala's rule for a session or node name
+KHALA_ADDRESS_RE = re.compile(r"([a-z0-9][a-z0-9-]*)@([a-z0-9][a-z0-9-]*)")
+KHALA_RESERVED = frozenset(("conduit", "khala", "khala-gateway", "gateway", "operator", "user"))
+KHALA_WHOAMI_TIMEOUT = 10  # seconds
+KHALA_CODEX_SESSION = ".khala-codex-session"  # the name khala-codex binds a session in its cwd as
+KHALA_LEDGER = ("khala", "khala_parent")  # what of a lane's identity rides its ev:dispatch row
+
+
+def lane_env(base, khala=None):
+    """A codex lane's environment: `base` without a Claude session's own variables and, when
+    khala is installed, with the lane's identity — KHALA_SESSION, and KHALA_PARENT only when
+    main's address is known (an inherited one names whoever launched main)."""
+    env = {k: v for k, v in base.items()
+           if not k.startswith(CLAUDE_SESSION_PREFIX) and k not in CLAUDE_SESSION_VARS}
+    if khala is not None:
+        env.pop("KHALA_PARENT", None)
+        env["KHALA_SESSION"] = khala["name"]
+        if khala.get("khala_parent"):
+            env["KHALA_PARENT"] = khala["khala_parent"]
+    return env
+
+
+def khala_name_ok(name):
+    return bool(KHALA_NAME_RE.fullmatch(name or "")) and name not in KHALA_RESERVED
+
+
+def khala_name(text):
+    """`text` as a khala name — lowercased, every other character a `-`, runs collapsed, ends
+    trimmed — or "" when nothing usable is left."""
+    name = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return name if khala_name_ok(name) else ""
+
+
+def khala_main(base):
+    """None when khala is not on PATH — then a lane gets no identity and hippo does nothing
+    khala-shaped. Otherwise (main's address, None), or (None, why not): `<identity>@<node>` as
+    `khala whoami` prints it for the caller — the session that launches the lane. Never guessed:
+    no directory name stands in for it."""
+    khala = shutil.which("khala", path=base.get("PATH"))
+    if khala is None:
+        return None
+    try:
+        r = subprocess.run([khala, "whoami"], env=base, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=KHALA_WHOAMI_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, f"`khala whoami` did not answer in {KHALA_WHOAMI_TIMEOUT}s"
+    except OSError as err:
+        return None, f"`khala whoami` could not run ({err})"
+    out = r.stdout.strip()
+    if r.returncode != 0:
+        said = one_line(r.stderr or r.stdout, 120) or "no output"
+        return None, f"`khala whoami` exited {r.returncode} ({said})"
+    if not KHALA_ADDRESS_RE.fullmatch(out):
+        return None, f"`khala whoami` printed no <identity>@<node> ({one_line(out, 80)!r})"
+    return out, None
+
+
+def khala_records(ld):
+    for p in ld.glob("d*.json") if ld is not None else ():
+        rec = read_record(p)
+        if rec and isinstance(rec.get("khala"), str):
+            yield rec
+
+
+def khala_resumed(ld, args):
+    """The name of the lane whose codex session `args` resume (`… resume <session> …`), off
+    that lane's record — None when they resume none, or no record of it names one."""
+    at = codex_resume_at(args)
+    if at is None:
+        return None
+    after = args[at + 1:]
+    sid = next((a for i, a in enumerate(after) if not a.startswith("-")
+                and (i == 0 or after[i - 1] not in CODEX_VALUE_OPTIONS)), None)
+    recs = [r for r in khala_records(ld) if sid and r.get("codex_session") == sid]
+    name = max(recs, key=lambda r: r.get("started") or "")["khala"].split("@")[0] if recs else ""
+    return name if khala_name_ok(name) else None
+
+
+@contextlib.contextmanager
+def lanes_claim(ld):
+    """An flock on .hippo/lanes/ itself — no lock file a prune could take away — across the
+    processes and threads that start lanes on this checkout (an flock is per open file)."""
+    if ld is None:
+        yield
+        return
+    fd = os.open(ld, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def khala_session_file(workdir, name):
+    """`<workdir>/.khala-codex-session` = `name`, so a resume of the lane's session binds the
+    same name — only in a lane's own worktree (`.claude/worktrees/<w>/…`): the main checkout's
+    file is main's — and the file kept out of the lane's commits (khala_exclude). → notes: the
+    file holds another name (never overwritten), or it or the exclude could not be written."""
+    d = Path(workdir).resolve()
+    parts = d.parts
+    if not d.is_dir() or not any(parts[i:i + 2] == (".claude", "worktrees")
+                                 for i in range(len(parts) - 2)):
+        return []
+    p, notes = d / KHALA_CODEX_SESSION, []
+    try:
+        with open(p, "x", encoding="utf-8") as f:
+            f.write(name + "\n")
+    except FileExistsError:
+        held = _read_text(p)
+        if held is None or held.splitlines() != [name]:
+            notes.append(f"{p} names {one_line(held, 40)!r}, not {name} — left as it is")
+    except OSError as err:
+        return [f"{p} not written ({err})"]
+    note = khala_exclude(d)
+    return notes + [note] if note else notes
+
+
+def khala_exclude(workdir):
+    """The exact line `.khala-codex-session` in the repository's own `info/exclude` — shared by
+    all its worktrees, untracked — so a lane's `git add -A` never commits the file; the tracked
+    .gitignore is the project's and is never touched. → a note when it could not be added, else
+    None (outside a git repository nothing can commit it)."""
+    try:
+        r = subprocess.run(["git", "-C", str(workdir), "rev-parse", "--git-common-dir"],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as err:
+        return (f"info/exclude not checked ({err}) — a lane's commit could carry "
+                f"{KHALA_CODEX_SESSION}")
+    if r.returncode != 0:
+        return None
+    p = Path(workdir) / r.stdout.strip() / "info" / "exclude"  # relative to workdir, or absolute
+    try:
+        text = p.read_text(encoding="utf-8") if p.exists() else ""
+        if KHALA_CODEX_SESSION not in text.splitlines():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open("a", encoding="utf-8") as f:
+                f.write(("\n" if text and not text.endswith("\n") else "") + KHALA_CODEX_SESSION
+                        + "\n")
+    except OSError as err:
+        return f"{p} not updated ({err}) — a lane's commit could carry {KHALA_CODEX_SESSION}"
+    return None
+
+
+def khala_lane(main, base, did, task, args, workdir, ld):
+    """The lane's khala identity (§3.6) — {name, khala, khala_parent, khala_note, why} — or None
+    when khala is not on PATH (`main`, from khala_main). The name, the first that applies:
+      - the caller's choice: an inherited KHALA_SESSION that is a usable name and not main's
+        own. One equal to main's, or not provably different because main's address is
+        unknown, is never taken — a lane must never answer as main;
+      - a resume's: the name on the record of the lane whose session it resumes, as it was;
+      - the slug of `--task <type>/<slug>` (khala_name), else `lane-<8 hex of the dispatch id>`.
+    Any but a resume's gets `-2`, `-3`, … while main or a lane this checkout's records show
+    running holds it: a batch's lanes share one environment, and two running lanes never share
+    a name. Chosen under lanes_claim and claimed by the lane's record, written before the lock
+    goes — so lanes starting together, in one batch or in separate processes, never collide."""
+    if main is None:
+        return None
+    address, why = main
+    me, _, node = (address or "").partition("@")
+    held, notes = base.get("KHALA_SESSION") or "", []
+    chosen = held if khala_name_ok(held) and me and held != me else ""
+    if held and not khala_name_ok(held):
+        notes.append(f"KHALA_SESSION={held!r} is no khala name — replaced")
+    elif held and not me:
+        notes.append(f"KHALA_SESSION={held} may be main's own name (main's address is "
+                     "unknown) — replaced")
+    with lanes_claim(ld):
+        name = None if chosen else khala_resumed(ld, args)
+        if name is None:
+            stem = chosen or khala_name(task.split("/", 1)[-1]) or f"lane-{did[1:9]}"
+            taken = {me} | {r["khala"].split("@")[0] for r in khala_records(ld)
+                            if watch_state(r) == "running"}
+            name, n = stem, 1
+            while name in taken:
+                n += 1
+                name = f"{stem}-{n}"
+        kh = {"name": name, "khala": f"{name}@{node}" if node else name, "why": why}
+        if address:
+            kh["khala_parent"] = address
+        if ld is not None:
+            try:
+                write_durable(ld / f"{did}.json", json.dumps(
+                    {"id": did, "pid": os.getpid(), "started": now_iso(), "khala": kh["khala"]}))
+            except OSError:
+                pass  # the lane's own record makes the sound (Lane.write)
+        # Under the lock too: lanes of one repository append to one info/exclude.
+        for note in khala_session_file(workdir, name):
+            print(f"dispatch: {note}", file=sys.stderr)
+            notes.append(note)
+    if why:
+        notes.append(f"no KHALA_PARENT: {why}")
+    if notes:
+        kh["khala_note"] = "; ".join(notes)
+    return kh
+
+
+def khala_fields(kh, keys=(*KHALA_LEDGER, "khala_note")):
+    """What of a lane's identity goes on record: its lane record by default, `KHALA_LEDGER` for
+    its ev:dispatch row — {} without one."""
+    return {k: kh[k] for k in keys if k in kh} if kh else {}
+
+
+def khala_said(kh):
+    """The launch line's text: the lane's address and its parent's, or why it has none."""
+    return f"khala: {kh['khala']} · " + (f"parent {kh['khala_parent']}" if kh.get("khala_parent")
+                                         else f"no parent — {kh['why']}")
+
+
 def run_dispatch(argv):
     """DESIGN §3.6. A failed record never blocks the launch — this surface's real job is running
     codex and the ledger is a side effect. But a lost record always makes a sound."""
@@ -3098,6 +3321,13 @@ def run_dispatch(argv):
     parent = os.environ.get("HIPPO_DISPATCH", "")
     hp = find_hippo()
     check_fanout(hp, parent, exec_label(rest).split("/")[1])
+    # The lane's files (§3.6): codex's raw stderr, its stdout (the report) and the record,
+    # written before the id is printed so a watcher never races the record into existence.
+    # With no .hippo/ there is no record and the raw log goes to a temp file the last line names.
+    ld = lanes_dir_or_note(hp) if hp is not None else None
+    # Its khala name, claimed by its record before the ledger row names it.
+    kh = khala_lane(khala_main(os.environ), os.environ, did, task, rest,
+                    lane_dir(rest, Path.cwd()), ld)
     bad = "no .hippo/"
     if hp is None:
         print("dispatch: no .hippo/ — skipping the dispatch record", file=sys.stderr)
@@ -3108,16 +3338,13 @@ def run_dispatch(argv):
             e["task"] = task
         if parent:
             e["parent"] = parent
+        e.update(khala_fields(kh, KHALA_LEDGER))
         bad = validate_event(e)
         if bad:
             print(f"dispatch: record failed ({bad}) — the delegation proceeds anyway", file=sys.stderr)
         else:
             # The ledger line goes to stderr: stdout's first line belongs to the dispatch id (§3.6).
             print(json.dumps(append_event(hp, e, src="wrapper"), ensure_ascii=False), file=sys.stderr)
-    # The lane's files (§3.6): codex's raw stderr, its stdout (the report) and the record,
-    # written before the id is printed so a watcher never races the record into existence.
-    # With no .hippo/ there is no record and the raw log goes to a temp file the last line names.
-    ld = lanes_dir_or_note(hp) if hp is not None else None
     if ld is not None:
         log, report_copy, record = ld / f"{did}.log", ld / f"{did}.out", ld / f"{did}.json"
     else:
@@ -3125,8 +3352,10 @@ def run_dispatch(argv):
         os.close(fd)
         log, report_copy, record = Path(name), None, None
     lane = Lane(did, scope, exec_label(rest), record, log, report_copy, kind, task, depth,
-                codex_resume_args(rest, Path.cwd()))
+                codex_resume_args(rest, Path.cwd()), khala=kh)
     print(f"dispatch:{did}", flush=True)
+    if kh:
+        lane.say(khala_said(kh))
     # The lane inherits its own dispatch id (§9.2): every hippo write it makes arrives as
     # src=executor, and `log outcome` needs no --ref. Set even when the record failed — the
     # id was printed and is the lane's name either way. HIPPO_DEPTH indexes the
@@ -3136,6 +3365,7 @@ def run_dispatch(argv):
     if hp is not None:
         os.environ["HIPPO_DIR"] = str(hp)
     os.environ["PATH"] = lane_path()
+    env = lane_env(os.environ, kh)
     # The judge, when there is one (§3.6): notes about the brief before the launch, and the
     # lane's final message — captured to a file, so stdout stays untouched — for triage after.
     on = jev_backend(hp) != "off"
@@ -3173,7 +3403,7 @@ def run_dispatch(argv):
             try:
                 child = subprocess.Popen(
                     ["codex", "exec", *argv], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, start_new_session=True,
+                    stderr=subprocess.PIPE, env=env, start_new_session=True,
                 )
             except OSError as err:
                 print(f"dispatch: could not run codex: {err}", file=sys.stderr)
@@ -3338,6 +3568,9 @@ def watch_lines(rec, state):
     else:
         lines.append("report: none — the lane printed no final message")
     lines.append(f"raw log: {rec.get('log')}")
+    if rec.get("khala"):  # where its mail goes — main may still write, or read what is left
+        lines.append(f"khala: {rec['khala']}"
+                     + (f" · parent {rec['khala_parent']}" if rec.get("khala_parent") else ""))
     cmd = resume_command(rec)
     if cmd:
         lines.append(f"resume: {cmd}")
@@ -3507,12 +3740,14 @@ def resume_command(rec):
     """The `hippo dispatch` command that resumes a lane's codex session, from its record — for
     a lane that ended killed, on a model-capacity error the wrapper did not resume away (its
     resumes used up, or a batch entry's timeout too near), or whose triage named a cause a
-    resume can clear (transient, environment) — or None. None too without a session id or the
-    arguments to resume with: no line rather than a broken command. It launches a new single
-    dispatch — a batch lane's included — with the lane's labels and " (resumed)" on its scope."""
+    resume can clear (transient, environment), and for a lane with a khala name however it
+    ended: one that finished can still have letters waiting, and a resume is how it reads them
+    (§3.6) — or None. None too without a session id or the arguments to resume with: no line
+    rather than a broken command. It launches a new single dispatch — a batch lane's included —
+    with the lane's labels and " (resumed)" on its scope; khala_lane gives it the lane's name."""
     at_capacity = (rec.get("attempts") or [{}])[-1].get("reason") == "capacity"
     if not (rec.get("status") == "killed" or at_capacity
-            or rec.get("cause") in RELAUNCHABLE_CAUSES):
+            or rec.get("cause") in RELAUNCHABLE_CAUSES or rec.get("khala")):
         return None
     sid, args, kind = rec.get("codex_session"), rec.get("codex_args"), rec.get("kind")
     if not sid or not isinstance(args, list) or not kind:
@@ -5006,6 +5241,7 @@ class BatchRun:
         self.journal = mp.parent / f"{mp.stem}.journal.jsonl"
         self.outdir = mp.parent / f"{mp.stem}.out"
         self.parent = os.environ.get("HIPPO_DISPATCH", "")
+        self.khala = khala_main(os.environ)  # main's khala address, asked once per run
         self.record, self.face = record, face
         self.stop = threading.Event()
         self.state = {"launched": 0, "ok": 0, "failed": 0, "done": 0, "warned": False,
@@ -5105,6 +5341,10 @@ class BatchRun:
                 self.state["warned"] = True
                 if first:
                     print(msg, file=sys.stderr)
+            cmd = adapter_argv(en)
+            kh = khala_lane(self.khala, os.environ, did, en["task"], cmd[2:],
+                            lane_dir(cmd[2:], en["cwd"]), self.ld)
+            e.update(khala_fields(kh, KHALA_LEDGER))
             if bad:
                 # Same stance as single dispatch: a lost record makes a sound, never a blocked launch.
                 print(f"dispatch --batch: {en['id']}: record failed ({bad}) — the launch "
@@ -5119,19 +5359,21 @@ class BatchRun:
         with BATCH_LOCK:
             self.state["launched"] += 1
         out_p, err_p = self.outdir / f"{en['id']}.out", self.outdir / f"{en['id']}.err"
-        env = {**os.environ, "HIPPO_DISPATCH": did, "HIPPO_DEPTH": str(en["depth"]),
-               "PATH": lane_path(), **({"HIPPO_DIR": str(hp)} if hp is not None else {})}
-        cmd = adapter_argv(en)
+        env = lane_env({**os.environ, "HIPPO_DISPATCH": did, "HIPPO_DEPTH": str(en["depth"]),
+                        "PATH": lane_path(), **({"HIPPO_DIR": str(hp)} if hp is not None else {})},
+                       kh)
         # The same lane machinery as a single dispatch (§3.6): <id>.err keeps its shape (the
         # raw stderr, byte for byte), the compact stream joins the batch's own stderr, and the
         # record lands in .hippo/lanes/ under the dispatch id.
         lane = Lane(did, en["scope"], e["exec"], self.ld / f"{did}.json" if self.ld else None,
                     err_p, out_p, en["kind"], en["task"], en["depth"],
-                    codex_resume_args(cmd[2:], en["cwd"]), face=self.face)
+                    codex_resume_args(cmd[2:], en["cwd"]), face=self.face, khala=kh)
         if self.face:
             # The Workflow face's relay greps this, as it does a single dispatch's — printed
             # once the record exists, so a watcher never races it into existence.
             print(f"dispatch:{did}", flush=True)
+        if kh:
+            lane.say(khala_said(kh))
         # The entry's timeout bounds the whole lane, capacity waits and resumes included.
         deadline = None if en["timeout"] is None else time.monotonic() + en["timeout"]
 

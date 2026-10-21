@@ -10,7 +10,7 @@
 # bump `as_of` — PRIORS prints it, so a stale sheet is visible instead of silently
 # wrong. Sources: https://developers.openai.com/api/docs/pricing ,
 # https://platform.claude.com/docs/en/about-claude/pricing
-as_of: "2026-10-12"
+as_of: "2026-10-14"
 models:
   # OpenAI, standard tier, short context (the page prices long context at 2x, batch at 0.5x,
   # and the fast tier separately).
@@ -35,7 +35,11 @@ models:
   claude-sonnet-5-5: {input: 2.00, cached: 0.10, output: 10.00}
   # Sonnet 5 launch pricing became the standard price; the 2026-09-01 increase was cancelled.
   claude-sonnet-5:  {input: 2.00, cached: 0.20, output: 10.00}
-  claude-haiku-4-5: {input: 1.00, cached: 0.10, output: 5.00}
+  # Haiku 5.5 is what `haiku` resolves to since 2026-10. These are its prices for prompts up to
+  # 100k tokens; a request over 100k pays $0.50 / $0.05 / $2.50 on all of it (cache included),
+  # and its 5m cache write ($0.125) has no column here.
+  claude-haiku-5-5: {input: 0.10, cached: 0.01, output: 0.50}
+  claude-haiku-4-5: {input: 1.00, cached: 0.10, output: 5.00, legacy: true}
   # Fable 5, Opus 5 and Opus 4.8, superseded: native runs (DESIGN §3.5.3c) were recorded on
   # them, and dropping their rows on 2026-09-23 turned that history unpriced. Restored
   # 2026-09-25 as legacy; the vendor page still lists all three.

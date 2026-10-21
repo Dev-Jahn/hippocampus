@@ -66,6 +66,13 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   through `run_in_background`, never nohup/disown (orphans) or `> log 2>&1` (raw stderr stays in
   `.hippo/lanes/<id>.log`, the report in `<id>.out`). A killed lane still records rc and usage.
   A codex argument that collides with a wrapper flag goes after `--`.
+- A lane never carries your Claude session's variables. **Where `khala` is installed it gets its
+  own name** — `KHALA_SESSION` = the `--task` slug (`-2` on a clash, the same on a resume) and
+  `KHALA_PARENT` = you, from `khala whoami` — shown as `khala: <name>@<node>` on its launch line,
+  in its final lines and in its record: write to that address, and put no khala name in the
+  brief. Its worktree's `.khala-codex-session` is kept out of commits by the repo's
+  `info/exclude`. **khala says an ended lane has unread letters**: run that lane's `resume:`
+  line — it reads them as it starts, under the same name, with you as its parent.
 - **Deadlines (Claude Code)**: a background call's `timeout` is its deadline — 30 minutes when
   none is given — so every background `hippo dispatch`, plain form and batch alike, passes
   `timeout: 2147483647` (the lane agent does); the host clamps it to its maximum, 2 hours. A
@@ -81,13 +88,13 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
 - **Neutral vocabulary**: GPU memory "overlap", "contamination", "injection" tripped the
   executor's content filter ten times — write safety statements in neutral academic terms.
 - **Resume, do not relaunch**: a lane that ended killed, at model capacity or on a
-  `transient`/`environment` cause ends with `resume: <command>` — the same codex session as a
-  new dispatch. Run it as printed, or swap its closing prompt to steer — in single quotes, or
-  `"$p"` from a single-quoted variable, so `$` and backticks stay literal (never `--last` when
-  lanes run in parallel). A resumed lane has no brief of its own, so its triage is weak
-  evidence: read its report. A model-capacity error the wrapper resumes by itself, up to 3
-  times, after 1, 2 and 4 minutes — the stream says so as it waits, and `--watch` lists the
-  `attempts:`.
+  `transient`/`environment` cause — and any lane with a khala name, however it ended — ends
+  with `resume: <command>` — the same codex session as a new dispatch. Run it as printed, or
+  swap its closing prompt to steer — in single quotes, or `"$p"` from a single-quoted variable,
+  so `$` and backticks stay literal (never `--last` when lanes run in parallel). A resumed lane
+  has no brief of its own, so its triage is weak evidence: read its report. A model-capacity
+  error the wrapper resumes by itself, up to 3 times, after 1, 2 and 4 minutes — the stream
+  says so as it waits, and `--watch` lists the `attempts:`.
 
 ## 2b. Batch
 
