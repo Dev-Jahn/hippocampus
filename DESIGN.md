@@ -226,6 +226,10 @@ optional `src` (`scribe|cli|wrapper|executor`).
   start at 0. `parent` is stamped by the wrapper from `HIPPO_DISPATCH` when a launch happens
   inside a lane, which turns an unintended depth-2 into a ledger event instead of a prohibition
   nobody can check. Neither field is enforced anywhere.
+- `dispatch.khala` and `dispatch.khala_parent` (strings; absent where khala is not installed):
+  the lane's khala address — `<name>@<node>`, the bare name when no node is known — and the
+  launching session's, both stamped by the wrapper (§3.6, "A lane's environment"). Nothing
+  aggregates on them; they say where a lane could be written to.
 - `directive.audience ∈ {main, executor, all}` (absent = all — §9.4, built in 1.8.0): *who* a
   directive binds. `status --inject` filters by reader —
   inside a lane (HIPPO_DISPATCH set) the capsule carries `executor|all`, everywhere else
@@ -1124,6 +1128,35 @@ silently recorded nothing — the stub test had encoded the wrong stream; fixed 
 outcome — the acceptance judgment belongs to main (through the CLI directly) or to the scribe
 (by inference); what the lane itself records under that id is a claim, never the verdict.
 
+**A lane's environment and its khala name.** Every lane — single, batch, a printed resume —
+runs without five variables of the Claude Code session that launched it:
+`CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`,
+`CLAUDECODE`, `CLAUDE_PID`. A codex lane is not that session, and one that bound khala (the
+cross-machine session mail) through its Claude path with them would ring main's doorbell for
+its own mail; nothing in hippo reads them in a lane. Where `khala` is on `PATH` the wrapper also
+gives each lane an identity of its own. Measured on windows (khala-network D18, 2026-10-15..21):
+of 675 October lane rollouts 14 used khala, with none given — 4 stopped for want of an identity,
+the first 4 of the 10 that used one had named themselves after a worktree folder or a brief
+title, and a resumed run lost its name. `KHALA_SESSION` is the slug of `--task <type>/<slug>`
+under khala's name rule (lowercased, every other character a `-`, runs collapsed, ends trimmed,
+no service name), `lane-<8 hex of the dispatch id>` without one, then `-2`, `-3`, … while main
+or a lane this checkout's records show running holds it — chosen under an flock on
+`.hippo/lanes/` and claimed by the lane's record before the lock goes, so lanes starting
+together never share one. A resume of a lane's session takes the name that lane's record
+carries. An inherited `KHALA_SESSION` is the caller's choice only when it is a usable name and
+not main's own (and it too gets a suffix: a batch's lanes share one environment); equal to
+main's, or not provably different because main's address is unknown, it is replaced — a lane
+never answers as main. `KHALA_PARENT` is what `khala whoami` prints for the launching session
+(`<identity>@<node>`); when that command is missing or fails the variable is left out, an
+inherited one too, and the reason goes on record — no directory name stands in for it. A lane
+in a worktree of its own (its working directory under `.claude/worktrees/`) gets
+`.khala-codex-session` with its name, by which khala-codex binds a resumed session; one that
+names another lane is reported and left alone, and the main checkout never gets one. The
+address rides the launch stream (`lane <scope> · 0s · khala: <name>@<node> · parent
+<main>@<node>`), the lane record and the `ev:dispatch` row (§3.2), so main knows where to
+write to a lane. With no khala on `PATH` none of this exists — no call, no variable, no field —
+and the lane's environment is what it was, less the five Claude variables.
+
 **The lane's own record** (1.15.0). In Claude Code a background `hippo dispatch` showed as a
 shell row labelled with its raw command, and nobody could see what the lane was doing: codex's
 raw stderr runs to megabytes (one lane: 56k lines, 2.3MB), so 18 of 18 real background launches
@@ -1145,7 +1178,8 @@ matches), `Continue?`, `Overwrite?` — so the three characters those need — `
 `press`, the slash of `y/n` — are swapped for look-alikes. `.hippo/lanes/<id>.json` holds only
 what the rollout cannot give back cheaply — `id scope kind exec pid pgid started codex_session
 cmds last last_at log report` (paths absolute: the record is read from any cwd), `task` and
-`depth` when set, `codex_args` (codex's arguments as a resume takes them — "Resuming a lane"
+`depth` when set, `khala`, `khala_parent` and `khala_note` where khala is installed (above),
+`codex_args` (codex's arguments as a resume takes them — "Resuming a lane"
 below — absent when no prompt could be told apart), `attempts` (one `{started, rc, reason}` per
 run of codex, `reason ∈ {exit, capacity, signal, timeout}`; more than one only when the wrapper
 resumed it, "A model at capacity" below) and `waiting` (`{resume, of, until}`, only while a
