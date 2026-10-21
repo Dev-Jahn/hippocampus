@@ -3084,11 +3084,14 @@ def tee_stdout(src, copy):
 
 # --- a lane's environment: no Claude session, and a khala name of its own (§3.6) -----------
 
-# A Claude Code session's own variables. Main's Bash calls carry them, and a codex lane is not
-# that session: one that bound khala's Claude path with them would ring main's doorbell for
-# its own mail. Nothing in hippo reads them inside a lane.
-CLAUDE_SESSION_VARS = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET",
-                       "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDECODE", "CLAUDE_PID")
+# A Claude Code session's own variables: every CLAUDE_CODE_* (its id, messaging socket and
+# token, bridge id, entrypoint, …), CLAUDECODE, CLAUDE_PID and CLAUDE_EFFORT (the effort of
+# that session's current turn). Main's Bash calls carry them, and a codex lane is not that
+# session: one that bound khala's Claude path with them would ring main's doorbell for its own
+# mail. Nothing in hippo reads them inside a lane. Other CLAUDE_* names (CLAUDE_CONFIG_DIR,
+# CLAUDE_PLUGIN_ROOT, …) are configuration, not the session: they pass.
+CLAUDE_SESSION_PREFIX = "CLAUDE_CODE_"
+CLAUDE_SESSION_VARS = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT")
 KHALA_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")  # khala's rule for a session or node name
 KHALA_ADDRESS_RE = re.compile(r"([a-z0-9][a-z0-9-]*)@([a-z0-9][a-z0-9-]*)")
 KHALA_RESERVED = frozenset(("conduit", "khala", "khala-gateway", "gateway", "operator", "user"))
@@ -3101,7 +3104,8 @@ def lane_env(base, khala=None):
     """A codex lane's environment: `base` without a Claude session's own variables and, when
     khala is installed, with the lane's identity — KHALA_SESSION, and KHALA_PARENT only when
     main's address is known (an inherited one names whoever launched main)."""
-    env = {k: v for k, v in base.items() if k not in CLAUDE_SESSION_VARS}
+    env = {k: v for k, v in base.items()
+           if not k.startswith(CLAUDE_SESSION_PREFIX) and k not in CLAUDE_SESSION_VARS}
     if khala is not None:
         env.pop("KHALA_PARENT", None)
         env["KHALA_SESSION"] = khala["name"]

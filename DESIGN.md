@@ -1129,11 +1129,15 @@ outcome — the acceptance judgment belongs to main (through the CLI directly) o
 (by inference); what the lane itself records under that id is a claim, never the verdict.
 
 **A lane's environment and its khala name.** Every lane — single, batch, a printed resume —
-runs without five variables of the Claude Code session that launched it:
-`CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`,
-`CLAUDECODE`, `CLAUDE_PID`. A codex lane is not that session, and one that bound khala (the
+runs without the variables of the Claude Code session that launched it: every `CLAUDE_CODE_*`
+(its id, messaging socket and token, bridge id, entrypoint, …), `CLAUDECODE`, `CLAUDE_PID` and
+`CLAUDE_EFFORT` (the effort of that session's current turn; a lane's is codex's own `-c
+model_reasoning_effort`). A codex lane is not that session, and one that bound khala (the
 cross-machine session mail) through its Claude path with them would ring main's doorbell for
-its own mail; nothing in hippo reads them in a lane. Where `khala` is on `PATH` the wrapper also
+its own mail; nothing in hippo reads them in a lane. The rule is the prefix, not a list: a list
+of five let seven more through to a real lane (D18's end-to-end run, 2026-10-21) — main's own
+bridge session id among them. Other `CLAUDE_*` names (`CLAUDE_CONFIG_DIR`, `CLAUDE_PLUGIN_ROOT`,
+…) are configuration, not the session, and pass. Where `khala` is on `PATH` the wrapper also
 gives each lane an identity of its own. Measured on windows (khala-network D18, 2026-10-15..21):
 of 675 October lane rollouts 14 used khala, with none given — 4 stopped for want of an identity,
 the first 4 of the 10 that used one had named themselves after a worktree folder or a brief
@@ -1159,7 +1163,7 @@ is never touched, and an exclude that cannot be written is a note, not an error.
 rides the launch stream (`lane <scope> · 0s · khala: <name>@<node> · parent <main>@<node>`),
 the lane record, `--watch`'s final lines and the `ev:dispatch` row (§3.2), so main knows where
 to write to a lane. With no khala on `PATH` none of this exists — no call, no variable, no field —
-and the lane's environment is what it was, less the five Claude variables.
+and the lane's environment is what it was, less the Claude session's variables.
 
 **The lane's own record** (1.15.0). In Claude Code a background `hippo dispatch` showed as a
 shell row labelled with its raw command, and nobody could see what the lane was doing: codex's

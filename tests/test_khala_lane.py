@@ -1,7 +1,8 @@
 """A codex lane's environment and khala identity (DESIGN §3.6, D18).
 
 Contract under test: every lane launched by `hippo dispatch` — single, batch, a printed resume —
-runs without the Claude session variables of the session that launched it. With `khala` on
+runs without the Claude session variables of the session that launched it (every CLAUDE_CODE_*,
+CLAUDECODE, CLAUDE_PID, CLAUDE_EFFORT; other CLAUDE_* configuration passes). With `khala` on
 PATH it also gets an identity of its own: KHALA_SESSION = the task's slug (sanitised to khala's
 name rule, `lane-<8 hex>` without one, `-2`, `-3` while main or a running lane holds it, the
 recorded name on a resume, an inherited value kept only when it is provably not main's own) and
@@ -28,8 +29,14 @@ import hippo_cli  # noqa: E402
 DID = "d" + "1a2b3c4d" + "0" * 24
 SID = "01a0f82c-1211-7261-8897-3c26f9bdc737"
 MAIN = ("main@mbp", None)
+# What a Claude Code session's Bash calls carry (measured, Claude Code 2.1.304) — the session's
+# own, every one. The first five were fff293c's list; the rest reached a real lane past it.
 CLAUDE = {"CLAUDE_CODE_SESSION_ID": "c0ffee", "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/cc.sock",
-          "CLAUDE_CODE_MESSAGING_TOKEN": "tok", "CLAUDECODE": "1", "CLAUDE_PID": "4242"}
+          "CLAUDE_CODE_MESSAGING_TOKEN": "tok", "CLAUDECODE": "1", "CLAUDE_PID": "4242",
+          "CLAUDE_CODE_BRIDGE_SESSION_ID": "session_01", "CLAUDE_CODE_ENTRYPOINT": "cli",
+          "CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDE_CODE_SESSION_ATTENDED": "1",
+          "CLAUDE_CODE_EXECPATH": "/x/claude/versions/2.1.304",
+          "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1", "CLAUDE_EFFORT": "xhigh"}
 
 # A fake khala: `whoami` prints $FAKE_WHOAMI (main@mbp by default) and exits $FAKE_RC; every
 # call is logged, so a test sees hippo asked nothing else.
@@ -219,6 +226,15 @@ def test_lane_env_scrubs_claude_and_sets_the_identity(tmp_path):
     assert "no KHALA_PARENT: `khala whoami` exited 2 (old)" in unknown["khala_note"]
 
 
+def test_every_claude_code_variable_leaves_by_its_prefix_and_configuration_stays():
+    """The rule is the prefix, not a list: a CLAUDE_CODE_* name no list has yet leaves too,
+    while CLAUDE_* configuration — and a name that only looks close — passes as it was."""
+    kept = {"CLAUDE_CONFIG_DIR": "/c", "CLAUDE_PLUGIN_ROOT": "/p", "CLAUDE_PROJECT_DIR": "/d",
+            "CLAUDE_CODEX": "x", "MY_CLAUDE_CODE_X": "y", "HOME": "/h"}
+    base = {**CLAUDE, "CLAUDE_CODE_NOT_YET_SHIPPED": "1", **kept}
+    assert hippo_cli.lane_env(base) == kept
+
+
 # --- .khala-codex-session ---------------------------------------------------------------
 
 
@@ -337,7 +353,7 @@ def test_with_whoami_missing_the_lane_has_no_parent_and_says_why(tmp_project, tm
 
 def test_without_khala_only_the_claude_variables_leave(tmp_project, tmp_path):
     kept = {"KHALA_SESSION": "main", "KHALA_PARENT": "boss@mbp", "LANE_MARK": "a b\nc",
-            "CLAUDE_PROJECT_DIR": "/p"}
+            "CLAUDE_PROJECT_DIR": "/p", "CLAUDE_CONFIG_DIR": "/c"}
     env = _env(tmp_path, None, **CLAUDE, **kept)
     wt = tmp_project / ".claude" / "worktrees" / "w"
     wt.mkdir(parents=True)
