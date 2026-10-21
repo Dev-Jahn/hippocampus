@@ -3184,25 +3184,51 @@ def lanes_claim(ld):
 def khala_session_file(workdir, name):
     """`<workdir>/.khala-codex-session` = `name`, so a resume of the lane's session binds the
     same name — only in a lane's own worktree (`.claude/worktrees/<w>/…`): the main checkout's
-    file is main's. → a note when the file holds another name (never overwritten) or could not
-    be written, else None."""
+    file is main's — and the file kept out of the lane's commits (khala_exclude). → notes: the
+    file holds another name (never overwritten), or it or the exclude could not be written."""
     d = Path(workdir).resolve()
     parts = d.parts
     if not d.is_dir() or not any(parts[i:i + 2] == (".claude", "worktrees")
                                  for i in range(len(parts) - 2)):
-        return None
-    p = d / KHALA_CODEX_SESSION
+        return []
+    p, notes = d / KHALA_CODEX_SESSION, []
     try:
         with open(p, "x", encoding="utf-8") as f:
             f.write(name + "\n")
-        return None
     except FileExistsError:
         held = _read_text(p)
+        if held is None or held.splitlines() != [name]:
+            notes.append(f"{p} names {one_line(held, 40)!r}, not {name} — left as it is")
     except OSError as err:
-        return f"{p} not written ({err})"
-    if held is not None and held.splitlines() == [name]:
+        return [f"{p} not written ({err})"]
+    note = khala_exclude(d)
+    return notes + [note] if note else notes
+
+
+def khala_exclude(workdir):
+    """The exact line `.khala-codex-session` in the repository's own `info/exclude` — shared by
+    all its worktrees, untracked — so a lane's `git add -A` never commits the file; the tracked
+    .gitignore is the project's and is never touched. → a note when it could not be added, else
+    None (outside a git repository nothing can commit it)."""
+    try:
+        r = subprocess.run(["git", "-C", str(workdir), "rev-parse", "--git-common-dir"],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as err:
+        return (f"info/exclude not checked ({err}) — a lane's commit could carry "
+                f"{KHALA_CODEX_SESSION}")
+    if r.returncode != 0:
         return None
-    return f"{p} names {one_line(held, 40)!r}, not {name} — left as it is"
+    p = Path(workdir) / r.stdout.strip() / "info" / "exclude"  # relative to workdir, or absolute
+    try:
+        text = p.read_text(encoding="utf-8") if p.exists() else ""
+        if KHALA_CODEX_SESSION not in text.splitlines():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open("a", encoding="utf-8") as f:
+                f.write(("\n" if text and not text.endswith("\n") else "") + KHALA_CODEX_SESSION
+                        + "\n")
+    except OSError as err:
+        return f"{p} not updated ({err}) — a lane's commit could carry {KHALA_CODEX_SESSION}"
+    return None
 
 
 def khala_lane(main, base, did, task, args, workdir, ld):
@@ -3247,10 +3273,10 @@ def khala_lane(main, base, did, task, args, workdir, ld):
                     {"id": did, "pid": os.getpid(), "started": now_iso(), "khala": kh["khala"]}))
             except OSError:
                 pass  # the lane's own record makes the sound (Lane.write)
-    note = khala_session_file(workdir, name)
-    if note:
-        print(f"dispatch: {note}", file=sys.stderr)
-        notes.append(note)
+        # Under the lock too: lanes of one repository append to one info/exclude.
+        for note in khala_session_file(workdir, name):
+            print(f"dispatch: {note}", file=sys.stderr)
+            notes.append(note)
     if why:
         notes.append(f"no KHALA_PARENT: {why}")
     if notes:
@@ -3538,6 +3564,9 @@ def watch_lines(rec, state):
     else:
         lines.append("report: none — the lane printed no final message")
     lines.append(f"raw log: {rec.get('log')}")
+    if rec.get("khala"):  # where its mail goes — main may still write, or read what is left
+        lines.append(f"khala: {rec['khala']}"
+                     + (f" · parent {rec['khala_parent']}" if rec.get("khala_parent") else ""))
     cmd = resume_command(rec)
     if cmd:
         lines.append(f"resume: {cmd}")

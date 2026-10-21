@@ -239,6 +239,65 @@ def test_the_session_file_goes_only_into_a_lane_worktree_and_is_never_overwritte
     assert "names 'x', not y — left as it is" in kh["khala_note"]
 
 
+def _git(*args, cwd):
+    """git for a throwaway repository, blind to the user's own config (signing, hooks)."""
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd,
+                          env=env, check=True, capture_output=True, text=True).stdout
+
+
+def _repo_with_worktree(root):
+    repo = root / "repo"
+    repo.mkdir(parents=True)
+    _git("init", "-q", cwd=repo)
+    _git("commit", "-q", "--allow-empty", "-m", "base", cwd=repo)
+    wt = repo / ".claude" / "worktrees" / "w"
+    _git("worktree", "add", "-q", str(wt), "-b", "w", cwd=repo)
+    return repo, wt
+
+
+def test_the_session_file_is_kept_out_of_a_lane_s_commits(tmp_path):
+    """The line goes into the repository's own info/exclude — shared by its worktrees, never
+    tracked — created when missing, added once, on a line of its own; .gitignore is untouched."""
+    repo, wt = _repo_with_worktree(tmp_path / "a")
+    info = repo / ".git" / "info"
+    for p in info.iterdir():
+        p.unlink()
+    info.rmdir()  # no info/ at all: it is created
+    assert "khala_note" not in _lane(workdir=wt)
+    assert "khala_note" not in _lane(workdir=wt)
+    assert (info / "exclude").read_text() == ".khala-codex-session\n", "once, however often"
+    assert (wt / ".khala-codex-session").read_text() == "x\n"
+    assert _git("status", "--porcelain", "--untracked-files=all", cwd=wt) == ""
+    _git("add", "-A", cwd=wt)
+    assert _git("diff", "--cached", "--name-only", cwd=wt) == "", "git add -A takes nothing"
+    assert not list(tmp_path.rglob(".gitignore"))
+
+    repo, wt = _repo_with_worktree(tmp_path / "b")
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.write_text("# mine\n.khala-codex-session-old")  # no final newline; a near miss
+    _lane(workdir=wt)
+    assert exclude.read_text() == "# mine\n.khala-codex-session-old\n.khala-codex-session\n"
+
+    repo, wt = _repo_with_worktree(tmp_path / "c")
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.unlink()
+    exclude.mkdir()  # cannot be written: a note, never an error
+    kh = _lane(workdir=wt)
+    assert (wt / ".khala-codex-session").read_text() == "x\n"
+    assert "exclude not updated" in kh["khala_note"]
+
+
+def test_watch_s_final_lines_carry_the_lane_s_address_when_it_has_one():
+    rec = {"id": "d1", "scope": "s", "status": "exited", "rc": 0, "cmds": 0, "log": "/l",
+           "started": "2026-10-21T00:00:00Z", "ended": "2026-10-21T00:01:00Z"}
+    lines = hippo_cli.watch_lines
+    assert not [ln for ln in lines(rec, "ended") if ln.startswith("khala")]
+    assert "khala: x@mbp" in lines({**rec, "khala": "x@mbp"}, "ended")
+    assert "khala: x@mbp · parent main@mbp" in lines(
+        {**rec, "khala": "x@mbp", "khala_parent": "main@mbp"}, "ended")
+
+
 # --- end to end -------------------------------------------------------------------------
 
 
@@ -257,6 +316,11 @@ def test_a_single_lane_runs_as_itself_with_main_as_its_parent(tmp_project, tmp_p
     assert (row["khala"], row["khala_parent"]) == ("khala-lane@mbp", "main@mbp")
     assert (rec["khala"], rec["khala_parent"]) == ("khala-lane@mbp", "main@mbp")
     assert (wt / ".khala-codex-session").read_text() == "khala-lane\n"
+    watch = subprocess.run([str(HIPPO_BIN), "dispatch", "--watch", did, "--for", "0"],
+                           cwd=tmp_project, env=env, capture_output=True, text=True, timeout=30)
+    assert watch.returncode == 0, watch.stderr
+    assert "khala: khala-lane@mbp · parent main@mbp" in watch.stdout.splitlines(), \
+        "the relay's reply is these lines, verbatim"
 
 
 def test_with_whoami_missing_the_lane_has_no_parent_and_says_why(tmp_project, tmp_path):

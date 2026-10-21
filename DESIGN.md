@@ -1151,10 +1151,14 @@ never answers as main. `KHALA_PARENT` is what `khala whoami` prints for the laun
 inherited one too, and the reason goes on record — no directory name stands in for it. A lane
 in a worktree of its own (its working directory under `.claude/worktrees/`) gets
 `.khala-codex-session` with its name, by which khala-codex binds a resumed session; one that
-names another lane is reported and left alone, and the main checkout never gets one. The
-address rides the launch stream (`lane <scope> · 0s · khala: <name>@<node> · parent
-<main>@<node>`), the lane record and the `ev:dispatch` row (§3.2), so main knows where to
-write to a lane. With no khala on `PATH` none of this exists — no call, no variable, no field —
+names another lane is reported and left alone, and the main checkout never gets one. So that a
+lane's `git add -A` never commits it, the exact line `.khala-codex-session` is added once to
+the repository's own `info/exclude` (`git rev-parse --git-common-dir`: shared by every
+worktree, never tracked; created when missing) — the tracked `.gitignore` is the project's and
+is never touched, and an exclude that cannot be written is a note, not an error. The address
+rides the launch stream (`lane <scope> · 0s · khala: <name>@<node> · parent <main>@<node>`),
+the lane record, `--watch`'s final lines and the `ev:dispatch` row (§3.2), so main knows where
+to write to a lane. With no khala on `PATH` none of this exists — no call, no variable, no field —
 and the lane's environment is what it was, less the five Claude variables.
 
 **The lane's own record** (1.15.0). In Claude Code a background `hippo dispatch` showed as a
@@ -1221,7 +1225,9 @@ or during a capacity wait `… · <cmds> cmds · model at capacity — resume 1 
 and exits 3; ended, it prints the final lines — `lane <id> exited rc=0 after 5m12s · 14 cmds ·
 <scope>`, `attempts: rc=1 model at capacity · rc=0` when the wrapper resumed it, a batch
 entry's `check: pass|fail rc=N · <path>`, the triage line when there is one, `report: <path>`,
-`raw log: <path>` and, for a lane that can be resumed, `resume: <command>` — and exits 0; a
+`raw log: <path>`, `khala: <name>@<node> · parent <main>@<node>` for a lane khala gave a name
+("A lane's environment" above; no `· parent` part without one) and, for a lane that can be
+resumed, `resume: <command>` — and exits 0; a
 `batch:<bid>` id reads a batch record;
 no record is 2, outside a project too (like the launch, this surface is never silent: a
 watcher told nothing would read it as an end). It reads `.hippo/lanes/` and writes nothing.

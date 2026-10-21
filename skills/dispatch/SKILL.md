@@ -68,8 +68,10 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   A codex argument that collides with a wrapper flag goes after `--`.
 - A lane never carries your Claude session's variables. **Where `khala` is installed it gets its
   own name** — `KHALA_SESSION` = the `--task` slug (`-2` on a clash, the same on a resume) and
-  `KHALA_PARENT` = you, from `khala whoami` — shown as `khala: <name>@<node>` on its launch line
-  and in its record: write to that address, and put no khala name in the brief.
+  `KHALA_PARENT` = you, from `khala whoami` — shown as `khala: <name>@<node>` on its launch line,
+  in its final lines and in its record: write to that address, and put no khala name in the
+  brief. Its worktree's `.khala-codex-session` is kept out of commits by the repo's
+  `info/exclude`.
 - **Deadlines (Claude Code)**: a background call's `timeout` is its deadline — 30 minutes when
   none is given — so every background `hippo dispatch`, plain form and batch alike, passes
   `timeout: 2147483647` (the lane agent does); the host clamps it to its maximum, 2 hours. A
