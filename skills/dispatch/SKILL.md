@@ -69,8 +69,10 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
 - A lane never carries your Claude session's variables. **Where `khala` is installed it gets its
   own name** — `KHALA_SESSION` = the `--task` slug (`-2` on a clash, the same on a resume) and
   `KHALA_PARENT` = you, from `khala whoami` — shown as `khala: <name>@<node>` on its launch line,
-  in its final lines and in its record: write to that address, and put no khala name in the
-  brief. Its worktree's `.khala-codex-session` is kept out of commits by the repo's
+  in its final lines and in its record: write to that address, and never name the lane itself in
+  the brief. Do put in the brief any peer it should write to (say a Claude subagent you give a
+  mailbox with a `KHALA_SESSION=<name>` line; see the khala skill) — it sends and replies there
+  directly, without you. Its worktree's `.khala-codex-session` is kept out of commits by the repo's
   `info/exclude`. **khala says an ended lane has unread letters**: run that lane's `resume:`
   line — it reads them as it starts, under the same name, with you as its parent.
 - **Deadlines (Claude Code)**: a background call's `timeout` is its deadline — 30 minutes when
