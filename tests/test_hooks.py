@@ -716,14 +716,29 @@ def test_the_capsule_after_a_compaction_points_at_the_deltas(tmp_project, repo_r
 
 def test_after_a_compaction_main_gets_the_latest_worklog_with_times(tmp_project, repo_root):
     """The summary can be older than the compaction (measured: 46–130 minutes for precomputed
-    ones, ~55 for idle ones) and state finished work as unfinished; the worklog is the fresher
-    record. After a compaction main's capsule carries its last four entries, each dated, across a
-    day boundary, with the time now; the `compact:` line says they and hippo's lists win and
-    deltas they overtook are skipped. Elsewhere `last:` stays one dated line."""
-    (tmp_project / ".hippo" / "worklog.md").write_text(
+    ones, ~55 for idle ones, 1.5–2h in a second report) and state finished work as unfinished;
+    the worklog is the fresher record. After a compaction main's capsule carries its last four
+    entries, each dated, across a day boundary, with the time now, and the task and directive
+    ids hippo wrote in the last 3h, newest first — a delta on one of those is older than the
+    write. Elsewhere `last:` stays one dated line."""
+    from datetime import timedelta
+    hp = tmp_project / ".hippo"
+    (hp / "worklog.md").write_text(
         "## 2026-11-17\n\n- 22:10 first\n- 23:40 second\n  - a nested bullet\n\n"
         "## 2026-11-18\n\n- 00:05 third\n- 00:20 fourth\n- 00:31 " + "x" * 400 + "\n",
         encoding="utf-8")
+    now = datetime.now(timezone.utc)
+    ago = lambda m: (now - timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+    local = lambda m: (now - timedelta(minutes=m)).astimezone().strftime("%H:%M")  # noqa: E731
+    (hp / "tasks.yaml").write_text(
+        f"tasks:\n- {{id: feat/new, title: N, status: active, updated: '{ago(10)}'}}\n"
+        f"- {{id: feat/old, title: O, status: active, updated: '{ago(200)}'}}\n"
+        f"- {{id: feat/shut, title: S, status: done, updated: '{ago(90)}'}}\n", encoding="utf-8")
+    with (hp / "ledger.jsonl").open("a", encoding="utf-8") as f:
+        for did, state, m in (("gpu-pin", "active", 150), ("gpu-pin", "withdrawn", 40),
+                              ("lane-rule", "active", 30)):
+            f.write(json.dumps({"t": ago(m), "ev": "directive", "id": did, "state": state,
+                                "text": "t", "src": "cli"}) + "\n")
 
     def capsule(source):
         payload = {"cwd": str(tmp_project), "hook_event_name": "SessionStart", "source": source}
@@ -733,10 +748,25 @@ def test_after_a_compaction_main_gets_the_latest_worklog_with_times(tmp_project,
 
     lines = capsule("compact")
     i = next(i for i, ln in enumerate(lines) if ln.startswith("· last, from the worklog (now "))
-    assert lines[i + 1:i + 5] == ["  - 11-17 23:40 second", "  - 11-18 00:05 third",
-                                  "  - 11-18 00:20 fourth", "  - 11-18 00:31 " + "x" * 149 + "…"]
-    assert not lines[i + 5].startswith("  - ")
+    assert lines[i + 1:i + 6] == [
+        "  - 11-17 23:40 second", "  - 11-18 00:05 third", "  - 11-18 00:20 fourth",
+        "  - 11-18 00:31 " + "x" * 109 + "…",
+        f"  - written in hippo, last 3h: task feat/new {local(10)}, directive lane-rule "
+        f"{local(30)}, directive gpu-pin {local(40)}, task feat/shut {local(90)}"]
+    assert not lines[i + 6].startswith("  - ")
     assert "`last` lines or hippo's lists, they win" in lines[-1]
-    assert "skip any hippo already shows" in lines[-1]
-    assert [ln for ln in capsule("startup") if "last" in ln] == [
+    assert "`hippo task show <id>`" in lines[-1] and "## hippo deltas" in lines[-1]
+    assert [ln for ln in capsule("startup") if "last" in ln or "written" in ln] == [
         "· last: 11-18 00:31 " + "x" * 119 + "…"]
+
+
+def test_the_written_line_names_the_newest_with_times_and_caps_the_rest(tmp_project):
+    sys.path.insert(0, str(REPO_ROOT / "cli"))
+    import hippo_cli
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    tasks = [{"id": f"feat/t{i:02d}", "updated": (now - timedelta(minutes=i)).isoformat()}
+             for i in range(40)]
+    text = hippo_cli.store_written(tmp_project / ".hippo", tasks)
+    assert text.startswith("task feat/t00 ") and ", also feat/t06, feat/t07" in text
+    assert len(text) <= hippo_cli.STORE_WRITTEN_CHARS + 12 and text.endswith(" more)")

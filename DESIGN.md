@@ -1968,12 +1968,16 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 `last:` can be days old, and nothing else on the line said so.
 
 After a compaction (SessionStart source=compact) main's capsule carries, in place of `last:`, the
-worklog's last four entries, each dated and cut at 150 chars, under `· last, from the worklog
-(now 07-31 14:20):`, and closes on one more line —
-``· compact: the summary above may be older than this capsule — where it disagrees with the `last`
-lines or hippo's lists, they win: they are the current record. A `## hippo deltas` section in it
-holds proposals from when it was written: skip any hippo already shows or a `last` line has
-overtaken, and any that are wrong; run the rest`` — because the summary lands in main's context
+worklog's last four entries, each dated and cut at 110 chars, under `· last, from the worklog
+(now 07-31 14:20):`, then `  - written in hippo, last 3h: task feat/x 14:02, directive gpu-pin
+13:40, … also fix/y (+2 more)` — the task ids whose `updated` stamp and the directive ids whose
+latest ledger row fall in the last 3 hours, newest first, six with their time and the rest by id,
+200 chars at most — and closes on one more line —
+``· compact: the summary above may be hours older than this capsule; where it disagrees with the
+`last` lines or hippo's lists, they win. Its `## hippo deltas`, if any, are proposals from then:
+one on an id hippo wrote since (the `written` line) is older than that write unless the summary
+shows it — check `hippo task show <id>` first and never replace newer notes with it; skip any
+already recorded or overtaken, and any that are wrong; run the rest`` — because the summary lands in main's context
 before the capsule does (measured), and PreCompact asked it for those commands (§3.4). The summary
 is not as new as the compaction: measured (1.17.1, 169 compactions of one main session), 4
 precomputed summaries were 46–130 minutes old at the boundary and 99 written while main sat idle
@@ -1983,7 +1987,13 @@ repeated finished actions on them (at least 8 hand corrections). The scribe's wo
 order it against the summary. The deltas are as old as the summary: 216 of 303 delta commands
 (71%) targeted an id main had already written in the 24h before, and 166 were written again —
 hence "proposals", skipped where already recorded or overtaken, instead of "run those first". The
-four entries cost under 700 chars. "Has", not "ends with": the host appends its own paragraphs
+`written` line is the store's side of the same check, since the hook can neither read the summary
+nor tell what time it covers (it lands after the hook returns): the host keeps the latest messages
+verbatim and summarizes without them, and a second report measured summaries 1.5–2h behind whose
+deltas restated what later turns had changed — a `task set … notes` that would put an older note
+over a newer one, a directive re-added after its withdrawal. 3 hours covers the oldest summary
+measured (precomputed 46–130 minutes, idle ~55) with room for the span it summarizes; a wider
+window names writes the summary saw anyway. Together the additions cost under 1k chars. "Has", not "ends with": the host appends its own paragraphs
 after the summary. The section is conditional for Codex, which fires SessionStart(compact) but
 gets no PreCompact. A lane's capsule keeps the one `last:` line. A native subagent gets none of this
 block: SubagentStart hands it the `[hippo] directives N live — this project's recorded rules`

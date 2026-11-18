@@ -1312,9 +1312,12 @@ def status_lines(hp, compacted=False, transcript=None):
         lines.append(ended)
     recent = compacted and reader == "main"
     entries = worklog_latest(hp, WORKLOG_AFTER_COMPACT if recent else 1)
-    if recent and entries:
+    written = store_written(hp, data["tasks"]) if recent else ""
+    if recent and (entries or written):
         lines.append(f"· last, from the worklog (now {datetime.now().strftime('%m-%d %H:%M')}):")
         lines += [f"  - {at} {one_line(text, WORKLOG_AFTER_COMPACT_CHARS)}" for at, text in entries]
+        if written:
+            lines.append(f"  - written in hippo, last {STORE_WRITTEN_H}h: {written}")
     elif entries:
         at, text = entries[-1]
         lines.append(f"· last: {at} {one_line(text, 120)}")
@@ -1376,19 +1379,61 @@ def status_lines(hp, compacted=False, transcript=None):
             # section. The summary can be older than the compaction and the deltas are as old
             # as it is, so the worklog lines and hippo's lists win where they disagree
             # (worklog_latest): measured (1.17.1), 216 of 303 delta commands targeted an id main
-            # had written in the 24h before, and 166 were written again.
+            # had written in the 24h before, and 166 were written again. A delta on an id the
+            # store wrote since is older than that write (store_written).
             lines.append(
-                "· compact: the summary above may be older than this capsule — where it "
-                "disagrees with the `last` lines or hippo's lists, they win: they are the current "
-                "record. A `## hippo deltas` section in it holds proposals from when it was "
-                "written: skip any hippo already shows or a `last` line has overtaken, and any "
-                "that are wrong; run the rest"
+                "· compact: the summary above may be hours older than this capsule; where it "
+                "disagrees with the `last` lines or hippo's lists, they win. Its `## hippo "
+                "deltas`, if any, are proposals from then: one on an id hippo wrote since (the "
+                "`written` line) is older than that write unless the summary shows it — check "
+                "`hippo task show <id>` first and never replace newer notes with it; skip any "
+                "already recorded or overtaken, and any that are wrong; run the rest"
             )
     return lines
 
 
 WORKLOG_AFTER_COMPACT = 4  # worklog entries main's capsule carries after a compaction
-WORKLOG_AFTER_COMPACT_CHARS = 150  # per entry: four of them stay under 700 chars
+WORKLOG_AFTER_COMPACT_CHARS = 110  # per entry: four of them stay near 500 chars
+STORE_WRITTEN_H = 3  # hours of task and directive writes main's capsule names after a compaction
+STORE_WRITTEN_TIMED = 6  # writes named with their time; the rest by id
+STORE_WRITTEN_CHARS = 200  # the whole list: with the rest, the compact capsule adds under 1k
+
+
+def store_written(hp, tasks):
+    """The task and directive ids hippo's store was written to in the last STORE_WRITTEN_H
+    hours, newest first → `task feat/a 11:02, directive gpu-pin 10:15, … also feat/b`, or ""
+    — the first STORE_WRITTEN_TIMED with their local time, the rest by id, cut at
+    STORE_WRITTEN_CHARS with the rest counted. A task's write is its `updated` stamp, a
+    directive's its latest ledger row (an add, a rewrite or a withdrawal; a lane's never folds).
+
+    The hook cannot read the summary or tell what time it covers (it lands after the hook
+    returns), so the capsule names the writes it may not know of: the host keeps the latest
+    messages verbatim and summarizes without them, and its `## hippo deltas` then restate what
+    later turns changed — measured (1.17.1), summaries 1.5–2h behind whose deltas would have
+    put an older note over a newer one and re-added a withdrawn directive. 3h covers the oldest
+    summary measured (precomputed ones 46–130 minutes old, idle ones ~55) with room for its own
+    span; a wider window names writes the summary saw anyway."""
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=STORE_WRITTEN_H)
+    writes = {}
+    for t in tasks:
+        u = _iso_time(t["updated"]) if t.get("updated") else None
+        if isinstance(t.get("id"), str) and u and u >= since:
+            writes[f"task {t['id']}"] = u
+    for e in read_ledger(hp):
+        t = event_time(e)
+        if (e.get("ev") == "directive" and e.get("id") and e.get("src") != "executor" and t
+                and t >= since):
+            writes[f"directive {e['id']}"] = t
+    order = sorted(writes, key=writes.get, reverse=True)
+    items = [f"{k} {writes[k].astimezone().strftime('%H:%M')}" if i < STORE_WRITTEN_TIMED
+             else ("also " if i == STORE_WRITTEN_TIMED else "") + k.split(" ", 1)[1]
+             for i, k in enumerate(order)]
+    shown = len(items)
+    while shown and len(", ".join(items[:shown])) > STORE_WRITTEN_CHARS:
+        shown -= 1
+    rest = f" (+{len(items) - shown} more)" if shown < len(items) else ""
+    return ", ".join(items[:shown]) + rest
 
 
 def worklog_latest(hp, n):
