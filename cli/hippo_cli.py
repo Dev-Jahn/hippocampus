@@ -425,8 +425,9 @@ def tasks_unreadable(p, what):
     line = (f"hippo: {p} {what} — fix the file by hand (plain YAML); no task command runs "
             "until it reads")
     if TASKS_UNREADABLE is None:
-        print(line, file=sys.stderr)  # one line: the usage block would only bury it
-        sys.exit(1)
+        # One line on stderr, exit 1 — no usage block to bury it; the SystemExit carries the
+        # line, so a dump of a caught exit (native_guard) says what happened too.
+        sys.exit(line)
     if line not in TASKS_UNREADABLE:
         TASKS_UNREADABLE.append(line)
     return {"tasks": []}

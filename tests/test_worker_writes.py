@@ -155,7 +155,7 @@ def test_a_malformed_tasks_file_never_holds_the_scribe_back(tmp_project, run_hip
 
     cursors = json.loads((tmp_project / ".hippo" / "cursors.json").read_text())
     assert cursors["s1"] == len((tmp_project / "transcript.jsonl").read_text().splitlines())
-    assert any("malformed tasks.yaml" in p.read_text()
+    assert any("tasks.yaml is not {tasks: [...]}" in p.read_text()
                for p in (tmp_project / ".hippo" / "failures").glob("*-native-*"))
 
 
