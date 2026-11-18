@@ -40,13 +40,16 @@ else:
 }
 
 # project_root <cwd> [through]  -> prints the project that owns <cwd>, or nothing (every hook
-# is then a silent no-op, §3.1). Walks up looking for .hippo/, capped at the git root
-# (inclusive) and at $HOME (never adopt a project from above the user's home). `through` crosses
-# a linked worktree's .git file (SubagentStart, and SessionStart for a compaction: the host
-# isolates a subagent in its own worktree under the project's .claude/worktrees/, and that
-# subagent is still the project's worker).
+# is then a silent no-op, §3.1). The CLI's walk_hippo in shell — the two must agree (§3.3):
+# walking up, a .git directory ends the walk; a .hippo/ at or below a .git *file* (a linked
+# worktree) is a checked-out copy, never the project's state; $HOME ends the walk unless it is
+# <cwd> itself. Only the file system is read — this runs at every Stop and SessionStart.
+# `through` crosses a linked worktree into its main worktree (SubagentStart, and SessionStart for
+# a compaction: the host isolates a subagent in its own worktree under the project's
+# .claude/worktrees/, and that subagent is still the project's worker); so does a dispatched lane
+# (HIPPO_DISPATCH). Without either a worktree session has no project: no capsule, no scribe.
 project_root() {
-  local dir="$1" through="${2:-}" parent
+  local dir="$1" through="${2:-}" found="" main parent
   [ -n "$dir" ] && [ -d "$dir" ] || return 1
   # HIPPO_DIR, planted by the dispatch wrapper, names the ledger that launched this lane wherever
   # its cwd is (§9.1) — the CLI re-derives it from env anyway; here it decides whether to run.
@@ -55,21 +58,41 @@ project_root() {
     return 0
   fi
   while :; do
-    if [ -d "$dir/.hippo" ]; then
-      printf '%s\n' "$dir"
-      return 0
+    [ -n "${HOME:-}" ] && [ "$dir" = "$HOME" ] && [ "$dir" != "$1" ] && break
+    [ -z "$found" ] && [ -d "$dir/.hippo" ] && found="$dir"
+    [ -d "$dir/.git" ] && break   # a repo root: never adopt a project from beyond it
+    if [ -e "$dir/.git" ]; then
+      # A linked worktree: whatever was found inside it is a copy.
+      [ -z "${HIPPO_DISPATCH:-}" ] && [ -z "$through" ] && return 1
+      if main="$(main_worktree "$dir")"; then
+        [ -d "$main/.hippo" ] || return 1
+        printf '%s\n' "$main"
+        return 0
+      fi
+      found=""   # a submodule: its superproject is above it
     fi
-    [ -d "$dir/.git" ] && return 1   # a real repo root: never adopt a project from beyond it
-    # A .git *file* is a linked worktree. For a dispatched lane (HIPPO_DISPATCH, planted by the
-    # wrapper) or a subagent (`through`) keep walking to the project root, same as the CLI
-    # (§9.1) — this is what re-injects the capsule after the lane's own compaction, and what
-    # reaches a worktree-isolated subagent. Ordinary sessions keep the conservative stop.
-    [ -e "$dir/.git" ] && [ -z "${HIPPO_DISPATCH:-}" ] && [ -z "$through" ] && return 1
-    [ -n "${HOME:-}" ] && [ "$dir" = "$HOME" ] && return 1
-    parent="$(dirname "$dir")"
-    [ "$parent" = "$dir" ] && return 1
+    [ -n "${HOME:-}" ] && [ "$dir" = "$HOME" ] && break
+    parent="${dir%/*}"
+    [ -n "$parent" ] || parent=/
+    [ "$parent" = "$dir" ] && break
     dir="$parent"
   done
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+# main_worktree <linked worktree root>  -> the main worktree's path: the .git file's gitdir, whose
+# commondir is <main>/.git. Fails for a submodule (no commondir) and a bare repository.
+main_worktree() {
+  local line gitdir common
+  IFS= read -r line < "$1/.git" || [ -n "$line" ] || return 1
+  case "$line" in "gitdir: "*) gitdir="${line#gitdir: }" ;; *) return 1 ;; esac
+  case "$gitdir" in /*|[A-Za-z]:*) ;; *) gitdir="$1/$gitdir" ;; esac
+  IFS= read -r common < "$gitdir/commondir" 2>/dev/null || [ -n "$common" ] || return 1
+  case "$common" in /*|[A-Za-z]:*) ;; *) common="$gitdir/$common" ;; esac
+  common="$(cd "$common" 2>/dev/null && pwd -P)" || return 1
+  [ "${common##*/}" = .git ] || return 1
+  printf '%s\n' "${common%/.git}"
 }
 
 plugin_root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)}"

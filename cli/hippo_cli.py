@@ -234,32 +234,79 @@ def die(msg, code=1):
 
 
 def find_hippo():
-    """$HIPPO_DIR when it names a directory; otherwise walk up from cwd looking for .hippo/ (the
-    git root and $HOME are the ceiling).
+    """$HIPPO_DIR when it names a directory; otherwise the project that owns cwd (walk_hippo).
 
     HIPPO_DIR is planted by the dispatch wrapper into a lane's environment so a lane reports to
     the ledger that launched it, wherever its cwd is — measured, 12% of lane outcomes (141 of
-    1,167) were refused for a ref the lane's own `.hippo/` had never seen.
-
-    A `.git` *directory* is a real repository root: stop there, never adopt a project from
-    beyond it. A `.git` *file* marks a linked worktree, and by convention lanes live inside
-    the repo (`.claude/worktrees/<name>`) — walk through it, so an executor calling hippo
-    from its worktree resolves the project's real .hippo/ (§9.1)."""
+    1,167) were refused for a ref the lane's own `.hippo/` had never seen."""
     env = os.environ.get("HIPPO_DIR")
     if env and Path(env).is_dir():
         return Path(env)
-    d = Path.cwd().resolve()
+    return walk_hippo(Path.cwd().resolve())
+
+
+def walk_hippo(start):
+    """The .hippo/ that owns `start`, walking up — or None. hooks/lib.sh `project_root` is the
+    same rule in shell (§3.3); the two must agree.
+
+    - A `.git` *directory* is a repository's root: the walk ends there, never adopting a project
+      from beyond it.
+    - A `.git` *file* is a linked worktree's root (or a submodule's). A `.hippo/` found at or
+      below it is a checked-out copy, never the project's state — measured (steno, 1.17.1): the
+      project tracked `.hippo/` in git, every lane worktree got a copy, and 8 of 38 held scribe
+      rows, worklog entries and even the wrapper's dispatch and usage rows the real ledger never
+      saw. The walk continues in the main worktree (gitdir → commondir, read from disk, no git
+      spawn), so a lane's or worker's hippo call reaches the project's real .hippo/ wherever the
+      worktree sits (§9.1); a `.git` file with no commondir (a submodule) continues upward.
+    - `$HOME` ends the walk unless it is `start` itself: ~/.hippo belongs to a session whose
+      cwd is home, never to every directory under it — measured, a session in a sibling
+      directory with no .hippo/ wrote its scribe rows and CLI writes to ~/.hippo for six days.
+      Nothing above home is adopted either: an ancestor's .hippo/ may be another user's."""
     try:
         home = Path.home().resolve()
     except (RuntimeError, OSError):
         home = None
-    for p in [d, *d.parents]:
-        if (p / ".hippo").is_dir():
-            return p / ".hippo"
+    found, d = None, start
+    while True:
+        if d == home and d != start:
+            return found
+        if found is None and (d / ".hippo").is_dir():
+            found = d / ".hippo"
+        git = d / ".git"
+        if git.is_dir():
+            return found
+        if git.exists():
+            main = main_worktree(d)
+            if main is not None:
+                return main / ".hippo" if (main / ".hippo").is_dir() else None
+            found = None
+        if d == home or d.parent == d:
+            return found
+        d = d.parent
+
+
+def main_worktree(wt):
+    """The main worktree of the linked worktree rooted at `wt` (its `.git` file → gitdir →
+    commondir, which is `<main>/.git`), or None: a submodule's gitdir has no commondir, and a
+    bare repository has no main worktree."""
+    try:
+        line = (wt / ".git").read_text(encoding="utf-8").splitlines()[0]
+        if not line.startswith("gitdir:"):
+            return None
+        gitdir = wt / line[len("gitdir:"):].strip()  # an absolute gitdir replaces wt
+        common = (gitdir / (gitdir / "commondir").read_text(encoding="utf-8").strip()).resolve()
+    except (OSError, IndexError, UnicodeDecodeError):
+        return None
+    return common.parent if common.name == ".git" else None
+
+
+def linked_worktree_main(start):
+    """The main worktree when `start` lies inside a linked worktree, else None."""
+    for p in [start, *start.parents]:
         if (p / ".git").is_dir():
-            break
-        if p == home:  # never go above $HOME — we could adopt someone else's project
-            break
+            return None
+        if (p / ".git").exists():
+            return main_worktree(p)
     return None
 
 
@@ -749,6 +796,12 @@ def extract_json(text):
 
 
 def cmd_init(_args):
+    """A linked worktree is refused: a .hippo/ there is a copy every walk skips (walk_hippo),
+    so `created` would be a success that records nothing."""
+    main = linked_worktree_main(Path.cwd().resolve())
+    if main is not None:
+        die(f"hippo init: this is a linked git worktree of {main} — its project's .hippo/ "
+            f"belongs there (run `hippo init` in {main})")
     hp = Path.cwd() / ".hippo"
     if hp.is_dir():
         print(f"already exists: {hp}")
@@ -3041,7 +3094,6 @@ LANE_SCOPE_CHARS = 48
 LANE_KILL_GRACE = 5.0  # seconds codex gets after a forwarded signal before its group is killed
 LANE_DRAIN = 2.0  # seconds stderr may stay open after codex exits (a child it left behind)
 LANE_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
-LANE_STATUSLINE = ".statusline"  # the pointer the plugin's subagentStatusLine follows (§3.6)
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 # codex runs every command through the user's shell and prints it on the line after an `exec`
 # header as `/bin/zsh -lc '<command>' in <cwd>` — 1,657 of 1,657 in sixteen real lane logs
@@ -3102,30 +3154,18 @@ def first_sentence(text):
 
 def lanes_dir(hp):
     """.hippo/lanes/, with files a week old pruned — a new lane start is the one moment this
-    directory is written anyway, so no schedule is needed (§4) — and the pointer the plugin's
-    subagentStatusLine follows kept current: Claude Code substitutes no ${CLAUDE_PLUGIN_ROOT}
-    in a plugin's settings.json (measured, 2.1.281), and the wrapper is the one process that
-    knows where this plugin lives. Called once per wrapper run: batch lanes share it."""
+    directory is written anyway, so no schedule is needed (§4). Called once per wrapper run:
+    batch lanes share it. (The `.statusline` pointer older versions kept here is pruned like
+    any other file once it is a week old.)"""
     d = hp / "lanes"
     d.mkdir(exist_ok=True)
     cutoff = time.time() - LANE_KEEP_DAYS * 86400
     for p in d.iterdir():
         try:
-            if p.name != LANE_STATUSLINE and p.stat().st_mtime < cutoff:
+            if p.stat().st_mtime < cutoff:
                 p.unlink()
         except OSError:
             pass  # a directory, or a concurrent prune got there first
-    ptr, script = d / LANE_STATUSLINE, str(SCRIPTS / "lane_status.py")
-    if _read_text(ptr) != script:
-        # Lanes started in the same instant rewrite it through one tmp file, and every loser's
-        # rename fails (measured: 2 of 3 simultaneous starts). The winner wrote the same path,
-        # so only a pointer still not ours makes a sound — never the lane's record.
-        try:
-            write_durable(ptr, script)
-        except OSError as err:
-            if _read_text(ptr) != script:
-                print(f"dispatch: {ptr} not written ({err}) — agent-panel rows keep their "
-                      "default", file=sys.stderr)
     return d
 
 
@@ -3881,7 +3921,8 @@ def run_dispatch(argv):
 
 WATCH_FOR = 540  # seconds: under the Bash tool's 600s ceiling, so one call never outlives it
 # A lane launched through `--entry` is relayed from inside a Workflow, where nothing hippo prints
-# draws a row (the subagentStatusLine is not run for a Workflow's agents — measured, 2026-10-01)
+# draws a row (the subagentStatusLine was not run for a Workflow's agents — measured, 2026-10-01;
+# whether AgentRow is raised for them is unmeasured)
 # and the relay's own tool results are the only live view: one a minute, at ~$0.005 a call.
 WATCH_FOR_WORKFLOW = 60
 WATCH_POLL = 1.0
@@ -3924,7 +3965,7 @@ def parse_watch_argv(argv):
 def watch_window(rec):
     """How long one --watch call blocks when `--for` does not say: a minute for a lane the
     Workflow face launched (its relay's tool results are its only live view), nine minutes
-    otherwise (a plain agent row is drawn by lane_status.py, so its relay need not poll)."""
+    otherwise (a plain agent row is drawn by hooks/lane_row.ts, so its relay need not poll)."""
     return WATCH_FOR_WORKFLOW if rec.get("face") == "workflow" else WATCH_FOR
 
 
@@ -5606,7 +5647,7 @@ class BatchRecord:
     """`.hippo/lanes/<bid>.json` — a full batch run as one row (§3.6): the counts, the lanes
     running now, the newest event, and at the end its status and where its harvest is. Written
     whole, by this process alone, at every lane start and exit and at the end; `--watch <bid>`
-    and lane_status.py read it with the running lanes' own records. Without .hippo/ there is
+    and hooks/lane_row.ts read it with the running lanes' own records. Without .hippo/ there is
     no record, as there is none for a lane."""
 
     def __init__(self, bid, ld, mp, journal, total, todo):
@@ -8342,14 +8383,16 @@ def main():
         if hp is None:
             # Reads stay completely silent outside a project (§3.1). A *write* does not: the
             # caller typed it expecting a record, and silence reads as success. (Worktrees are
-            # no longer the usual cause — find_hippo walks through their .git file, §9.1.) A `cd`
-            # into another tree in the same shell call is (measured, 2026-09-26: main's `task
+            # no longer the usual cause — walk_hippo continues in their main worktree, §9.1.) A
+            # `cd` into another tree in the same shell call is (measured, 2026-09-26: main's `task
             # set` after one was lost), so the way back leads: `init` first makes a stray one.
+            # The cwd is named: a session outside any project once wrote to ~/.hippo for six
+            # days without anyone seeing which directory it resolved from.
             if getattr(args, "writes", False):
                 print(
-                    "hippo: no .hippo/ found from here — nothing was recorded. Run it again from "
-                    "the project root (or with HIPPO_DIR=<root>/.hippo); `hippo init` only for a "
-                    "new project.",
+                    f"hippo: no .hippo/ found from {Path.cwd()} — nothing was recorded. Run it "
+                    "again from the project root (or with HIPPO_DIR=<root>/.hippo); `hippo init` "
+                    "only for a new project.",
                     file=sys.stderr,
                 )
             sys.exit(0)

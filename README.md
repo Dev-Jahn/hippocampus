@@ -51,10 +51,10 @@ The plugin, its slash commands, and the CLI are all named `hippo`.
   landed; `hippo prior distill` runs it by hand).
 - **agent** (`agents/lane.md`, Claude Code) — `hippo:lane` runs one codex lane so it has a
   row in the agent panel, and hands main — or the Workflow script that launched it — the
-  lane's final lines when it ends. The plugin's
-  `settings.json` points the panel's `subagentStatusLine` at `scripts/lane_status.py`, so that
-  row reads `codex · <scope> · <elapsed> · <cmds> cmds · <last command or message>`; other
-  agents' rows are left as Claude Code draws them.
+  lane's final lines when it ends. A small mod (`hooks/lane_row.ts`) draws that
+  row as `codex · <scope> · <elapsed> · <cmds> cmds · <last command or message>`; other
+  agents' rows are left as Claude Code draws them, and a Claude Code build without mods'
+  `AgentRow` (before 2.1.323–2.1.327) shows its default row.
 - **skills** (`skills/*`) — `hippo` (the whole CLI grammar, one screen),
   `checkup` (project diagnosis, recommend-first), `dispatch` (delegation
   lanes with evidence-proportional verification).
@@ -95,7 +95,12 @@ Either way, in a project:
 hippo init
 ```
 
-That creates `.hippo/` and nothing else.
+That creates `.hippo/` and nothing else. Every command and hook finds it by walking up from the
+working directory to the repository root; a linked git worktree belongs to its main worktree's
+`.hippo/`, and `~/.hippo` serves only sessions started in `~` itself. If you commit `.hippo/`,
+each worktree carries a copy that hippo never reads, and the generated files belong in
+`.gitignore`: `lanes/`, `failures/`, `cursors.json`, `scribe.lock`, `task-flags.json`,
+`worker-writes.json`.
 
 ### The clerk backend
 

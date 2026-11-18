@@ -88,6 +88,12 @@ Code) or `~/.codex/sessions/` in dated subdirectories (Codex) — take the newes
 - `briefs/`: briefs whose task is done or dropped are dead weight — list them with their age and
   propose deletion (git never held them, so removal is the only cleanup).
 - If old done tasks are more than half of tasks.yaml, propose moving them to a separate file.
+- Stray copies: when `.hippo/` is tracked in git, every worktree (`git worktree list`) carries a
+  copy hippo never reads, and one that `git -C <worktree> status --short .hippo` shows changed
+  holds rows an older hippo wrote there that are **not in the ledger** — report each with its
+  row count, propose re-recording what still matters through the CLI and then discarding the
+  copy's changes, and propose `.gitignore` lines for the generated files (`lanes/`, `failures/`,
+  `cursors.json`, `scribe.lock`, `task-flags.json`, `worker-writes.json`).
 
 ## Report format
 
