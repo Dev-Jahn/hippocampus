@@ -33,7 +33,6 @@ SHIP=(
   hooks
   prices.yaml
   scripts
-  settings.json
   skills
 )
 

@@ -3094,7 +3094,6 @@ LANE_SCOPE_CHARS = 48
 LANE_KILL_GRACE = 5.0  # seconds codex gets after a forwarded signal before its group is killed
 LANE_DRAIN = 2.0  # seconds stderr may stay open after codex exits (a child it left behind)
 LANE_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
-LANE_STATUSLINE = ".statusline"  # the pointer the plugin's subagentStatusLine follows (§3.6)
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 # codex runs every command through the user's shell and prints it on the line after an `exec`
 # header as `/bin/zsh -lc '<command>' in <cwd>` — 1,657 of 1,657 in sixteen real lane logs
@@ -3155,30 +3154,18 @@ def first_sentence(text):
 
 def lanes_dir(hp):
     """.hippo/lanes/, with files a week old pruned — a new lane start is the one moment this
-    directory is written anyway, so no schedule is needed (§4) — and the pointer the plugin's
-    subagentStatusLine follows kept current: Claude Code substitutes no ${CLAUDE_PLUGIN_ROOT}
-    in a plugin's settings.json (measured, 2.1.281), and the wrapper is the one process that
-    knows where this plugin lives. Called once per wrapper run: batch lanes share it."""
+    directory is written anyway, so no schedule is needed (§4). Called once per wrapper run:
+    batch lanes share it. (The `.statusline` pointer older versions kept here is pruned like
+    any other file once it is a week old.)"""
     d = hp / "lanes"
     d.mkdir(exist_ok=True)
     cutoff = time.time() - LANE_KEEP_DAYS * 86400
     for p in d.iterdir():
         try:
-            if p.name != LANE_STATUSLINE and p.stat().st_mtime < cutoff:
+            if p.stat().st_mtime < cutoff:
                 p.unlink()
         except OSError:
             pass  # a directory, or a concurrent prune got there first
-    ptr, script = d / LANE_STATUSLINE, str(SCRIPTS / "lane_status.py")
-    if _read_text(ptr) != script:
-        # Lanes started in the same instant rewrite it through one tmp file, and every loser's
-        # rename fails (measured: 2 of 3 simultaneous starts). The winner wrote the same path,
-        # so only a pointer still not ours makes a sound — never the lane's record.
-        try:
-            write_durable(ptr, script)
-        except OSError as err:
-            if _read_text(ptr) != script:
-                print(f"dispatch: {ptr} not written ({err}) — agent-panel rows keep their "
-                      "default", file=sys.stderr)
     return d
 
 
@@ -3934,7 +3921,8 @@ def run_dispatch(argv):
 
 WATCH_FOR = 540  # seconds: under the Bash tool's 600s ceiling, so one call never outlives it
 # A lane launched through `--entry` is relayed from inside a Workflow, where nothing hippo prints
-# draws a row (the subagentStatusLine is not run for a Workflow's agents — measured, 2026-10-01)
+# draws a row (the subagentStatusLine was not run for a Workflow's agents — measured, 2026-10-01;
+# whether AgentRow is raised for them is unmeasured)
 # and the relay's own tool results are the only live view: one a minute, at ~$0.005 a call.
 WATCH_FOR_WORKFLOW = 60
 WATCH_POLL = 1.0
@@ -3977,7 +3965,7 @@ def parse_watch_argv(argv):
 def watch_window(rec):
     """How long one --watch call blocks when `--for` does not say: a minute for a lane the
     Workflow face launched (its relay's tool results are its only live view), nine minutes
-    otherwise (a plain agent row is drawn by lane_status.py, so its relay need not poll)."""
+    otherwise (a plain agent row is drawn by hooks/lane_row.ts, so its relay need not poll)."""
     return WATCH_FOR_WORKFLOW if rec.get("face") == "workflow" else WATCH_FOR
 
 
@@ -5659,7 +5647,7 @@ class BatchRecord:
     """`.hippo/lanes/<bid>.json` — a full batch run as one row (§3.6): the counts, the lanes
     running now, the newest event, and at the end its status and where its harvest is. Written
     whole, by this process alone, at every lane start and exit and at the end; `--watch <bid>`
-    and lane_status.py read it with the running lanes' own records. Without .hippo/ there is
+    and hooks/lane_row.ts read it with the running lanes' own records. Without .hippo/ there is
     no record, as there is none for a lane."""
 
     def __init__(self, bid, ld, mp, journal, total, todo):

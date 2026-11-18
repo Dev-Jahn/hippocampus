@@ -92,7 +92,7 @@ Judge guardrails (invariant):
 
 ```
 runtime (thin):   bin/hippo (shim) + cli/hippo_cli.py + 4 hooks (2 on Codex) + scripts/{clerk_run,digest_lite,dispatch}
-                  + settings.json → scripts/lane_status.py (the lane row in Claude Code's agent panel)
+                  + hooks/lane_row.ts (a mod: the lane row in Claude Code's agent panel)
 cognition (text): clerks/{turn-scribe,distiller}.md + clerks/jev/*.yaml + skills/{hippo,checkup,dispatch}
                   + agents/lane.md
 resident (small): the capsule injected at SessionStart (§6 below)
@@ -668,6 +668,21 @@ an agent's own (PreCompact, below).
   gets no scribe (§9.7) — a per-lane Stop would multiply clerk cost by the batch width, and a
   scribe over a lane's transcript would mint src=scribe rows (verdicts) out of a worker's
   self-narrative.
+
+Beside the four command hooks, `hooks/claude-hooks.json` names one **hooks module**
+(`"modules": ["./lane_row.ts"]`, a Claude Code mod): a `ui.render` hook on the agent panel's
+`AgentRow`, matched to `hippo:lane` rows, plus a 5s redraw timer — the lane row (§3.6 "The
+row"). It is held to the same four conditions. (1) Its reason: the row it replaces,
+`subagentStatusLine`, is deprecated "in favor of mods" on 2.1.327 and listed as removed in the
+2.1.323 changelog. (2) Its cost on what it passes: the matcher is the engine's, so every other
+agent's row never enters the module; on a lane row it settles in 6.3ms median, 17.1ms p90,
+27.9ms max (149 calls, 2.1.327, the engine's own `settled in` figure — the worker hop and
+`next()` included; one `kill -0` per running lane, 1–5ms of it), against 25ms median for each
+tick of the Python status line it replaces. (3) Silence: in a session with no lane row nothing
+of it runs — the timer starts at the first lane row and stops at the first tick that finds
+none (measured: stopped 34s after the last lane agent finished, as its row was dropped). (4)
+It only draws a row; it refuses nothing. It is in `claude-hooks.json`, never `hooks.json`:
+codex rejects the unknown `modules` key and would drop that whole file.
 
 ### 3.5 The scribe pipeline (inside `hippo scribe`)
 
@@ -1407,39 +1422,44 @@ pays it knowingly ("Two faces" below). Headless
 (`print wind-down … at the wait ceiling`; the lane is recorded `killed by SIGTERM`), which is
 why the Workflow's long lane was 570s.
 
-**The row** (`settings.json` → `subagentStatusLine` → `scripts/lane_status.py`). Claude Code
-runs a plugin's subagentStatusLine about every 5s with the visible agent rows on stdin. For each
-row whose `subagents/agent-<id>.meta.json` says `hippo:lane`, the script takes the lane's
-dispatch id from that agent's transcript (the last `dispatch:<id>`, `batch:<id>` or `--watch
-<id>` in it — the prompt, which comes first, is main's text and may quote other ids), reads
-`.hippo/lanes/<id>.json` walking up from the row's cwd, and prints `{"id": …, "content": "codex
-· <scope> · <elapsed> · <cmds> cmds · <last event>"}`, cut to the row's width; an ended lane
-shows its status, rc and duration instead, and one whose wrapper is gone with no status shows
-`lost` — never a timer still counting. A batch id draws the batch ("Two faces" below): `codex
-batch · <stem> · <elapsed> · <r> running · <d>/<t> done · <f> failed · last: <scope>: <event>`,
-from the batch record and the records it names as running — never a scan of the directory.
-Every other row is left out, which keeps Claude
-Code's own rendering (measured, 2.1.281: `◯ general-purpose  <description> … 15s · ↓ 20.3k
-tokens`; documented: an omitted id keeps the default, an empty content hides the row) — a
-printed row replaces the whole default, type, description and stats alike. Stdlib only and no
-subprocess, because it runs on every tick of every session with the plugin on: 25ms median
-(29ms max) for a tick with a lane row and three others, 4ms where no lane ever started. How
-the plugin reaches its own script: Claude Code 2.1.281 neither substitutes
-`${CLAUDE_PLUGIN_ROOT}` in a plugin's settings.json nor exports it to that command (measured:
-it expanded to nothing), the documented placeholder list covers skill and agent content, hook
-and monitor commands and MCP/LSP servers only, the plugin `bin/` is on the Bash tool's PATH
-but not this command's, and the command runs in the project directory. So the command is a
-short `sh` walk up from there to `.hippo/lanes/.statusline`, a pointer holding the script's
-absolute path that every lane start rewrites (best effort: lanes starting in one instant share
-its tmp file, and a lost rename must not cost a lane its record) — the wrapper is the one
-process that knows where the plugin lives — and a project that never launched a lane pays one
-`sh` per tick and no python. The pointer is data that names code the command runs as the user,
-on every tick of any session with the plugin on, so the walk stops where `walk_hippo` does (a
-`.git` directory, `$HOME` — reached from below, before its own `.hippo/` is read: an ancestor's
-`.hippo/` may be another user's — a world-writable `/tmp` is one), and it runs only an absolute `…/scripts/lane_status.py` the user owns, named by
-a pointer the user owns. After a plugin update the pointer names a deleted cache path until the next lane
-start, and until then every row keeps its default. The plugin's value is a default: a user's
-own `subagentStatusLine` replaces it (and would have to render hippo:lane rows itself).
+**The row** (`hooks/lane_row.ts`, a hooks module named by `hooks/claude-hooks.json`, §3.4).
+Claude Code asks a mod's `ui.render` hook on `AgentRow` for each agent row as its props change;
+the hook's matcher takes `hippo:lane` rows only, so no other row enters the module. For a lane
+row it reads the agent's transcript — `subagents/agent-<id>.jsonl` beside the session's
+transcript (`$.session.info()`) — for the lane's dispatch id (the last `dispatch:<id>`,
+`batch:<id>` or `--watch <id>` in it — the prompt, which comes first, is main's text and may
+quote other ids), finds `.hippo/` from the row's `cwd` by `findHippoFrom` — a port of dev's
+`find_hippo` (`$HIPPO_DIR`, else walking up, stopping at a `.git` directory and at `$HOME`:
+an ancestor's `.hippo/` may be another user's, a world-writable `/tmp` is one) — reads
+`lanes/<id>.json` and hands the engine the row's `body`: `codex · <scope> · <elapsed> · <cmds>
+cmds · <last event>`; an ended lane shows its status, rc and duration instead, and one whose
+wrapper is gone with no status shows `lost` — never a timer still counting. A batch id draws
+the batch ("Two faces" below): `codex batch · <stem> · <elapsed> · <r> running · <d>/<t> done
+· <f> failed · last: <scope>: <event>`, from the batch record and the records it names as
+running — never a scan of the directory. A `body` replaces the whole default row, type,
+description and stats alike; line breaks are folded, and the engine cuts it at the row's edge
+with an ellipsis, wide characters counted (measured, 2.1.327), so the module cuts nothing.
+Until the lane can be drawn — no id in the transcript yet, no `.hippo/`, no record, a record
+that does not parse, any error — the hook passes the row on untouched and the engine draws its
+own (`◯ hippo:lane  <description> … 1m 22s · ↓ 6.5k tokens`, measured); it never blanks a row.
+The engine asks again only as props change, and a relay waiting in one `--watch` call changes
+none once its 16 token samples are equal: measured (2.1.327), the row froze 80s into such a
+wait. So the first lane row starts a 5s `$.clock.every` that redraws this plugin's rows
+(`$.ui.invalidate('ui.render')`) while `$.agent.list()` holds a `hippo:lane` agent with a row,
+and stops at the first tick that finds none. Its cost is §3.4's. Measured live (2.1.327, a
+scratch project, a `hippo:lane` agent watching a fake record): the row followed every record
+change within a tick, through a `--watch` call minutes long, in auto and in manual permission
+mode alike — the module's `$.fs` and `$.process` calls raise no permission prompt. Where the
+build has no `AgentRow` — absent in 2.1.319, present in 2.1.327; the changelog names no version
+for it, and 2.1.323 is the one release between — or mods are off (`--safe-mode`,
+`disableAllHooks`), a lane row is the engine's default; nothing else depends on it, as
+`hippo dispatch --watch` reports the same lane. The panel row on the desktop and VS Code
+surfaces is the same `AgentRow` (one line on the desktop), unmeasured there. Through 1.18 the
+row was a plugin `subagentStatusLine` running `scripts/lane_status.py` through a
+`.hippo/lanes/.statusline` pointer each lane start rewrote (Claude Code substituted no
+`${CLAUDE_PLUGIN_ROOT}` in a plugin's settings.json); both are gone, and an old pointer is pruned
+with the week-old files. A user's own `subagentStatusLine`, where a build still runs one, arrives
+as the row's `body` (documented) and is drawn over for `hippo:lane` rows.
 
 Why it is a CLI subcommand: a plugin puts only `bin/` on PATH, and `${CLAUDE_PLUGIN_ROOT}` is empty
 in an ordinary Bash call. Leaving it in `scripts/` means every consuming project grows its own shim
@@ -1715,7 +1735,8 @@ shows each result as it lands. The plugin's subagentStatusLine ran about every 5
 Agent rows (stdin task: `{id, type: "local_agent", status, description, label, model,
 tokenCount, …, cwd}`) and not once during a 76s two-agent Workflow — so nothing hippo prints can
 change the first two levels, and a Workflow lane's live progress can only be its relay's own
-tool results, at the third. One short poll by a sonnet/low relay cost ~16.5k cache-read + ~200
+tool results, at the third (the `AgentRow` hook that replaced the status line, §3.6 "The
+row", is unmeasured for a Workflow's agents). One short poll by a sonnet/low relay cost ~16.5k cache-read + ~200
 cache-write + 155 output tokens ≈ $0.004 (Sonnet 5.5: $2 in, $0.10 cache read — $0.20 when
 measured, cut by 2026-10-12 — $2.50 5-minute cache write, $10 out per Mtok). So a batch has two faces, and the dispatch skill gives main both
 with their price:
@@ -1921,10 +1942,10 @@ engine (measured on 0.144.6).
 | | Claude Code | Codex CLI |
 |---|---|---|
 | Manifest | `.claude-plugin/plugin.json` | `.codex-plugin/plugin.json` (names the `skills` and `hooks` paths) |
-| Hooks | `hooks/hooks.json` (the default) plus `hooks/claude-hooks.json`, named by the manifest — all four (§3.4) | `hooks/hooks.json`, named by the manifest — SessionStart and Stop, **the same file**; event keys (PascalCase), matcher, stdin payload fields and the SessionStart `hookSpecificOutput.additionalContext` envelope are all identical (codex ≥0.146 rejects bare text, §3.4) |
+| Hooks | `hooks/hooks.json` (the default) plus `hooks/claude-hooks.json`, named by the manifest — all four, and the lane-row hooks module (§3.4) | `hooks/hooks.json`, named by the manifest — SessionStart and Stop, **the same file**; event keys (PascalCase), matcher, stdin payload fields and the SessionStart `hookSpecificOutput.additionalContext` envelope are all identical (codex ≥0.146 rejects bare text, §3.4) |
 | Plugin `bin/` | added to PATH automatically | **not added** → a skill resolves `bin/hippo` relative to its own SKILL.md; a dispatched lane gets it from the wrapper (§3.6) |
 | Transcript | Claude JSONL | codex rollout JSONL — `digest_lite.py` detects the format from the first lines and reduces both to the same line vocabulary |
-| Agent panel | `agents/lane.md` (`hippo:lane`) + `settings.json` `subagentStatusLine` (§3.6); a batch is a Workflow of relays (`--dry-run` writes it, each entry `--entry <id>`, polled each minute) or one relay row (`batch:<bid>`) | none — a lane or a batch launches through plain Bash, and `hippo dispatch --watch` works the same on a lane's or a batch's id |
+| Agent panel | `agents/lane.md` (`hippo:lane`) + the `hooks/lane_row.ts` mod drawing its row (§3.6; a build without `AgentRow`, before 2.1.323–2.1.327, draws the default row); a batch is a Workflow of relays (`--dry-run` writes it, each entry `--entry <id>`, polled each minute) or one relay row (`batch:<bid>`) | none — a lane or a batch launches through plain Bash, and `hippo dispatch --watch` works the same on a lane's or a batch's id |
 
 Constraints specific to codex (0.144.6):
 
@@ -2010,7 +2031,7 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 | review packet, ingest, receipt, attestation | Replies stay raw in the chat (a review saved to a file dies in attention — demonstrated across 6 rounds of whack-a-mole). One field, `ev:review.base`, is enough pinning |
 | a delegate surface, role-binding config | Routing comes from main's judgment plus the evidence in PRIORS. Freezing it in config is the source of stale-instruction incidents |
 | typed brief facts, assurance DAG | Intent belongs in short documents and conversation. Drift is handled by making it visible, not by control |
-| per-call shell hooks and silent hooks (0.x: a PreToolUse read nudge and a PostToolUse guard on `tasks.yaml`, a Stop boundary hook) | The two per-call hooks started bash on every tool call and python on a match — latency on every call — and the guard was the enforcement principle 3 refuses; the Stop hook ran 259 times with no output. What stays out is that cost, that silence and that gate, not the event: a hook on any event, per call or per prompt included, comes in through §3.4's four conditions. (Reworded 2026-10-14: the founding row banned the PreToolUse/PostToolUse/UserPromptSubmit events themselves, wider than its evidence.) The four in §3.4 fire once per session, subagent, compaction or turn |
+| per-call shell hooks and silent hooks (0.x: a PreToolUse read nudge and a PostToolUse guard on `tasks.yaml`, a Stop boundary hook) | The two per-call hooks started bash on every tool call and python on a match — latency on every call — and the guard was the enforcement principle 3 refuses; the Stop hook ran 259 times with no output. What stays out is that cost, that silence and that gate, not the event: a hook on any event, per call or per prompt included, comes in through §3.4's four conditions. (Reworded 2026-10-14: the founding row banned the PreToolUse/PostToolUse/UserPromptSubmit events themselves, wider than its evidence.) The four in §3.4 fire once per session, subagent, compaction or turn; the lane-row hooks module there runs in-process on `hippo:lane` rows alone, every 5s while one is listed, its cost measured in §3.4 |
 | OPERATING CONTRACT-style resident injection | 8–14KB re-injected, measured. The only resident thing is the one block in §6 |
 | a hand-written PROGRESS.md | It goes stale. Replaced by worklog (generated) + ledger (facts) + PRIORS (distilled) |
 | typed refusal gates, frozen sidecars, remote verify | Record, never enforce (principle 3) |
