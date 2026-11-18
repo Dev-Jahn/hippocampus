@@ -437,13 +437,15 @@ def _lines(path, recs, mode="w"):
         f.writelines(json.dumps(r, separators=(",", ":")) + "\n" for r in recs)
 
 
-def _session(project, main, agents=None):
-    """agents: {path under subagents/, no suffix: (agent_type, the agent's own records)}"""
+def _session(project, main, agents=None, agent_at=None):
+    """agents: {path under subagents/, no suffix: (agent_type, the agent's own records)}, each
+    record stamped `agent_at` (default: now — an agent at a compaction point is a live one)."""
     shutil.rmtree(project / "t", ignore_errors=True)
     _lines(project / "t.jsonl", main)
+    stamp = (agent_at or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z")
     for rel, (atype, recs) in (agents or {}).items():
         path = project / "t" / "subagents" / f"{rel}.jsonl"
-        _lines(path, [{**r, "isSidechain": True} for r in recs])
+        _lines(path, [{"timestamp": stamp, **r, "isSidechain": True} for r in recs])
         path.with_name(path.name.replace(".jsonl", ".meta.json")).write_text(
             json.dumps({"agentType": atype}), encoding="utf-8")
 
@@ -594,6 +596,25 @@ def test_main_s_own_compactions_keep_the_request(tmp_project, repo_root):
         if trigger != "manual":  # SessionStart carries no trigger
             assert _session_start(tmp_project, repo_root, prompt=prompt).startswith(
                 "[hippo] tasks"), case
+
+
+def test_a_dead_agent_never_takes_an_idle_main_s_compaction(tmp_project, repo_root):
+    """The host compacts an idle main ~55 minutes after its turn ended, and main is then at no
+    compaction point. Measured: one hippo:lane relay whose transcript ended at a compaction point
+    days before took every later idle compaction (3 of 3) — no deltas request, no capsule. A
+    compacting agent's last line is as old as its summary at most (5.5 minutes, the slowest of
+    169), so one older than COMPACTING_AGENT_RECENT is a dead agent's, and the compaction main's;
+    one inside it is still the agent's."""
+    from datetime import timedelta
+    old = datetime.now(timezone.utc) - timedelta(minutes=55)
+    for atype in ("hippo:lane", "general-purpose"):
+        _session(tmp_project, IDLE, {"agent-a1": (atype, WORKING)}, agent_at=old)
+        assert "`## hippo deltas`" in _pre_compact_at(tmp_project, repo_root).stdout, atype
+        assert _session_start(tmp_project, repo_root).startswith("[hippo] tasks"), atype
+    recent = datetime.now(timezone.utc) - timedelta(minutes=6)  # a slow summary's SessionStart
+    _session(tmp_project, IDLE, {"agent-a1": ("general-purpose", WORKING)}, agent_at=recent)
+    assert _pre_compact_at(tmp_project, repo_root).stdout == ""
+    assert not _session_start(tmp_project, repo_root).startswith("[hippo] tasks")
 
 
 def test_main_s_line_that_lands_in_the_flush_keeps_the_request(tmp_path, monkeypatch):

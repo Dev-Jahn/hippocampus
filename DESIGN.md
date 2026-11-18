@@ -544,11 +544,23 @@ an agent's own (PreCompact, below).
     it interrupted); over this machine's transcripts no model turn followed any of 131, 2 and 18
     such lines (the host's own `No response requested.` once did) — or already past the hook's
     prompt (compacting, it could not have moved on), and the compaction is an agent's: one at a
-    compaction point, anywhere under `<session>/subagents/` (Workflow agents sit in
-    `workflows/<runId>/`), the latest if several.
+    compaction point whose last line is under 15 minutes old, anywhere under
+    `<session>/subagents/` (Workflow agents sit in `workflows/<runId>/`), the latest if several;
+    with none, main's.
     PreCompact then says nothing, and SessionStart(compact) hands the agent its SubagentStart
     slice (a fork too: the capsule it carried from main is what its compaction summarized away;
     `hippo:lane` nothing, as at its start).
+
+  The 15 minutes are what keeps an idle main's compaction main's. The host compacts an idle main
+  ~55 minutes after its turn ended (before the prompt cache expires), and main is then at no
+  compaction point; a dead agent can sit at one for good. Measured (1.17.1, one main session's
+  169 compactions): a `hippo:lane` relay whose transcript ended on 2026-11-10 took every later
+  idle compaction (3 of 3) — main got neither its request nor its capsule. A compacting agent's
+  last line is under a second old at PreCompact and as old as the summary at SessionStart; over
+  the same 169 the slowest summary took 5.5 minutes, while all 107 idle compactions came past 54
+  minutes. One bound serves both hooks, three times the slowest summary and a quarter of the
+  idle gap; a tighter one at PreCompact would rest on hook latency this project does not
+  control (below).
 
   Measured live (2.1.282, 2026-09-26, sonnet; each hook's owner read afterwards from where its
   user line and boundary landed): fork mode on, a background Agent and a Workflow agent

@@ -6330,6 +6330,14 @@ TRANSCRIPT_FLUSH_WAIT = 0.25  # s; Claude Code writes a transcript on a 100ms fl
 # model turn; the next one needs a new prompt, which takes a new prompt id.
 NO_TURN_MARKS = ("<command-name>", "<local-command-stdout>", "<bash-input>", "<bash-stdout>",
                  "[Request interrupted by user")
+# How old a compacting agent's last line can be at either compaction hook. At PreCompact it is
+# under a second old (stamped 25–51ms before the hook starts, §3.4); at SessionStart(compact) as
+# old as the summary took, nothing the compaction writes landing before the hook returns —
+# measured over 169 compactions of one main session, the slowest summary took 5.5 minutes
+# (327s). An idle main compacts ~55 minutes after its last turn (107 of those 169, all past
+# 54 minutes), so a dead agent's line is at least that old by then. One bound serves both
+# hooks: three times the slowest summary, a quarter of the idle gap.
+COMPACTING_AGENT_RECENT = timedelta(minutes=15)
 
 
 def compaction_agent(transcript, prompt_id, trigger=None):
@@ -6349,9 +6357,17 @@ def compaction_agent(transcript, prompt_id, trigger=None):
       whatever the agents show — main losing its request is the worse error;
     - main at the hook's prompt and not at a compaction point, or already past that prompt
       (compacting, it could not have moved on), is not compacting: the compaction is that of an
-      agent at a compaction point — any `agent-*.jsonl` under the session's subagents/, a
-      Workflow's agents included; the one whose line is the latest;
+      agent at a compaction point whose last line is recent (COMPACTING_AGENT_RECENT) — any
+      `agent-*.jsonl` under the session's subagents/, a Workflow's agents included; the one
+      whose line is the latest; with none, main's;
     - a PreCompact with trigger `manual` is main's: only the user types /compact, into main.
+
+    The recency bound is what keeps an idle main's own compaction main's. The host compacts an
+    idle main ~55 minutes after its turn ended, and main, its turn ended, is at no compaction
+    point; a dead agent's transcript can be at one for good — measured, one `hippo:lane` relay
+    whose transcript ended on 2026-11-10 took every later idle compaction of its session (3 of 3),
+    and main got neither its deltas request nor its capsule. A compacting agent's last line is
+    as old as its summary at most; a line older than that is a dead agent's.
 
     Left as main's: an agent compacting while main, at the same prompt, waits on its reply, and
     one compacting while main's own compaction runs."""
@@ -6369,8 +6385,10 @@ def compaction_agent(transcript, prompt_id, trigger=None):
         main = _latest_turn(transcript)
         if not main or _compaction_point(main):
             return None
-    at = [(recs[-1].get("timestamp") or "", path) for path in agents
-          for recs in [_latest_turn(path, main=False)] if _compaction_point(recs)]
+    since = datetime.now(timezone.utc) - COMPACTING_AGENT_RECENT
+    at = [(t, path) for path in agents for recs in [_latest_turn(path, main=False)]
+          if _compaction_point(recs) and (t := _iso_time(recs[-1].get("timestamp"))) is not None
+          and t >= since]
     if not at:
         return None
     path = max(at)[1]
