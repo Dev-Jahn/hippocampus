@@ -1421,6 +1421,12 @@ PRECOMPACT_CAP = 3000  # chars of the whole text: it is appended to every compac
 PRECOMPACT_ITEM = 80  # chars of a task's notes or a directive's text per list line
 
 
+def short_age(t, now):
+    """`45m`, `7h`, `12d` — how long ago `t` was, in the one unit that reads at a glance."""
+    mins = max(0, int((now - t).total_seconds()) // 60)
+    return f"{mins}m" if mins < 60 else f"{mins // 60}h" if mins < 48 * 60 else f"{mins // 1440}d"
+
+
 def precompact_lines(hp):
     """What PreCompact appends to the compaction instructions (§3.4): end the summary with
     `## hippo deltas` — the exact commands that would record what this conversation changed and
@@ -1440,7 +1446,13 @@ def precompact_lines(hp):
     filled all of it, the summarizer saw none of 18 open tasks, and it proposed re-adding a
     directive recorded two minutes earlier — the newest, cut by the old oldest-first order. What
     does not fit whole is listed by id, a whole line giving way only when that brings every id
-    in; what does not fit even so is cut, oldest first, and counted."""
+    in; what does not fit even so is cut, oldest first, and counted.
+
+    A task's line shows how long ago it was updated and the newest part of its notes — the last
+    item of a list, else the tail — because the head of long notes is boilerplate: measured
+    (1.17.1, one main session), 216 of 303 delta commands (71%) targeted an id main had written
+    in the 24h before, the summarizer unable to see what was recorded. The request says to
+    leave out what the lists show."""
     head = [
         "hippo: end the summary with a section headed exactly `## hippo deltas`: one line per "
         "change this conversation made that hippo's lists below do not show yet, each written as "
@@ -1452,11 +1464,19 @@ def precompact_lines(hp):
         "  edit <file>: '<old>' → '<new>'   (a memory or doc line that is now false)",
         "or the single line `none` if nothing changed. They are run after the compaction, so "
         "write each one complete.",
+        "Leave out anything the lists below already show: each task's latest notes and how long "
+        "ago it was updated are there.",
     ]
+    now = datetime.now(timezone.utc)
 
-    def notes_of(t):
+    def latest_notes(t):
         n = t.get("notes") or []
-        return " / ".join(map(str, n)) if isinstance(n, list) else str(n)
+        s = one_line(n[-1] if isinstance(n, list) else n) if n else ""
+        return s if len(s) <= PRECOMPACT_ITEM else "…" + s[1 - PRECOMPACT_ITEM:]
+
+    def updated(t):
+        u = _iso_time(t["updated"]) if t.get("updated") else None
+        return f"{short_age(u, now)} ago" if u else ""
 
     def size(lines):
         return sum(len(ln) + 1 for ln in lines)
@@ -1483,11 +1503,11 @@ def precompact_lines(hp):
     tasks = sorted((t for t in tasks_load(hp)["tasks"] if t.get("status") in OPEN_STATUSES),
                    key=lambda t: str(t.get("updated") or ""), reverse=True)
     t_items = [" — ".join(filter(None, (f"- {t.get('id')}", one_line(t.get("title", ""), 100),
-                                        one_line(notes_of(t), PRECOMPACT_ITEM))))
+                                        updated(t), latest_notes(t))))
                for t in tasks]
     live = sorted(live_directives(hp, "main"), key=lambda d: str(d.get("t") or ""), reverse=True)
     d_items = [f"- {d['id']} — {one_line(d.get('text', ''), PRECOMPACT_ITEM)}" for d in live]
-    t_head = ["open tasks (id — title — notes):", *([] if t_items else ["(none open)"])]
+    t_head = ["open tasks (id — title — updated — latest notes):", *([] if t_items else ["(none open)"])]
     d_head = ["live directives (id — text):", *([] if d_items else ["(none live)"])]
     room = PRECOMPACT_CAP - size([*head, *t_head, *d_head]) - 66  # 66: the cut line, 4-digit count
     t_kept, t_cut = fit(t_items, [str(t.get("id")) for t in tasks],

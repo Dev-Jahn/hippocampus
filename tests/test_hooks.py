@@ -320,10 +320,32 @@ def test_pre_compact_asks_for_hippo_deltas_over_main_s_lists(tmp_project, repo_r
     assert proc.returncode == 0, proc.stderr
     text = proc.stdout
     assert "`## hippo deltas`" in text and "hippo task done <id> --note" in text
-    assert "- feat/alpha — Alpha — parser written" in text
+    assert "- feat/alpha — Alpha — 0m ago — parser written" in text
     assert "fix/beta" not in text  # done is not open
     assert "- gpu-pin — use GPUs 0 and 1 only" in text and "- main-only —" in text
     assert "worker-rule" not in text  # main's audience: a manual /compact shows this to main
+
+
+def test_pre_compact_shows_each_task_s_latest_notes_and_age(tmp_project, repo_root):
+    """The head of long notes is boilerplate, so the summarizer could not see what was recorded
+    and re-proposed it (measured: 216 of 303 delta commands targeted an id written in the 24h
+    before). A task shows how long ago it was updated and the newest part of its notes: a list's
+    last item, a string's tail."""
+    from datetime import timedelta
+    ago = (datetime.now(timezone.utc) - timedelta(hours=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    tail = "stage 3 merged at abc123"
+    (tmp_project / ".hippo" / "tasks.yaml").write_text(
+        "tasks:\n"
+        f"- {{id: feat/list, title: L, status: active, updated: '{ago}', "
+        "notes: ['boilerplate scope paragraph', 'stage 2 merged']}\n"
+        f"- {{id: feat/text, title: T, status: active, updated: '2026-09-01T00:00:00Z', "
+        f"notes: '{'boilerplate ' * 20}{tail}'}}\n", encoding="utf-8")
+    text = _pre_compact(tmp_project, repo_root).stdout
+    assert "Leave out anything the lists below already show" in text
+    assert "- feat/list — L — 7h ago — stage 2 merged\n" in text
+    line = next(ln for ln in text.splitlines() if ln.startswith("- feat/text — T — "))
+    assert line.split(" — ")[2].endswith("d ago") and line.endswith(" " + tail)
+    assert line.split(" — ")[3].startswith("…") and len(line.split(" — ")[3]) == 80
 
 
 def _write_tasks(project, n, notes="n" * 90):
@@ -353,7 +375,7 @@ def test_pre_compact_is_capped_and_lists_by_id_what_does_not_fit_whole(
     proc = _pre_compact(tmp_project, repo_root)
     assert proc.returncode == 0, proc.stderr
     assert len(proc.stdout) <= 3000
-    whole, by_id = _listed(proc.stdout, "open tasks (id — title — notes):")
+    whole, by_id = _listed(proc.stdout, "open tasks (id — title — updated — latest notes):")
     assert 0 < len(whole) < 40 and len(whole) + len(by_id) == 40
     assert "more not shown" not in proc.stdout
     # Past even the ids, the least recently updated are cut and counted, and the most recent keep
@@ -361,7 +383,7 @@ def test_pre_compact_is_capped_and_lists_by_id_what_does_not_fit_whole(
     _write_tasks(tmp_project, 400)
     proc = _pre_compact(tmp_project, repo_root)
     assert len(proc.stdout) <= 3000
-    whole, by_id = _listed(proc.stdout, "open tasks (id — title — notes):")
+    whole, by_id = _listed(proc.stdout, "open tasks (id — title — updated — latest notes):")
     assert whole and by_id
     assert f"({400 - len(whole) - len(by_id)} more not shown" in proc.stdout
 
@@ -380,7 +402,7 @@ def test_pre_compact_keeps_tasks_in_view_past_many_directives(tmp_project, repo_
     proc = _pre_compact(tmp_project, repo_root)
     assert proc.returncode == 0, proc.stderr
     assert len(proc.stdout) <= 3000
-    t_whole, t_ids = _listed(proc.stdout, "open tasks (id — title — notes):")
+    t_whole, t_ids = _listed(proc.stdout, "open tasks (id — title — updated — latest notes):")
     assert len(t_whole) >= 3 and len(t_whole) + len(t_ids) == 18  # every open task in view
     d_whole, d_ids = _listed(proc.stdout, "live directives (id — text):")
     shown = d_whole + d_ids

@@ -478,9 +478,13 @@ an agent's own (PreCompact, below).
   records it (`hippo task done <id> --note '…'`, `hippo task set <id> notes '…'`, `hippo directive
   withdraw <id>` only if the user said so, `hippo directive add --id <id> --text '…'` when the
   user changed one, `edit <file>: '<old>' → '<new>'` for a memory or doc line now false), or
-  `none`; then the open tasks (most recently updated first: id — title — the first 80 chars of
-  notes) and main's live directives (newest first: id — the first 80 chars), 3,000 chars at
-  most. Tasks, which most deltas are about, keep two thirds of the room whatever the directives
+  `none`, leaving out anything the lists already show; then the open tasks (most recently
+  updated first: id — title — how long ago it was updated — the newest 80 chars of its notes,
+  a list's last item or a string's tail) and main's live directives (newest first: id — the
+  first 80 chars), 3,000 chars at most. The newest notes and the age, because the head of long
+  notes is boilerplate: measured (1.17.1, one main session), 216 of 303 delta commands (71%)
+  targeted an id main had written in the 24h before — the summarizer could not see it was
+  recorded, and proposed it again. Tasks, which most deltas are about, keep two thirds of the room whatever the directives
   need; what does not fit whole is listed by id on one `also …` line, a whole line giving way only
   when that brings every id in (past that, trading would strip the newest items of their text and
   still cut the oldest ids), and what does not fit even so is cut, oldest first, and counted.
