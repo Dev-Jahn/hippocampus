@@ -12,27 +12,28 @@ type Machine = { files: Record<string, string>; dirs: string[]; live: number[]; 
 
 // Registers the fake machine beneath the plugin and returns what the module drew: the body each
 // row was handed on with (undefined: left as the engine draws it), and the clock.
-function machine(on, m: Machine) {
+// `any`: the fakes answer only the fields the module reads.
+function machine(on: any, m: Machine) {
   const missing = (path: string) => ({ deny: `ENOENT: ${path}` })
   const clock = mock.clock(on, { now: NOW })
   const env = m.env ?? { HOME: '/home/u' }
-  on('env.get', ($, e) => ({ value: env[e.name] }))
+  on('env.get', ($: unknown, e: { name: string }) => ({ value: env[e.name] }))
   const drawn: (string | undefined)[] = []
   const lanes = { listed: true }
   on('ui.log', () => ({ value: undefined }))
   on('agent.list', () => ({ value: lanes.listed ? [{ id: ROW, type: 'hippo:lane', hasRow: true }] : [] }))
   on('session.info', () => ({ value: { transcriptPath: `${SESSION}.jsonl` } }))
-  on('fs.read', ($, e) => (e.path in m.files ? { value: m.files[e.path] } : missing(e.path)))
-  on('fs.stat', ($, e) => {
+  on('fs.read', ($: unknown, e: { path: string }) => (e.path in m.files ? { value: m.files[e.path] } : missing(e.path)))
+  on('fs.stat', ($: unknown, e: { path: string }) => {
     const kind = m.dirs.includes(e.path) ? 'dir' : e.path in m.files ? 'file' : undefined
     return kind ? { value: { kind, size: 0, mtimeMs: 0, isLink: false, realPath: e.path } } : missing(e.path)
   })
-  on('process.run', ($, e) => {
+  on('process.run', ($: unknown, e: { argv: string[] }) => {
     const isLive = m.live.includes(Number(e.argv[2]))
     return { value: { exitCode: isLive ? 0 : 1, stdout: '', stderr: isLive ? '' : 'kill: No such process',
       isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  on('ui.render', { component: 'AgentRow' }, ($, e, next) => { drawn.push(e.props.body); return next(e) })
+  on('ui.render', { component: 'AgentRow' }, ($: unknown, e: any, next: any) => { drawn.push(e.props.body); return next(e) })
   return { drawn, clock, lanes }
 }
 
@@ -41,14 +42,14 @@ const PROPS = { id: ROW, description: 'pass2', type: 'hippo:lane', status: 'runn
   hasRow: true, rowIds: [ROW], isHidden: false }
 
 // The body the engine is handed for one row, or undefined where the row is left as it came.
-async function body($, seen: { drawn: (string | undefined)[] }, props: Record<string, unknown>) {
+async function body($: any, seen: { drawn: (string | undefined)[] }, props: Record<string, unknown>) {
   const ui = await $.ui.mount({ plugin: 'hippo', surface: 'terminal', component: 'AgentRow',
     props: { ...PROPS, ...props } as never })
   await ui.unmount()
   return seen.drawn.at(-1)
 }
 
-const transcript = (text: string) => ({ [`${SESSION}/subagents/agent-${ROW}.jsonl`]: text })
+const transcript = (text: string): Record<string, string> => ({ [`${SESSION}/subagents/agent-${ROW}.jsonl`]: text })
 const lane = (over: Record<string, unknown> = {}) => JSON.stringify({
   id: DID, scope: 'pass2 tensorize', pid: 4242, started: '2026-10-02T00:00:00Z', cmds: 14,
   last: 'exec: pytest -q tests/test_pass2.py', last_at: '2026-10-02T02:00:10Z', ...over })
