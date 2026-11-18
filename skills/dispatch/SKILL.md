@@ -93,7 +93,9 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   `transient`/`environment` cause — and any lane with a khala name, however it ended — ends
   with `resume: <command>` — the same codex session as a new dispatch. Run it as printed, or
   swap its closing prompt to steer — in single quotes, or `"$p"` from a single-quoted variable,
-  so `$` and backticks stay literal (never `--last` when lanes run in parallel). A resumed lane
+  so `$` and backticks stay literal (never `--last` when lanes run in parallel). A resume you
+  type yourself (`hippo dispatch -- -C <dir> resume <session> "…"`) may omit `--kind`,
+  `--scope`, `--task` and `--depth`: each comes from that session's lane record. A resumed lane
   has no brief of its own, so its triage is weak evidence: read its report. A model-capacity
   error the wrapper resumes by itself, up to 3 times, after 1, 2 and 4 minutes — the stream
   says so as it waits, and `--watch` lists the `attempts:`.

@@ -387,6 +387,7 @@ hippo directive withdraw <id>
 hippo prior show
 hippo prior distill [--days N]
 hippo dispatch --kind K --scope S [--task T] [--depth N] [--fast] [--] <codex exec args…>
+# … -- <codex args> resume <session> "…" may omit --kind/--scope/--task/--depth: its lane record's
 hippo dispatch --batch <manifest.yaml> [--dry-run | --entry <id>]  # --entry: the Workflow face's call, never typed
 hippo dispatch --watch <dispatch-id|batch-id> [--for SECONDS]
 # a bare noun reads: task → list, log → tail, directive → list, prior → show
@@ -1550,7 +1551,19 @@ codex runs; and a session no record names keeps `unset`, said on stderr, never g
 Measured (steno, 13 days on 1.17.1): 78 of 641 dispatches (12%) were resumes typed as `-- -C
 <dir> resume <session> "…"`, recorded `codex/unset/unset` — a PRIORS `research ×
 codex/unset/unset` row of n=61 — and a lane record of every one of those sessions named
-`gpt-6.1-sol/high`. The wrapper's own resume (below) stays inside one lane and one label.
+`gpt-6.1-sol/high`. Its labels follow the same rule (`resumed_labels`): a resume that
+names no `--kind`, `--scope`, `--task` or `--depth` takes each from the newest lane record of
+its session — the scope with ` (resumed)`, as on the `resume:` line — and the command line
+wins. The record is the source because the `ev:dispatch` row holds the labels but not the
+session id; depth comes along because it is the session's, and `HIPPO_DEPTH` sets the
+re-delegation clause its capsule re-injects. One stderr line says what came from which lane,
+the exec beside it: `dispatch: resume of session <sid>: kind …, scope '…', task …, taken from
+lane <id>; exec …, taken from lane <id>`. Not a resume of a named session: the missing-flag
+usage error, unchanged; a resume no record names: the same error, saying `no lane record of
+session <sid> to take them from` — never a default scope. Measured (2026-11-18): a resume
+typed as `-- -C <dir> resume <session> "…"` failed on a missing `--scope` that main's own
+restart checklist had dropped, while the lane record of that session held it. The wrapper's own
+resume (below) stays inside one lane and one label.
 
 **A model at capacity** (1.16.0). The stop above was a harness loss: at 15:59Z, 5 minutes into
 a gpt-6.1-sol high lane, codex printed `ERROR: Selected model is at capacity. Please try a

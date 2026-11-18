@@ -531,6 +531,48 @@ def test_a_resume_typed_without_a_model_inherits_the_lanes_label(lab, capfd):
     assert "no lane record of it names a model or effort" in err
 
 
+def test_a_resume_typed_without_labels_inherits_them_from_the_lane(lab, capfd):
+    """Measured (2026-11-18): a resume typed as `-- -C <dir> resume <session> "…"` failed on a
+    missing --scope while the lane record of that session held it. A resume takes the kind,
+    scope, task and depth its command line leaves out from that record, in one stderr line with
+    the exec; what the command line gives wins; a session no record names stays the usage
+    error, saying why."""
+    with pytest.raises(SystemExit):
+        hippo_cli.run_dispatch(["--kind", "impl", "--scope", "accounts", "--task",
+                                "impl/accounts", "--depth", "1", "-m", "gpt-6.1-sol", "-c",
+                                "model_reasoning_effort=high", "--skip-git-repo-check", PROMPT])
+    first = capfd.readouterr().out.splitlines()[0].removeprefix("dispatch:")
+
+    def resume(*flags, sid=SID):
+        with pytest.raises(SystemExit) as done:
+            hippo_cli.run_dispatch([*flags, "--", "-C", lab.cwd, "resume", sid,
+                                    hippo_cli.RESUME_CONTINUE])
+        out, err = capfd.readouterr()
+        return done.value.code, (out.splitlines() or [""])[0].removeprefix("dispatch:"), err
+
+    code, did, err = resume()
+    assert code == 0, err
+    rows = {e["id"]: e for e in _rows(lab.project, "dispatch")}
+    assert {k: rows[did].get(k) for k in ("kind", "scope", "task", "depth", "exec")} == {
+        "kind": "impl", "scope": "accounts (resumed)", "task": "impl/accounts", "depth": 1,
+        "exec": "codex/gpt-6.1-sol/high"}
+    assert (f"dispatch: resume of session {SID}: kind impl, scope 'accounts (resumed)', "
+            f"task impl/accounts, depth 1, taken from lane {first}; exec "
+            f"codex/gpt-6.1-sol/high, taken from lane {first}") in err.splitlines()
+
+    code, did, err = resume("--kind", "research", "--scope", "audit", "--depth", "0")
+    assert code == 0, err
+    row = {e["id"]: e for e in _rows(lab.project, "dispatch")}[did]
+    assert (row["kind"], row["scope"], row["task"], row["depth"]) == (
+        "research", "audit", "impl/accounts", 0)
+
+    other = "01a0ffff-0000-7000-8000-000000000000"
+    code, _, err = resume(sid=other)
+    assert code == 2
+    assert err.startswith(f"dispatch: --kind and --scope are required — no lane record of "
+                          f"session {other} to take them from\n")
+
+
 def test_a_count_that_went_down_is_a_restart_not_a_negative_cost(lab):
     """The last count before the lane started is its baseline — unless the count fell below
     it: then the session's count began again, and all of it is the lane's."""
