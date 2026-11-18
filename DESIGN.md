@@ -167,7 +167,13 @@ optional `src` (`scribe|cli|wrapper|executor`).
   From the scribe a second outcome is rejected outright (§3.5.6b). A verdict needs an ended
   delegation: a scribe outcome on one still in flight is refused at write time (§3.5.6b), and
   one already in the ledger, stamped before its delegation ended, is no verdict in any view —
-  main's later verdict is the first (§3.6b). The ledger is not rewritten.
+  main's later verdict is the first (§3.6b). The ledger is not rewritten. Main's own verdict
+  (scalar and `--from-batch`) is refused too, in one line naming `hippo dispatch --watch`, while
+  the lane's record reads `running` — no `ended` and its wrapper alive, `--watch`'s reading; a
+  record its dead wrapper left behind reads ended or lost and holds nothing. Measured (steno,
+  13 days on 1.17.1): a cleanup loop wrote `lost/harness` on 7 lanes mid-run, and six ran on to
+  finish under that first verdict. Only that positive reading refuses main — not the scribe's
+  no-record fallback — and a lane's claim, written while it runs, is never refused.
 - `review-status.addressed ∈ {full, partial, none}` — closed like `result`, because it is the one
   field reviews are folded on ("not fully addressed"): a free-form "fully" would read as open
   forever. `hippo log review` prints a one-line stderr reminder to record the closing
@@ -1002,7 +1008,8 @@ an agent's own (PreCompact, below).
    3.6h to its exit row, and 11 never wrote one. A native run is in flight while 3c's index has
    no end for it (a notification, a TaskStop, a run file's end). Any other dispatch — a row
    main logged, one the clerk coined — has no end to wait for and is not checked. Main's
-   `hippo log outcome` is never checked, and a lane's own claim stays a claim (§3.2). The
+   `hippo log outcome` is checked only against a running lane record (§3.2), and a lane's own
+   claim stays a claim. The
    roster marks such a line `[running — no verdict yet]` (step 5), and rule 2 says it takes no
    outcome in this window, whatever the digest says. Measured (steno, 2026-10-01): the clerk —
    gpt-6-luna at medium, 1.15.4's default (step 4) — read a window whose last assistant line

@@ -1731,12 +1731,9 @@ def still_running(hp, ref, rows, native=None):
     if run is not None:
         return None if run["ended"] else (f"native run {run['id']} has not ended (no "
                                           "notification, TaskStop or end in its run file yet)")
-    if not isinstance(ref, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", ref):
-        return None
-    rec = _read_json(hp / "lanes" / f"{ref}.json")
+    rec = lane_record(hp, ref)
     if rec:
-        return (f"its lane record has no end and its wrapper (pid {rec.get('pid')}) is alive"
-                if watch_state(rec) == "running" else None)
+        return lane_running(rec)
     launch = next((e for e in rows if e.get("ev") == "dispatch" and e.get("id") == ref
                    and e.get("src") == "wrapper"), None)
     t, now = event_time(launch or {}), datetime.now(timezone.utc)
@@ -1744,6 +1741,41 @@ def still_running(hp, ref, rows, native=None):
             or any(e.get("ev") in EXIT_EVS and e.get("ref") == ref for e in rows)):
         return None
     return f"no lane record and no exit row yet, launched {age_label(t, now)} ago"
+
+
+def lane_record(hp, ref):
+    """The wrapper lane record `ref` names, or {} — none, or `ref` is no lane id."""
+    if not isinstance(ref, str) or not SAFE_ID_RE.fullmatch(ref):
+        return {}
+    return _read_json(hp / "lanes" / f"{ref}.json")
+
+
+def lane_running(rec):
+    """Why the lane on record `rec` is running right now → a reason, or None — read as `--watch`
+    reads it (watch_state): no end on record and its wrapper alive. A record left behind by a
+    wrapper that died says nothing new from then on, and its dead pid is what tells it apart:
+    such a lane reads ended or lost, never running, so nothing it holds waits forever."""
+    if watch_state(rec) != "running":
+        return None
+    return f"its lane record has no end and its wrapper (pid {rec.get('pid')}) is alive"
+
+
+def verdict_on_running(hp, ref):
+    """Main's verdict on a lane still running → the one-line refusal, or None.
+
+    Measured (steno, 13 days on 1.17.1): main's cleanup loop wrote `lost/harness` on 7 lanes
+    that were mid-run, and six of them ran on to finish with `lost` as the first verdict —
+    the one PRIORS reads. The scribe was already held to an ended delegation
+    (`check_scribe_outcome`); main's own door had no such check. Only the positive reading
+    refuses: a running wrapper on record. The scribe's fallback for a launch with no record
+    (`still_running`) stays the scribe's — main typing a verdict on a lane whose record could
+    not be written must not wait out a day. A lane's own claim (src=executor) is written while
+    it runs by design and never reaches here."""
+    why = lane_running(lane_record(hp, ref))
+    if why is None:
+        return None
+    return (f"outcome: {ref} is still running ({why}) — nothing recorded. A verdict needs an "
+            f"ended lane: wait (`hippo dispatch --watch {ref}`) or stop it, then judge it")
 
 
 def check_scribe_directive(hp, e, start):
@@ -1848,6 +1880,7 @@ def log_outcome_bulk(args):
     known = {e.get("id") for e in ledger if e.get("ev") == "dispatch"}
     judged = judged_refs(ledger)
     claims = executor_claims(ledger)
+    claiming = resolve_src() == "executor"  # from inside a lane: claims, written while it runs
     rows, problems, seen = [], [], {}
     for n, raw in enumerate(sys.stdin.read().splitlines(), 1):
         if not raw.strip():
@@ -1923,6 +1956,10 @@ def log_outcome_bulk(args):
             problems.append(f"{where}: {ref} has no executor claim yet — judging an unclaimed "
                             "lane keeps the scalar command")
             continue
+        refusal = None if claiming else verdict_on_running(args.hp, ref)
+        if refusal:
+            problems.append(f"{where}: {refusal}")
+            continue
         rows.append(e)
     if problems:
         die(f"outcome --from-batch: {len(problems)} problem(s), nothing written\n"
@@ -1980,6 +2017,11 @@ def cmd_log(args):
         if not ref:
             die("outcome: --ref is required (inside a dispatched lane HIPPO_DISPATCH supplies it)")
         e.update(ref=resolve_ref(args.hp, ref), result=args.result)
+        refusal = None if resolve_src() == "executor" else verdict_on_running(args.hp, e["ref"])
+        if refusal:
+            # One line and no usage block: the command was right, the moment was not.
+            print(refusal, file=sys.stderr)
+            sys.exit(1)
         for k in ("attr", "rework", "by", "note"):
             if getattr(args, k) is not None:
                 e[k] = getattr(args, k)
