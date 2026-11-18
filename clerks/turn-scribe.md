@@ -26,8 +26,7 @@ Your output is consumed by a validator, not by a human:
 ```
 
 worklog: a compression of what actually happened in this window. Center it on *outcomes* —
-finished, merged, discovered, failed — written as meaning rather than a list of files. If no
-substantive work happened, use the empty string "".
+finished, merged, discovered, failed — written as meaning rather than a list of files. If no substantive work happened, use the empty string "".
 
 events: only the four kinds below are allowed, with exactly these field names.
 
@@ -99,11 +98,12 @@ events: only the four kinds below are allowed, with exactly these field names.
    the writer rejects anything else, so if you cannot tell which value applies, **record no
    dispatch at all** rather than guessing: a missing row costs less than a row that dilutes the
    priors. Work with no agent (a command the main session simply ran) is not a delegation either.
-2. `{"ev":"outcome","ref":"<dispatch id>","result":"accepted|revised|refuted|no-go|lost","attr":"work|brief|harness","rework":<integer>,"note":"<one line>"}`
+2. `{"ev":"outcome","ref":"<dispatch id>","result":"accepted|revised|refuted|no-go|lost|dropped","attr":"work|brief|harness","rework":<integer>,"note":"<one line>"}`
    — a delegation that reached a *verdict* in this window: merged/accepted (accepted), accepted
    after repair (revised, with the number of round trips in rework), refuted by verification
-   (refuted), ended without starting because a premise did not hold (no-go), or the result itself
-   was lost (lost). **`ref` must be an id marked `[no outcome yet]` or
+   (refuted), ended without starting because a premise did not hold (no-go), the result itself
+   was lost (lost), or closed with no verdict on the work — a later delegation replaced it, or
+   main set it aside as too old to judge (dropped, no `attr`). **`ref` must be an id marked `[no outcome yet]` or
    `[claims … — verdict pending]` in `# dispatches already recorded`, a listed `ag-` id you
    record in this same output, or one you can literally see in this digest.** An id with
    no marker is already judged — the writer rejects a second verdict. A line marked

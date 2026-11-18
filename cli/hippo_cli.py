@@ -116,7 +116,12 @@ EXEC_PLACEHOLDERS = {"executor", "vehicle", "model", "effort"}
 EXECUTORS = {"codex", "claude", "fork", "subagent", "workflow"}
 EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra", "inherit"}
 ENUMS = {
-    ("outcome", "result"): {"accepted", "revised", "refuted", "no-go", "lost"},
+    # dropped: closed with no verdict on the work — a later delegation replaced it, or it is too
+    # old for anyone to judge. Measured (steno, 1.17.1): 36 of 38 `lost` outcomes were cleanups
+    # of delegations a newer one overtook, main once wrote `no-go` for the same thing ("there is
+    # no 'superseded' value"), 37 native runs lost their verdicts to a compaction and 20 old
+    # dispatches were written `lost/harness` only to clear them. It mirrors the task status.
+    ("outcome", "result"): {"accepted", "revised", "refuted", "no-go", "lost", "dropped"},
     ("outcome", "attr"): {"work", "brief", "harness"},
     ("directive", "state"): {"active", "withdrawn", "expired"},
     # audience is *who* a directive binds (§9.4). Absent = all — a narrow default would silently
@@ -2309,7 +2314,8 @@ def prior_cells(rows, prices=None):
             continue
         b = cells.setdefault((d.get("kind"), d.get("exec")),
                              {"judged": 0, "accepted": 0, "revised": 0, "refuted": 0,
-                              "no-go": 0, "lost": 0, "rework": 0, "tokens": 0, "usd": 0.0,
+                              "no-go": 0, "lost": 0, "dropped": 0, "rework": 0, "tokens": 0,
+                              "usd": 0.0,
                               "priced": 0, "unpriced": 0,
                               "unpriced_models": collections.Counter()})
         b["judged"] += 1
@@ -2334,13 +2340,13 @@ def prior_cells(rows, prices=None):
 
 
 def prior_n(b):
-    """The denominator of a first-pass rate: a no-go never started and a lost result was never
-    seen, so neither is a judgment of the work."""
-    return b["judged"] - b["no-go"] - b["lost"]
+    """The denominator of a first-pass rate: a no-go never started, a lost result was never
+    seen and a dropped one was closed unjudged, so none is a judgment of the work."""
+    return b["judged"] - b["no-go"] - b["lost"] - b["dropped"]
 
 
 AGREEMENT_ROUTES = ("accept-candidate", "escalate", "no-go-candidate", "failed")
-AGREEMENT_RESULTS = ("accepted", "revised", "refuted", "no-go", "lost")
+AGREEMENT_RESULTS = ("accepted", "revised", "refuted", "no-go", "lost", "dropped")
 
 
 def triage_agreement(rows):
@@ -2384,7 +2390,7 @@ def triage_agreement(rows):
         lines += ["", f"below the n={PRIOR_MIN_SAMPLE} threshold, no row reported "
                       f"({len(thin)}): " + ", ".join(thin)]
     acc = table["accept-candidate"]
-    b = sum(acc.values())
+    b = sum(acc.values()) - acc["dropped"]  # closed unjudged: neither right nor wrong
     if b:
         a = acc["accepted"] + acc["revised"]
         rate = f" ({100 * a / b:.1f}%)" if b >= PRIOR_MIN_SAMPLE else f" (n={b}, no rate)"
@@ -2419,14 +2425,14 @@ def prior_facts(rows, now, prices=None):
     per_exec, unpriced_models = {}, collections.Counter()
     for (_, ex), b in cells.items():
         p = per_exec.setdefault(ex, {"judged": 0, "accepted": 0, "revised": 0, "refuted": 0,
-                                     "no-go": 0, "lost": 0})
+                                     "no-go": 0, "lost": 0, "dropped": 0})
         for k in p:
             p[k] += b[k]
         unpriced_models.update(b["unpriced_models"])
 
     # Cells under the threshold are named but never given a rate: a percentage over n=1 reads as
     # evidence and is not one. Naming them keeps the omission visible instead of silent.
-    lines = ["## routing — accepted / (judged − no-go − lost), per kind × exec", "",
+    lines = ["## routing — accepted / (judged − no-go − lost − dropped), per kind × exec", "",
              f"prices as of {prices.get('as_of') or 'unknown'} (prices.yaml); "
              "cost columns cover measured usage only",
              "",
@@ -2440,7 +2446,7 @@ def prior_facts(rows, now, prices=None):
             thin.append(f"{kind}×{ex} (n={n})")
             continue
         verdicts = ", ".join(f"{k} {b[k]}" for k in ("accepted", "revised", "refuted", "no-go",
-                                                     "lost") if b[k])
+                                                     "lost", "dropped") if b[k])
         tok = f"{b['tokens']:,}" if b["tokens"] else "—"
         star = "*" if b["unpriced"] else ""
         usd_s = f"${b['usd']:.2f}{star}" if b["priced"] else ("—" + star)
@@ -2452,6 +2458,10 @@ def prior_facts(rows, now, prices=None):
     if thin:
         lines += ["", f"below the n={PRIOR_MIN_SAMPLE} threshold, no rate reported "
                       f"({len(thin)}): " + ", ".join(thin)]
+    dropped = sum(b["dropped"] for b in cells.values())
+    if dropped:
+        lines += ["", f"dropped: {dropped} — closed with no verdict on the work (replaced by a "
+                      "later delegation, or too old to judge); in no rate or loss count here"]
     if unpriced_models:
         lines += ["", "unpriced usage (* above — model not on the price sheet, or no billing "
                       "breakdown): " + ", ".join(f"{m}×{c}" for m, c in
@@ -2470,18 +2480,19 @@ def prior_facts(rows, now, prices=None):
               "| exec | judged | refuted+revised | rate |", "|---|---:|---:|---:|"]
     thin_exec = []
     for ex, b in sorted(per_exec.items(), key=lambda kv: -kv[1]["judged"]):
-        bad = b["refuted"] + b["revised"]
-        if b["judged"] < PRIOR_MIN_SAMPLE:
-            thin_exec.append(f"{ex} (n={b['judged']})")
+        bad, n = b["refuted"] + b["revised"], b["judged"] - b["dropped"]
+        if n < PRIOR_MIN_SAMPLE:
+            thin_exec.append(f"{ex} (n={n})")
             continue
-        lines.append(f"| {ex} | {b['judged']} | {bad} | {100 * bad / b['judged']:.1f}% |")
+        lines.append(f"| {ex} | {n} | {bad} | {100 * bad / n:.1f}% |")
     if thin_exec:
         lines += ["", f"below the n={PRIOR_MIN_SAMPLE} threshold, no rate reported "
                       f"({len(thin_exec)}): " + ", ".join(thin_exec)]
 
     lines += triage_agreement(rows)
 
-    attr = collections.Counter(e.get("attr") for e in outs if e.get("result") != "accepted")
+    attr = collections.Counter(e.get("attr") for e in outs
+                               if e.get("result") not in ("accepted", "dropped"))
     unjoined = sum(1 for e in outs if e.get("ref") not in known)
     lines += ["", "## attribution of non-accepted outcomes", "",
               f"work {attr['work']} / brief {attr['brief']} / harness {attr['harness']} "

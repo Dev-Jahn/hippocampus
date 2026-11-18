@@ -138,7 +138,7 @@ hippo task show <id> [--json]
 hippo task drop <id>
 hippo log dispatch --id D --kind K --exec executor/model/effort --scope S
     [--task T] [--depth N] [--parent D]
-hippo log outcome --ref <dispatch-id>|task:<task-id> --result accepted|revised|refuted|no-go|lost
+hippo log outcome --ref <dispatch-id>|task:<task-id> --result accepted|revised|refuted|no-go|lost|dropped
     [--attr work|brief|harness] [--rework N] [--by executor/model] [--note N]
 hippo log outcome --from-batch <journal> [--dry-run] < verdicts.jsonl
 hippo log review --id R --base <sha> --source S --findings N

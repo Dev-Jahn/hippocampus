@@ -158,12 +158,21 @@ optional `src` (`scribe|cli|wrapper|executor`).
 {"t":"…","ev":"triage","ref":"d041","route":"accept-candidate","verify":false,"p":{"done":0.95,"blocked":0.02,"ask":0.03,"creep":0.04,"evidence":0.91,"risk":1.0}}
 ```
 
-- `outcome.result ∈ {accepted, revised, refuted, no-go, lost}`; `attr ∈ {work, brief, harness}`
+- `outcome.result ∈ {accepted, revised, refuted, no-go, lost, dropped}`; `attr ∈ {work, brief, harness}`
   (recommended whenever the result is not accepted — a failure count with no attribution produces a
   lying prior. Measured: the run of REFUTEDs was work, the NO-GO from contradictory GPU clauses was
   brief, and the vanished StructuredOutput was harness). A second outcome for one dispatch is
   legal from main — a deliberate re-verdict after rework is main's call — but it gets a stderr
   note, because the routing table is a *first-pass* rate and keeps reading the first verdict.
+  `dropped` (1.18.0) closes a dispatch with no verdict on the work — a later delegation
+  replaced it, or it is too old for anyone to judge — and, like the task status it mirrors,
+  says nothing good or bad: it leaves the in-flight line and the open items, and PRIORS keeps
+  it out of every rate and loss count (first-pass and verification denominators, attribution,
+  the judge's precision), giving it its own count under the routing table. Measured (steno,
+  13 days on 1.17.1): 36 of 38 `lost` outcomes were cleanups of delegations a newer one had
+  overtaken, read by PRIORS as harness losses; main once wrote `no-go` for the same thing
+  because there was no such value; 37 native runs lost their verdicts to a compaction, and 20
+  old dispatches were written `lost/harness` only to clear them.
   From the scribe a second outcome is rejected outright (§3.5.6b). A verdict needs an ended
   delegation: a scribe outcome on one still in flight is refused at write time (§3.5.6b), and
   one already in the ledger, stamped before its delegation ended, is no verdict in any view —
@@ -339,7 +348,7 @@ hippo task show <id> [--json]
 hippo task drop <id>
 hippo log dispatch --id D --kind K --exec executor/model/effort --scope S
     [--task T] [--depth N] [--parent D]
-hippo log outcome --ref <dispatch-id>|task:<task-id> --result accepted|revised|refuted|no-go|lost
+hippo log outcome --ref <dispatch-id>|task:<task-id> --result accepted|revised|refuted|no-go|lost|dropped
     [--attr work|brief|harness] [--rework N] [--by executor/model] [--note N]
 hippo log outcome --from-batch <journal> [--dry-run] < verdicts.jsonl
 hippo log review --id R --base <sha> --source S --findings N
