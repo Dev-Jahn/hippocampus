@@ -153,7 +153,7 @@ optional `src` (`scribe|cli|wrapper|executor`).
 {"t":"…","ev":"review-status","ref":"r007","addressed":"partial","at":"def4567"}
 {"t":"…","ev":"directive","id":"gpu-01","text":"use GPUs 0 and 1 only","state":"active"}
 {"t":"…","ev":"directive","id":"gpu-01","state":"withdrawn"}
-{"t":"…","ev":"clerk","name":"turn-scribe","ms":8100,"ok":true,"tokens":1400,"dropped":3}
+{"t":"…","ev":"clerk","name":"turn-scribe","ms":8100,"ok":true,"tokens":1400,"restated":3}
 {"t":"…","ev":"usage","ref":"d041","tokens":1100000,"tin":1000000,"tcached":400000,"tout":100000,"model":"gpt-6-sol"}
 {"t":"…","ev":"triage","ref":"d041","route":"accept-candidate","verify":false,"p":{"done":0.95,"blocked":0.02,"ask":0.03,"creep":0.04,"evidence":0.91,"risk":1.0}}
 ```
@@ -992,7 +992,7 @@ an agent's own (PreCompact, below).
    `outcome` whose ref's latest verdict has the same result, a `dispatch` under an id the ledger
    already has, and a `dispatch` naming a run 3c skips as a relay (a `hippo:lane` agent, bare
    or `ag-`). It is set aside before every other rule and counted on the run's own meter row,
-   `ev:clerk name:turn-scribe dropped:<n>` (absent at 0). Measured (steno, 13 days on 1.17.1):
+   `ev:clerk name:turn-scribe restated:<n>` (absent at 0). Measured (steno, 13 days on 1.17.1):
    371 of 385 dumps were "N events rejected", and 324 of the 471 rejected events were the
    scribe re-emitting a verdict main had already written — agreeing with it in 318. A re-emitted
    verdict that *disagrees* is still dumped, with both results named (6b).

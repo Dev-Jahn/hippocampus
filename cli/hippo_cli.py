@@ -85,7 +85,7 @@ ALLOWED = {
     "directive": ("id", "text", "lifetime", "state", "audience"),
     # dropped: the clerk's events a scribe run set aside as restatements of rows already in
     # the ledger (`scribe_restates`) — counted here, never dumped.
-    "clerk": ("name", "ok", "ms", "tokens", "dropped"),
+    "clerk": ("name", "ok", "ms", "tokens", "restated"),
     "usage": ("ref", "tokens", "model", "tin", "tcached", "tout"),
     # p: the compact probabilities the route was computed from — done, blocked, ask, creep,
     # evidence, and risk (a 0-3 score). A question the reply did not answer is absent.
@@ -141,7 +141,7 @@ TRIAGE_TRIMMED = ("stderr_tail", "brief", "changes", "report")  # what fit_triag
 # an id that is empty (or spelled differently every time) cannot supersede anything.
 DIRECTIVE_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 INT_FIELDS = ("findings", "rework", "ms", "tokens", "depth", "tin", "tcached", "tout",
-              "dropped")
+              "restated")
 
 
 def validate_event(e):
@@ -2020,7 +2020,7 @@ def check_scribe_outcome(hp, e, native=None, held=None):
 
 def scribe_restates(hp, e, native=None):
     """True for a clerk event that only restates what the ledger already holds: set aside with
-    no dump, counted on the run's meter (`dropped`) — a restatement is no failure.
+    no dump, counted on the run's meter (`restated`) — a restatement is no failure.
 
     Measured (steno, 13 days on 1.17.1): 371 of 385 failure dumps were "N events rejected", and
     324 of the 471 rejected events were the scribe re-emitting a verdict main had already
@@ -8065,7 +8065,7 @@ def cmd_scribe(args):
              if r["ref"] and r["ref"] != r["id"]} if native else {}
     start = (window_start(transcript, since, end)
              if any(isinstance(e, dict) and e.get("ev") == "directive" for e in events) else None)
-    rejected, dropped = [], 0
+    rejected, restated = [], 0
     for e in events:
         # lifetime is retired (§3.2) and the prompt no longer asks for it; a clerk that still
         # says `turn` must not make its directive invisible to the view.
@@ -8075,7 +8075,7 @@ def cmd_scribe(args):
                 and e["ref"] in alias):
             e["ref"] = alias[e["ref"]]
         if scribe_restates(hp, e, native):
-            dropped += 1
+            restated += 1
             continue
         taken, verr = native_guard(hp, native_take, hp, e, native, alias) or (False, None)
         if not taken:
@@ -8097,7 +8097,7 @@ def cmd_scribe(args):
         worklog_append(hp, obj["worklog"].strip())
     settle()
     save_cursor()
-    append_event(hp, {**meter, "ok": True, **({"dropped": dropped} if dropped else {})},
+    append_event(hp, {**meter, "ok": True, **({"restated": restated} if restated else {})},
                  src="scribe")
     auto_distill(hp)
     # 9. Open tasks that look ended (DESIGN §3.5.9) — last, on both paths: it reads nothing

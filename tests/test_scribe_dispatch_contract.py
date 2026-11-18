@@ -159,7 +159,7 @@ def test_a_restatement_is_dropped_and_counted_not_dumped(tmp_project, run_hippo,
     assert [e["src"] for e in rows if e.get("ev") == "dispatch"] == ["cli"]
     assert not list((tmp_project / ".hippo" / "failures").glob("*"))
     (meter,) = [e for e in rows if e.get("ev") == "clerk" and e.get("name") == "turn-scribe"]
-    assert meter["dropped"] == 2 and meter["ok"] is True
+    assert meter["restated"] == 2 and meter["ok"] is True
 
 
 def test_a_claude_session_on_a_gpt_model_is_refused(tmp_project, run_hippo, fake_transcript,
