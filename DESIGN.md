@@ -503,7 +503,8 @@ an agent's own (PreCompact, below).
   own compaction (below); otherwise plain text with exit 0, which the host
   appends to the compaction instructions: end the summary with `## hippo deltas`, one line per
   change the conversation made that hippo's lists do not show yet, each the exact command that
-  records it (`hippo task done <id> --note '…'`, `hippo task set <id> notes '…'`, `hippo directive
+  records it (`hippo task done <id> --note '…'`, `hippo task note <id> '…'` — an append, where
+  1.17.1's `task set <id> notes` delta could put an older note over a newer one —, `hippo directive
   withdraw <id>` only if the user said so, `hippo directive add --id <id> --text '…'` when the
   user changed one, `edit <file>: '<old>' → '<new>'` for a memory or doc line now false), or
   `none`, leaving out anything the lists already show; then the open tasks (most recently
@@ -2015,7 +2016,7 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 · live: use GPUs 0 and 1 only
 · in flight: NVFP4 factor-rebasing 6-part (0h42m), r2 UNCERTAIN 4건 (0h12m)
 · last: 07-31 14:05 merged the v2 Pareto duo, full gate green (1421)
-· cli: task add|set|done|list · log outcome|review|review-status|dispatch (subagent/Workflow runs: recorded, no call) · directive add|withdraw · prior · dispatch [--batch] — /hippo:hippo has the flags
+· cli: task add|set|note|done|list · log outcome|review|review-status|dispatch (subagent/Workflow runs: recorded, no call) · directive add|withdraw · prior · dispatch [--batch] — flags: /hippo:hippo
 ```
 
 `last:` is the worklog's latest entry with its date and time (12 chars): a resumed session's

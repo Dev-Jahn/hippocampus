@@ -256,9 +256,9 @@ def test_main_capsule_ends_with_the_grammar_and_a_lane_capsule_does_not(tmp_proj
     One line, last, for main only — a lane has its report line instead."""
     main_view = run_hippo(["status", "--inject"], cwd=tmp_project).stdout.splitlines()
     assert main_view[-1] == (
-        "· cli: task add|set|done|list · log outcome|review|review-status|dispatch "
+        "· cli: task add|set|note|done|list · log outcome|review|review-status|dispatch "
         "(subagent/Workflow runs: recorded, no call) · directive add|withdraw · prior "
-        "· dispatch [--batch] — /hippo:hippo has the flags")
+        "· dispatch [--batch] — flags: /hippo:hippo")
     assert len(main_view[-1]) <= 200
     lane = run_hippo(["status", "--inject"], cwd=tmp_project,
                      env={"HIPPO_DISPATCH": "dlane1"}).stdout

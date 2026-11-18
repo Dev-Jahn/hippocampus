@@ -1407,9 +1407,9 @@ def status_lines(hp, compacted=False, transcript=None):
         # one caveat: offered bare, main logged 8 of 8 Workflow runs by hand in mlx-vlm, split
         # one run into two ids and wrote model aliases that split PRIORS rows (2026-09-27).
         lines.append(
-            "· cli: task add|set|done|list · log outcome|review|review-status|dispatch "
+            "· cli: task add|set|note|done|list · log outcome|review|review-status|dispatch "
             "(subagent/Workflow runs: recorded, no call) · directive add|withdraw · prior "
-            "· dispatch [--batch] — /hippo:hippo has the flags"
+            "· dispatch [--batch] — flags: /hippo:hippo"
         )
         if compacted:
             # The summary lands in main's context before this capsule does (measured), so the
@@ -1574,7 +1574,7 @@ def precompact_lines(hp):
         "change this conversation made that hippo's lists below do not show yet, each written as "
         "the exact command that records it —",
         "  hippo task done <id> --note '…'   (a listed task that is finished)",
-        "  hippo task set <id> notes '…'   (a listed task that moved on; replaces its notes)",
+        "  hippo task note <id> '…'   (a listed task that moved on; appends, never replaces)",
         "  hippo directive withdraw <id>   (only if the user said so)",
         "  hippo directive add --id <id> --text '…'   (the user changed it)",
         "  edit <file>: '<old>' → '<new>'   (a memory or doc line that is now false)",

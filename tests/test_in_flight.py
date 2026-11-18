@@ -79,6 +79,11 @@ def test_a_lane_s_record_tells_running_from_ended(tmp_project, run_hippo):
     ago = lambda m: (now - timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
     for did in ("drun", "djudged", "dended", "dkilled", "dlost", "ddone", "dbare"):
         _launch(run_hippo, tmp_project, did, f"scope {did}")
+    # Judged before the lane records exist: `log outcome` refuses a verdict on a running lane,
+    # so a row judged while its lane runs is one an earlier version wrote.
+    for did in ("djudged", "ddone"):
+        assert run_hippo(["log", "outcome", "--ref", did, "--result", "accepted"],
+                         cwd=tmp_project).returncode == 0
     lanes = hp / "lanes"
     lanes.mkdir()
     gone = 2 ** 22 + 12345  # a pid no process has
@@ -93,9 +98,6 @@ def test_a_lane_s_record_tells_running_from_ended(tmp_project, run_hippo):
     }
     for did, rec in records.items():
         (lanes / f"{did}.json").write_text(json.dumps({"id": did, **rec}), encoding="utf-8")
-    for did in ("djudged", "ddone"):
-        assert run_hippo(["log", "outcome", "--ref", did, "--result", "accepted"],
-                         cwd=tmp_project).returncode == 0
     out = run_hippo(["status", "--inject"], cwd=tmp_project).stdout.splitlines()
     assert [ln for ln in out if ln.startswith("· in flight:")] == [
         "· in flight: scope drun (running 0h00m), scope djudged (running 0h00m · judged "
