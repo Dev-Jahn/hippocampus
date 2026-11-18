@@ -118,10 +118,18 @@ enforcement:      none
 
 In a directory with no `.hippo/`, every hook and every CLI command is a **completely silent no-op**
 (zero contamination of other projects) — except a write, whose caller expects a record: it says
-on stderr that nothing was recorded, to run it again from the project root (or with `HIPPO_DIR`),
-and `hippo init` only for a new project. The way back leads because the measured cause is a `cd`
+on stderr that nothing was recorded from `<cwd>`, to run it again from the project root (or with
+`HIPPO_DIR`), and `hippo init` only for a new project. The way back leads because the measured cause is a `cd`
 into another tree in the same shell call (2026-09-26: main's `task set` was lost that way), and
-an `init` offered first would make a stray project there.
+an `init` offered first would make a stray project there. Which `.hippo/` owns a directory is
+§3.3's walk: a copy inside a linked worktree never does, and `~/.hippo` owns only `~` itself.
+
+A project may commit `.hippo/` (to share one memory, or read it from another machine). Every
+linked worktree then carries a checked-out copy, which hippo never reads or writes (§3.3) — rows
+found in one were never in the ledger. What hippo regenerates or prunes on its own belongs in
+`.gitignore` then: `lanes/` (pruned after 7 days), `failures/`, `cursors.json`, `scribe.lock`,
+`task-flags.json`, `worker-writes.json` — measured (steno, 1.17.1): a tracked `lanes/` lost files
+to the prune.
 
 Every file hippo rewrites (tasks, worklog, PRIORS, cursors, task flags, worker writes, lane records) is replaced whole: written to a tmp file
 beside it, fsync'd, then renamed over it (`write_durable`). The ledger is only ever appended to.
@@ -320,15 +328,31 @@ optional `src` (`scribe|cli|wrapper|executor`).
 - `.hippo/` is `$HIPPO_DIR` when that names a directory — the dispatch wrapper plants it in every
   lane's environment, so a lane reports to the ledger that launched it wherever its cwd is
   (measured: 141 of 1,167 lane outcomes, 12%, were refused for a ref the lane's own walk had
-  never seen). Otherwise it is found by walking up from cwd. A `.git` *directory* is the ceiling (never adopt a
-  project from beyond a real repo root); a `.git` *file* — a linked worktree — is walked through,
-  so a lane calling hippo from its worktree resolves the project's real `.hippo/` (§9.1, wired
-  in 1.8.0). The hooks walk conservatively for ordinary sessions (a session opened *inside* a
-  worktree gets no capsule and no scribe) with two exceptions: under `HIPPO_DISPATCH` —
-  a dispatched lane — SessionStart walks through the worktree's `.git` file too, which is what
-  re-injects the capsule after the lane's own compaction (§3.4, 1.8.1); and SubagentStart
-  always does, because Claude Code isolates a subagent in `<project>/.claude/worktrees/agent-<id>`
-  (§3.4).
+  never seen). Otherwise it is found by walking up from cwd (`walk_hippo`; `hooks/lib.sh`
+  `project_root` is the same rule in shell, file reads only — it runs at every Stop and
+  SessionStart):
+  - A `.git` *directory* ends the walk (never adopt a project from beyond a real repo root).
+  - A `.git` *file* is a linked worktree's root, and a `.hippo/` at or below it is a
+    **checked-out copy, never the project's state**. Measured (steno, 1.17.1): the project
+    tracked `.hippo/` in git, the walk took each worktree's copy, and 8 of 38 lane worktrees held
+    scribe rows and worklog entries — in 2, the wrapper's own dispatch, usage and triage rows —
+    that the real ledger never saw; one copy blocked a lane's merge. The CLI continues in the
+    main worktree (the `.git` file's `gitdir` → its `commondir`, `<main>/.git`; no git process),
+    so a lane or worker calling hippo from any worktree — inside the repo or not — reaches the
+    project's real `.hippo/` (§9.1, wired in 1.8.0 as a walk through the `.git` file); a `.git`
+    file with no `commondir` (a submodule) continues upward to its superproject. `hippo init`
+    refuses a linked worktree: a `.hippo/` made there is a copy every walk skips.
+  - `$HOME` ends the walk unless it is where the walk started: `~/.hippo` is the project of a
+    session whose cwd is `~`, never of every directory below it. Measured: a session in a
+    sibling directory with no `.hippo/` had its scribe and CLI write to `~/.hippo` for six days,
+    and every command's result depended on its `cd`. Nothing above `$HOME` is adopted either.
+
+  The hooks walk conservatively for ordinary sessions (a session opened *inside* a worktree gets
+  no capsule and no scribe — it has no project, copy or not) with two exceptions that cross into
+  the main worktree as the CLI does: under `HIPPO_DISPATCH` — a dispatched lane — SessionStart,
+  which is what re-injects the capsule after the lane's own compaction (§3.4, 1.8.1); and
+  SubagentStart always, because Claude Code isolates a subagent in
+  `<project>/.claude/worktrees/agent-<id>` (§3.4), as SessionStart does for a compaction.
 - **Every subcommand has `-h/--help`, and errors attach the usage to stderr** (a direct fix for the
   largest source of friction in 0.x).
 - The surface — the block `skills/hippo/SKILL.md` carries and the README repeats, plus the one
@@ -1410,9 +1434,9 @@ absolute path that every lane start rewrites (best effort: lanes starting in one
 its tmp file, and a lost rename must not cost a lane its record) — the wrapper is the one
 process that knows where the plugin lives — and a project that never launched a lane pays one
 `sh` per tick and no python. The pointer is data that names code the command runs as the user,
-on every tick of any session with the plugin on, so the walk stops where `find_hippo` does (a
-`.git` directory, `$HOME`: an ancestor's `.hippo/` may be another user's — a world-writable
-`/tmp` is one), and it runs only an absolute `…/scripts/lane_status.py` the user owns, named by
+on every tick of any session with the plugin on, so the walk stops where `walk_hippo` does (a
+`.git` directory, `$HOME` — reached from below, before its own `.hippo/` is read: an ancestor's
+`.hippo/` may be another user's — a world-writable `/tmp` is one), and it runs only an absolute `…/scripts/lane_status.py` the user owns, named by
 a pointer the user owns. After a plugin update the pointer names a deleted cache path until the next lane
 start, and until then every row keeps its default. The plugin's value is a default: a user's
 own `subagentStatusLine` replaces it (and would have to render hippo:lane rows itself).
@@ -2276,11 +2300,14 @@ main still decides — but the memory is one memory.
 `.hippo/` is found by walking **up** from cwd (§3.3), and an editing lane's worktree is
 `{repo}/.claude/worktrees/<name>` — inside the repo. One thing did need wiring (found while
 building 1.8.0): the walk used to stop at the worktree's own `.git` *file*, exactly the boundary
-this section assumed it crossed. It now walks through a `.git` file and stops only at a `.git`
-directory — a real repo root. A lane whose worktree sits *outside* the repo never reaches it, so
+this section assumed it crossed. It now crosses a `.git` file and stops only at a `.git`
+directory — a real repo root. A lane whose worktree sits *outside* the repo never reached it, so
 the wrapper also plants `HIPPO_DIR` and every resolution — the CLI's and both hooks' — takes it
-before walking (1.14.0; 12% of lane outcomes had been refused for it). Everything else was
-policy, which is why it was worth writing down before building.
+before walking (1.14.0; 12% of lane outcomes had been refused for it). After 1.18.0 the crossing
+lands in the main worktree itself (its `.git` file's `commondir`), wherever the worktree sits,
+and a `.hippo/` checked out inside a worktree is skipped as a copy (§3.3) — a project that
+tracked `.hippo/` had forked its state into its lanes' worktrees. Everything else was policy,
+which is why it was worth writing down before building.
 
 ### 9.2 Observation and verdict, not read and write
 

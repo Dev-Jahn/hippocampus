@@ -91,8 +91,11 @@ def read_json(p):
 
 
 def lane_record(cwd, did):
-    """.hippo/lanes/<id>.json, walking up from the agent's cwd the way the CLI finds .hippo/ →
-    (record, its directory)."""
+    """.hippo/lanes/<id>.json, walking up from the agent's cwd to the first .hippo/ that holds
+    this lane's record → (record, its directory). Unlike the CLI's walk (§3.3) it needs no
+    ceiling and no worktree rule: the dispatch id names one launch, and only the ledger that
+    launched it holds a record by that name (a git-tracked copy holds one only if a commit took
+    it mid-run)."""
     for d in (cwd, *cwd.parents):
         lanes = d / ".hippo" / "lanes"
         p = lanes / f"{did}.json"

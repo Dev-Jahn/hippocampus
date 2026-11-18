@@ -95,7 +95,12 @@ Either way, in a project:
 hippo init
 ```
 
-That creates `.hippo/` and nothing else.
+That creates `.hippo/` and nothing else. Every command and hook finds it by walking up from the
+working directory to the repository root; a linked git worktree belongs to its main worktree's
+`.hippo/`, and `~/.hippo` serves only sessions started in `~` itself. If you commit `.hippo/`,
+each worktree carries a copy that hippo never reads, and the generated files belong in
+`.gitignore`: `lanes/`, `failures/`, `cursors.json`, `scribe.lock`, `task-flags.json`,
+`worker-writes.json`.
 
 ### The clerk backend
 
