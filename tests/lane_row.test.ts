@@ -103,7 +103,7 @@ test('until the lane can be drawn the row is the engine’s: no id, no .hippo/, 
   expect(await body($, w, {})).toMatch(/^codex · pass2 tensorize · /)
 })
 
-test('.hippo/ is looked for as find_hippo looks: a .git directory and $HOME stop the walk', async ($, on) => {
+test('.hippo/ is looked for as walk_hippo looks: a .git directory ends the walk, $HOME too unless it is the start', async ($, on) => {
   const files = { ...relayed, [`/s/.hippo/lanes/${DID}.json`]: lane() }
   const dirs = ['/s', '/s/.hippo', '/s/repo', '/s/repo/.git', '/s/repo/src', '/s/home', '/s/home/proj', '/s/plain']
   const env: Record<string, string> = { HOME: '/s/home' }
@@ -111,13 +111,41 @@ test('.hippo/ is looked for as find_hippo looks: a .git directory and $HOME stop
   expect(await body($, w, { cwd: '/s/repo/src' })).toBeUndefined()
   expect(await body($, w, { cwd: '/s/home/proj' })).toBeUndefined()
   expect(await body($, w, { cwd: '/s/plain' })).toMatch(/^codex · pass2 tensorize · /)
-  // A .git file (a linked worktree) is walked through; $HIPPO_DIR, when it is a directory, wins.
-  files['/s/repo/.git'] = 'gitdir: /x'
-  dirs.splice(dirs.indexOf('/s/repo/.git'), 1)
-  expect(await body($, w, { cwd: '/s/repo/src' })).toMatch(/^codex · pass2 tensorize · /)
+  // ~/.hippo is the project of a session whose cwd is home, never of every directory under it.
+  dirs.push('/s/home/.hippo')
+  files[`/s/home/.hippo/lanes/${DID}.json`] = lane({ scope: 'home lane' })
+  expect(await body($, w, { cwd: '/s/home' })).toMatch(/^codex · home lane · /)
+  expect(await body($, w, { cwd: '/s/home/proj' })).toBeUndefined()
+  // $HIPPO_DIR, when it is a directory, wins.
   env.HIPPO_DIR = '/elsewhere/.hippo'
   dirs.push('/elsewhere/.hippo')
   expect(await body($, w, { cwd: '/s/plain' })).toBeUndefined()
+})
+
+test('a .hippo/ in a linked worktree is a copy: the main worktree’s is the state', async ($, on) => {
+  const files: Record<string, string> = {
+    ...relayed,
+    [`/m/.hippo/lanes/${DID}.json`]: lane({ scope: 'the real lane' }),
+    [`/m/.claude/worktrees/w/.hippo/lanes/${DID}.json`]: lane({ scope: 'a checked-out copy' }),
+    '/m/.claude/worktrees/w/.git': 'gitdir: /m/.git/worktrees/w\n',
+    '/m/.git/worktrees/w/commondir': '../..\n',
+    '/away/wt/.git': 'gitdir: ../../m/.git/worktrees/away\n', // a relative gitdir, outside the repo
+    '/m/.git/worktrees/away/commondir': '../..\n',
+    '/s/sub/.git': 'gitdir: ../.git/modules/sub\n', // a submodule: no commondir
+    [`/s/sub/.hippo/lanes/${DID}.json`]: lane({ scope: 'submodule copy' }),
+    [`/s/.hippo/lanes/${DID}.json`]: lane({ scope: 'above the submodule' }),
+  }
+  const dirs = ['/m', '/m/.git', '/m/.hippo', '/m/.claude', '/m/.claude/worktrees', '/m/.claude/worktrees/w',
+    '/m/.claude/worktrees/w/.hippo', '/m/.claude/worktrees/w/src', '/away', '/away/wt', '/s', '/s/.hippo', '/s/sub',
+    '/s/sub/.hippo']
+  const w = machine(on, { files, dirs, live: [4242] })
+  expect(await body($, w, { cwd: '/m/.claude/worktrees/w/src' })).toMatch(/^codex · the real lane · /)
+  expect(await body($, w, { cwd: '/m/.claude/worktrees/w' })).toMatch(/^codex · the real lane · /)
+  expect(await body($, w, { cwd: '/away/wt' })).toMatch(/^codex · the real lane · /)
+  expect(await body($, w, { cwd: '/s/sub' })).toMatch(/^codex · above the submodule · /)
+  // A main worktree without .hippo/: the copy is still never the state.
+  dirs.splice(dirs.indexOf('/m/.hippo'), 1)
+  expect(await body($, w, { cwd: '/m/.claude/worktrees/w/src' })).toBeUndefined()
 })
 
 const BID = 'b' + '12'.repeat(16)

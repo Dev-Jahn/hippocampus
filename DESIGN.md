@@ -330,7 +330,8 @@ optional `src` (`scribe|cli|wrapper|executor`).
   (measured: 141 of 1,167 lane outcomes, 12%, were refused for a ref the lane's own walk had
   never seen). Otherwise it is found by walking up from cwd (`walk_hippo`; `hooks/lib.sh`
   `project_root` is the same rule in shell, file reads only — it runs at every Stop and
-  SessionStart):
+  SessionStart; `hooks/lane_row.ts` `walkHippo` is a third copy, in the lane-row mod, from the
+  row's cwd with `$.fs` reads — the three must agree):
   - A `.git` *directory* ends the walk (never adopt a project from beyond a real repo root).
   - A `.git` *file* is a linked worktree's root, and a `.hippo/` at or below it is a
     **checked-out copy, never the project's state**. Measured (steno, 1.17.1): the project
@@ -1428,9 +1429,11 @@ the hook's matcher takes `hippo:lane` rows only, so no other row enters the modu
 row it reads the agent's transcript — `subagents/agent-<id>.jsonl` beside the session's
 transcript (`$.session.info()`) — for the lane's dispatch id (the last `dispatch:<id>`,
 `batch:<id>` or `--watch <id>` in it — the prompt, which comes first, is main's text and may
-quote other ids), finds `.hippo/` from the row's `cwd` by `findHippoFrom` — a port of dev's
-`find_hippo` (`$HIPPO_DIR`, else walking up, stopping at a `.git` directory and at `$HOME`:
-an ancestor's `.hippo/` may be another user's, a world-writable `/tmp` is one) — reads
+quote other ids), finds `.hippo/` from the row's `cwd` by `findHippoFrom` — `$HIPPO_DIR`, else
+`walkHippo`, a port of the CLI's `walk_hippo` (§3.3: a `.git` directory ends the walk, a
+`.hippo/` in a linked worktree is a copy and the main worktree's is taken, `$HOME` ends the walk
+unless the row's cwd is home itself), which matters here because a relay's cwd can be a
+worktree — reads
 `lanes/<id>.json` and hands the engine the row's `body`: `codex · <scope> · <elapsed> · <cmds>
 cmds · <last event>`; an ended lane shows its status, rc and duration instead, and one whose
 wrapper is gone with no status shows `lost` — never a timer still counting. A batch id draws

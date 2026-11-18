@@ -111,22 +111,61 @@ async function realPath($: Engine, path: string): Promise<string> {
   return (await $.fs.stat(path, { resolve: true }).catch(() => undefined))?.realPath ?? path
 }
 
-/** `.hippo/` as dev's `find_hippo()` (cli/hippo_cli.py) finds it, from `cwd` in place of the
- * process's: `$HIPPO_DIR` when it names a directory; else the nearest ancestor holding one,
- * the walk stopping at a `.git` directory (a repository root; a `.git` file, a linked worktree,
- * is walked through) and at `$HOME`. Kept a port of that one function, by that name, so a change
- * to the CLI's rule changes this too. */
+const parentOf = (d: string) => d.slice(0, d.lastIndexOf('/')) || '/'
+
+/** `rel` against directory `base` (an absolute `rel` replaces it), `.` and `..` folded. */
+function joinPath(base: string, rel: string): string {
+  const parts: string[] = []
+  for (const p of (rel.startsWith('/') ? rel : `${base}/${rel}`).split('/')) {
+    if (p === '..') parts.pop()
+    else if (p && p !== '.') parts.push(p)
+  }
+  return `/${parts.join('/')}`
+}
+
+/** `.hippo/` as the CLI's `find_hippo()` finds it, from `cwd` in place of the process's:
+ * `$HIPPO_DIR` when it names a directory, else `walkHippo` from the resolved `cwd`. */
 export async function findHippoFrom($: Engine, cwd: string): Promise<string | undefined> {
   const env = await $.env.get('HIPPO_DIR')
   if (env && (await isDir($, env))) return env
   const home = await $.env.get('HOME')
-  const ceiling = home ? await realPath($, home) : undefined
-  for (let d = await realPath($, cwd); ; ) {
-    if (await isDir($, `${d}/.hippo`)) return `${d}/.hippo`
-    if ((await isDir($, `${d}/.git`)) || d === ceiling) return undefined
-    const up = d.slice(0, d.lastIndexOf('/')) || '/'
-    if (up === d) return undefined
-    d = up
+  return walkHippo($, await realPath($, cwd), home ? await realPath($, home) : undefined)
+}
+
+/** A port of cli/hippo_cli.py `walk_hippo` — the rule DESIGN §3.3 states and hooks/lib.sh
+ * `project_root` also implements; the three must agree. A `.git` directory ends the walk; a
+ * `.hippo/` at or below a `.git` file (a linked worktree) is a checked-out copy, never the state,
+ * so the walk continues in the main worktree (a submodule's `.git` file, with no commondir,
+ * continues upward); `$HOME` ends the walk unless it is `start` itself. */
+async function walkHippo($: Engine, start: string, home: string | undefined): Promise<string | undefined> {
+  let found: string | undefined
+  for (let d = start; ; d = parentOf(d)) {
+    if (d === home && d !== start) return found
+    if (found === undefined && (await isDir($, `${d}/.hippo`))) found = `${d}/.hippo`
+    const git = await $.fs.stat(`${d}/.git`).catch(() => undefined)
+    if (git?.kind === 'dir') return found
+    if (git) {
+      const main = await mainWorktree($, d)
+      if (main !== undefined) return (await isDir($, `${main}/.hippo`)) ? `${main}/.hippo` : undefined
+      found = undefined
+    }
+    if (d === home || parentOf(d) === d) return found
+  }
+}
+
+/** A port of `main_worktree`: the main worktree of the linked worktree rooted at `wt` (its
+ * `.git` file → gitdir → commondir, which is `<main>/.git`), read from disk with no git spawn;
+ * undefined for a submodule (no commondir) or a bare repository. */
+async function mainWorktree($: Engine, wt: string): Promise<string | undefined> {
+  try {
+    const line = (await $.fs.read(`${wt}/.git`)).split('\n')[0] ?? ''
+    if (!line.startsWith('gitdir:')) return undefined
+    const gitdir = joinPath(wt, line.slice('gitdir:'.length).trim())
+    const rel = (await $.fs.read(`${gitdir}/commondir`)).trim()
+    const common = await realPath($, joinPath(gitdir, rel))
+    return common.endsWith('/.git') ? parentOf(common) : undefined
+  } catch {
+    return undefined // unreadable, or no commondir: a submodule
   }
 }
 
