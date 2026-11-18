@@ -53,7 +53,9 @@ events: only the four kinds below are allowed, with exactly these field names.
    **Never record a `codex` launch.** `hippo dispatch` writes those itself, from the argv it was
    given, at the moment it ran — you would only be restating it from a paraphrase. If a codex run
    in the digest has no record, that gap is the honest record of a launch that bypassed the
-   wrapper; do not fill it. The writer rejects a codex dispatch from you.
+   wrapper; do not fill it. The writer rejects a codex dispatch from you. A `hippo:lane` Agent
+   call (in a Workflow script too) is one of these: a relay whose prompt is a `hippo dispatch`
+   command — never a `claude` session, whatever model the command names.
 
    `# dispatches already recorded` is there so that your **outcomes** can name a real id (rule 2),
    not so that you can check for duplicates.

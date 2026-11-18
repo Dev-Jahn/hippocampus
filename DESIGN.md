@@ -972,7 +972,14 @@ an agent's own (PreCompact, below).
 6b. **Seven extra rules, on the clerk's output only.** A scribe `usage` is rejected — the
    wrapper observed the cost and was there when the lane ran. A scribe `dispatch` is rejected when its
    executor is `codex`, or when either closed slot of `exec` is outside its vocabulary
-   (`codex|claude|fork|subagent|workflow` / `low|medium|high|xhigh|max|ultra|inherit`). A scribe
+   (`codex|claude|fork|subagent|workflow` / `low|medium|high|xhigh|max|ultra|inherit`), or
+   when it pairs `claude` with a `gpt-*` model — a pair that cannot exist (1.18.0). Measured
+   (steno, 1.17.1): 17 `claude/gpt-6.1-sol/high` rows under coined ids, each the clerk's reading
+   of a `hippo:lane` relay. 3c skips a relay (NATIVE_SKIP) and the restatement rule below covers
+   only `fork|subagent|workflow`, so `claude` — the one executor left for an unlisted launch —
+   let them through; the cause was the digest, which showed the relay as a plain Agent call
+   whose prompt named a gpt model. It now labels a `hippo:lane` call as the codex lane its
+   wrapper records, and rule 1 of the prompt says so. A scribe
    `outcome` is rejected when its `ref` already has a different verdict (an agreeing one is a
    restatement, step 6): "at most one outcome per
    dispatch" was in the prompt and the roster marked the judged ids, and the clerk re-judged

@@ -1750,6 +1750,12 @@ def validate_scribe_event(e):
     if effort not in EFFORTS:
         return (f"ev=dispatch: effort must be one of {'|'.join(sorted(EFFORTS))}: {effort!r} "
                 "(use `inherit` when the executor takes its setting from its parent)")
+    # A pair that cannot exist. Measured (steno, 1.17.1): 17 `claude/gpt-6.1-sol/high` rows under
+    # coined ids — the clerk's reading of `hippo:lane` relays, whose prompt names the codex
+    # lane's model. A Claude Code session runs a Claude model; a gpt model is a codex lane.
+    if executor == "claude" and parts[1].lower().startswith("gpt-"):
+        return (f"ev=dispatch: a claude executor does not run {parts[1]!r} — a gpt model is a "
+                "codex lane, which `hippo dispatch` records (a hippo:lane agent is its relay)")
     return None
 
 

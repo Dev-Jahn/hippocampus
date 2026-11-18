@@ -178,6 +178,12 @@ def fmt_whole_tool(name, inp):
         d = inp.get("description", "")
         return f"Bash{bg}: {one_line(inp.get('command', ''))}" + (f"  // {d}" if d else "")
     if name in ("Task", "Agent"):
+        if inp.get("subagent_type") == "hippo:lane":
+            # A relay, not a delegation: its prompt is a `hippo dispatch` command whose wrapper
+            # records the codex lane. Shown as a plain Agent call, a clerk recorded 17 of them
+            # as `claude/gpt-6.1-sol/high` under coined ids (steno, 1.17.1).
+            return (f"{name}: [hippo:lane relay — a codex lane `hippo dispatch` records itself] "
+                    f"{inp.get('description', '')} :: {one_line(inp.get('prompt', ''))}")
         return (
             f"{name}: [{inp.get('subagent_type', '')}|{inp.get('model', '')}] "
             f"{inp.get('description', '')} :: {one_line(inp.get('prompt', ''))}"

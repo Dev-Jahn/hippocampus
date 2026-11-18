@@ -162,6 +162,19 @@ def test_a_restatement_is_dropped_and_counted_not_dumped(tmp_project, run_hippo,
     assert meter["dropped"] == 2 and meter["ok"] is True
 
 
+def test_a_claude_session_on_a_gpt_model_is_refused(tmp_project, run_hippo, fake_transcript,
+                                                    tmp_path):
+    """A pair that cannot exist: the clerk's reading of a hippo:lane relay, 17 rows under coined
+    ids on steno (1.17.1). A Claude model under `claude` still lands."""
+    mock = _scribe_output(tmp_path, "relay", [_dispatch("claude/gpt-6.1-sol/high", "v18core"),
+                                              _dispatch("claude/claude-opus-5-5/high", "peer")])
+    proc = _run_scribe(run_hippo, tmp_project, mock)
+    assert proc.returncode == 0, proc.stderr
+    assert [e["id"] for e in read_ledger(tmp_project) if e.get("ev") == "dispatch"] == ["peer"]
+    dumps = "".join(p.read_text() for p in (tmp_project / ".hippo" / "failures").glob("*"))
+    assert "a claude executor does not run 'gpt-6.1-sol'" in dumps
+
+
 def test_one_verdict_per_dispatch_holds_within_a_batch(tmp_project, run_hippo, fake_transcript,
                                                        tmp_path):
     """Two verdicts for one ref in a single clerk reply: the first lands, the second is the
