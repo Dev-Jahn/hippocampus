@@ -690,3 +690,31 @@ def test_the_capsule_after_a_compaction_points_at_the_deltas(tmp_project, repo_r
 
     assert "## hippo deltas" in capsule("compact").splitlines()[-1]
     assert "hippo deltas" not in capsule("startup")
+
+
+def test_after_a_compaction_main_gets_the_latest_worklog_with_times(tmp_project, repo_root):
+    """The summary can be older than the compaction (measured: 46–130 minutes for precomputed
+    ones, ~55 for idle ones) and state finished work as unfinished; the worklog is the fresher
+    record. After a compaction main's capsule carries its last four entries, each dated, across a
+    day boundary, with the time now; the `compact:` line says they and hippo's lists win and
+    deltas they overtook are skipped. Elsewhere `last:` stays one dated line."""
+    (tmp_project / ".hippo" / "worklog.md").write_text(
+        "## 2026-11-17\n\n- 22:10 first\n- 23:40 second\n  - a nested bullet\n\n"
+        "## 2026-11-18\n\n- 00:05 third\n- 00:20 fourth\n- 00:31 " + "x" * 400 + "\n",
+        encoding="utf-8")
+
+    def capsule(source):
+        payload = {"cwd": str(tmp_project), "hook_event_name": "SessionStart", "source": source}
+        proc = _run_hook(repo_root / "hooks" / "session_start.sh", payload, cwd=tmp_project)
+        assert proc.returncode == 0, proc.stderr
+        return _capsule(proc).splitlines()
+
+    lines = capsule("compact")
+    i = next(i for i, ln in enumerate(lines) if ln.startswith("· last, from the worklog (now "))
+    assert lines[i + 1:i + 5] == ["  - 11-17 23:40 second", "  - 11-18 00:05 third",
+                                  "  - 11-18 00:20 fourth", "  - 11-18 00:31 " + "x" * 149 + "…"]
+    assert not lines[i + 5].startswith("  - ")
+    assert "`last` lines or hippo's lists, they win" in lines[-1]
+    assert "skip any hippo already shows" in lines[-1]
+    assert [ln for ln in capsule("startup") if "last" in ln] == [
+        "· last: 11-18 00:31 " + "x" * 119 + "…"]

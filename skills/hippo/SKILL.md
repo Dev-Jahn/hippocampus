@@ -60,8 +60,10 @@ hippo dispatch --watch <dispatch-id|batch-id> [--for SECONDS]
 - The scribe, at every Stop: turns the transcript into ledger events and a worklog line, records
   each Claude Code subagent and Workflow run with its cost, and regenerates PRIORS when it is a
   week old and five new verdicts have landed.
-- The capsule, at start and after each compaction: tasks, live directives, in flight (after one,
-  your runs still out and the summary's `## hippo deltas` to check and run). Claude Code
+- The capsule, at start and after each compaction: tasks, live directives, in flight, lanes ended
+  awaiting your verdict (after a compaction also your runs still out, the latest worklog lines
+  with their times — newer than the summary where they disagree — and the summary's
+  `## hippo deltas` to check and run). Claude Code
   subagents get executor directives and are told hippo writes are yours; `worker wrote:` lists
   theirs until you confirm or undo.
 - The judge, only when `TYPESAFE_API_KEY` is set: gate hints for the scribe, notes on directives,

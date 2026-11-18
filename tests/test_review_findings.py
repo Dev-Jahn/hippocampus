@@ -979,4 +979,4 @@ def test_m11_inject_last_ignores_nested_and_free_bullets(tmp_project, run_hippo)
     proc = run_hippo(["status", "--inject"], cwd=tmp_project)
     assert proc.returncode == 0, proc.stderr
     last = [ln for ln in proc.stdout.splitlines() if ln.startswith("· last:")]
-    assert last == ["· last: the real last entry"], proc.stdout
+    assert last == ["· last: 07-31 10:00 the real last entry"], proc.stdout

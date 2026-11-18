@@ -414,9 +414,10 @@ an agent's own (PreCompact, below).
   file (§3.3), so a dispatched lane whose host fires hooks gets the same treatment — its
   audience slice plus the `report:` line, at start and after every compaction. The lane-side
   gap this closes is the same measured loss, unhandled: a long lane compacts and its brief's
-  constraints evaporate. On source=compact main's capsule ends with the `compact:` line (§6),
-  which points at the summary's `## hippo deltas` (PreCompact, below), and its in-flight line
-  names main's native runs still out (§6). An agent's own compaction fires this hook as main's
+  constraints evaporate. On source=compact main's capsule carries the worklog's last four
+  entries with their times and the time now, and ends with the `compact:` line (§6), which says
+  those and hippo's lists win over the summary and points at its `## hippo deltas` (PreCompact,
+  below) as proposals; its in-flight line names main's native runs still out (§6). An agent's own compaction fires this hook as main's
   too; it gets the SubagentStart slice instead (below). An `isolation: "worktree"` agent's
   compaction carries the agent's worktree as `cwd`, past the `.git` file the walk stops at —
   measured live (2.1.282, sonnet, 2026-09-26): all 3 SessionStart(compact) of such an agent
@@ -1955,16 +1956,32 @@ describes "no" confuses it), state pre-filtered by code, and every threshold eva
 · live(23d): keep review replies in context, never save them to a file
 · live: use GPUs 0 and 1 only
 · in flight: NVFP4 factor-rebasing 6-part (0h42m), r2 UNCERTAIN 4건 (0h12m)
-· last: merged the v2 Pareto duo, full gate green (1421)
+· last: 07-31 14:05 merged the v2 Pareto duo, full gate green (1421)
 · cli: task add|set|done|list · log outcome|review|review-status|dispatch (subagent/Workflow runs: recorded, no call) · directive add|withdraw · prior · dispatch [--batch] — /hippo:hippo has the flags
 ```
 
-After a compaction (SessionStart source=compact) main's capsule closes on one more line —
-``· compact: if the summary above has a `## hippo deltas` section, run those commands first — they
-are proposals; skip any that are wrong`` — because the summary lands in main's context before the
-capsule does (measured), and PreCompact asked it for those commands (§3.4). "Has", not "ends
-with": the host appends its own paragraphs after the summary. The condition is there for Codex,
-which fires SessionStart(compact) but gets no PreCompact. A native subagent gets none of this
+`last:` is the worklog's latest entry with its date and time (12 chars): a resumed session's
+`last:` can be days old, and nothing else on the line said so.
+
+After a compaction (SessionStart source=compact) main's capsule carries, in place of `last:`, the
+worklog's last four entries, each dated and cut at 150 chars, under `· last, from the worklog
+(now 07-31 14:20):`, and closes on one more line —
+``· compact: the summary above may be older than this capsule — where it disagrees with the `last`
+lines or hippo's lists, they win: they are the current record. A `## hippo deltas` section in it
+holds proposals from when it was written: skip any hippo already shows or a `last` line has
+overtaken, and any that are wrong; run the rest`` — because the summary lands in main's context
+before the capsule does (measured), and PreCompact asked it for those commands (§3.4). The summary
+is not as new as the compaction: measured (1.17.1, 169 compactions of one main session), 4
+precomputed summaries were 46–130 minutes old at the boundary and 99 written while main sat idle
+~55 minutes; summaries stated things like "the report was not sent" when it had been, and main
+repeated finished actions on them (at least 8 hand corrections). The scribe's worklog was a median
+4 minutes behind at compaction — the fresher record, and its times and the time now let main
+order it against the summary. The deltas are as old as the summary: 216 of 303 delta commands
+(71%) targeted an id main had already written in the 24h before, and 166 were written again —
+hence "proposals", skipped where already recorded or overtaken, instead of "run those first". The
+four entries cost under 700 chars. "Has", not "ends with": the host appends its own paragraphs
+after the summary. The section is conditional for Codex, which fires SessionStart(compact) but
+gets no PreCompact. A lane's capsule keeps the one `last:` line. A native subagent gets none of this
 block: SubagentStart hands it the `[hippo] directives N live — this project's recorded rules`
 header and its executor-audience directive lines, then the line that hippo's task, directive
 and outcome writes are main's unless its brief asks for one, nothing else, and so does the

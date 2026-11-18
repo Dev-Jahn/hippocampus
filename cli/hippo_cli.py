@@ -1279,16 +1279,14 @@ def status_lines(hp, compacted=False, transcript=None):
     ended = lanes_ended(hp) if reader == "main" else None  # a verdict is main's to give
     if ended:
         lines.append(ended)
-    p = hp / "worklog.md"
-    if p.exists():
-        # Within the latest date section, only look at the "- HH:MM …" entries the scribe wrote.
-        # (Nested bullets or free-form human bullets must not be picked up as `last`.)
-        wl = p.read_text(encoding="utf-8").splitlines()
-        starts = [i for i, ln in enumerate(wl) if ln.startswith("## ")]
-        section = wl[starts[-1] + 1 :] if starts else wl
-        entries = [m.group(2).strip() for m in map(WORKLOG_ENTRY.match, section) if m]
-        if entries:
-            lines.append(f"· last: {one_line(entries[-1], 120)}")
+    recent = compacted and reader == "main"
+    entries = worklog_latest(hp, WORKLOG_AFTER_COMPACT if recent else 1)
+    if recent and entries:
+        lines.append(f"· last, from the worklog (now {datetime.now().strftime('%m-%d %H:%M')}):")
+        lines += [f"  - {at} {one_line(text, WORKLOG_AFTER_COMPACT_CHARS)}" for at, text in entries]
+    elif entries:
+        at, text = entries[-1]
+        lines.append(f"· last: {at} {one_line(text, 120)}")
     if reader == "executor":
         # The lane's whole operating contract, generated where the lane actually reads
         # (principle 5): briefs no longer hand-copy any of it, and it survives the lane's own
@@ -1343,12 +1341,51 @@ def status_lines(hp, compacted=False, transcript=None):
             # The summary lands in main's context before this capsule does (measured), so the
             # pointer reads "above". "Has", not "ends with": the host appends its own paragraphs
             # after the summary (measured). Worded as a condition because Codex fires
-            # SessionStart(compact) too but gets no PreCompact, so its summary has no such section.
+            # SessionStart(compact) too but gets no PreCompact, so its summary has no such
+            # section. The summary can be older than the compaction and the deltas are as old
+            # as it is, so the worklog lines and hippo's lists win where they disagree
+            # (worklog_latest): measured (1.17.1), 216 of 303 delta commands targeted an id main
+            # had written in the 24h before, and 166 were written again.
             lines.append(
-                "· compact: if the summary above has a `## hippo deltas` section, run those "
-                "commands first — they are proposals; skip any that are wrong"
+                "· compact: the summary above may be older than this capsule — where it "
+                "disagrees with the `last` lines or hippo's lists, they win: they are the current "
+                "record. A `## hippo deltas` section in it holds proposals from when it was "
+                "written: skip any hippo already shows or a `last` line has overtaken, and any "
+                "that are wrong; run the rest"
             )
     return lines
+
+
+WORKLOG_AFTER_COMPACT = 4  # worklog entries main's capsule carries after a compaction
+WORKLOG_AFTER_COMPACT_CHARS = 150  # per entry: four of them stay under 700 chars
+
+
+def worklog_latest(hp, n):
+    """The last `n` entries the scribe wrote to worklog.md → [("MM-DD HH:MM", text)], oldest
+    first. Only `- HH:MM …` lines count, each dated by the `## YYYY-MM-DD` section above it:
+    a nested or free-form human bullet is not an entry (it must not read as `last`).
+
+    Every entry carries its date and time, `last:` included (12 chars): a resumed session's
+    `last:` can be days old, and nothing else on the line says so. After a compaction main's
+    capsule carries the last WORKLOG_AFTER_COMPACT, with the time now, because the summary
+    above it can be older than the compaction and state finished work as unfinished: measured
+    (1.17.1, 169 compactions of one main session), 4 precomputed summaries were 46–130 minutes
+    old at the boundary and 99 idle-time ones ~55 minutes; summaries stated things like "the
+    report was not sent" when it had been, and main repeated finished actions on them (at
+    least 8 hand corrections).
+    The worklog was a median 4 minutes behind at compaction — the fresher record, ordered by
+    its times against the summary."""
+    p = hp / "worklog.md"
+    if not p.exists():
+        return []
+    out, day = collections.deque(maxlen=n), ""
+    for ln in p.read_text(encoding="utf-8").splitlines():
+        if ln.startswith("## "):
+            m = re.match(r"## \d{4}-(\d\d-\d\d)\b", ln)
+            day = m.group(1) if m else ""
+        elif m := WORKLOG_ENTRY.match(ln):
+            out.append((f"{day} {m.group(1)}".strip(), m.group(2).strip()))
+    return list(out)
 
 
 WORKER_RULE = ("· hippo task, directive and outcome writes are main's — run one only when your "
