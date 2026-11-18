@@ -234,32 +234,79 @@ def die(msg, code=1):
 
 
 def find_hippo():
-    """$HIPPO_DIR when it names a directory; otherwise walk up from cwd looking for .hippo/ (the
-    git root and $HOME are the ceiling).
+    """$HIPPO_DIR when it names a directory; otherwise the project that owns cwd (walk_hippo).
 
     HIPPO_DIR is planted by the dispatch wrapper into a lane's environment so a lane reports to
     the ledger that launched it, wherever its cwd is — measured, 12% of lane outcomes (141 of
-    1,167) were refused for a ref the lane's own `.hippo/` had never seen.
-
-    A `.git` *directory* is a real repository root: stop there, never adopt a project from
-    beyond it. A `.git` *file* marks a linked worktree, and by convention lanes live inside
-    the repo (`.claude/worktrees/<name>`) — walk through it, so an executor calling hippo
-    from its worktree resolves the project's real .hippo/ (§9.1)."""
+    1,167) were refused for a ref the lane's own `.hippo/` had never seen."""
     env = os.environ.get("HIPPO_DIR")
     if env and Path(env).is_dir():
         return Path(env)
-    d = Path.cwd().resolve()
+    return walk_hippo(Path.cwd().resolve())
+
+
+def walk_hippo(start):
+    """The .hippo/ that owns `start`, walking up — or None. hooks/lib.sh `project_root` is the
+    same rule in shell (§3.3); the two must agree.
+
+    - A `.git` *directory* is a repository's root: the walk ends there, never adopting a project
+      from beyond it.
+    - A `.git` *file* is a linked worktree's root (or a submodule's). A `.hippo/` found at or
+      below it is a checked-out copy, never the project's state — measured (steno, 1.17.1): the
+      project tracked `.hippo/` in git, every lane worktree got a copy, and 8 of 38 held scribe
+      rows, worklog entries and even the wrapper's dispatch and usage rows the real ledger never
+      saw. The walk continues in the main worktree (gitdir → commondir, read from disk, no git
+      spawn), so a lane's or worker's hippo call reaches the project's real .hippo/ wherever the
+      worktree sits (§9.1); a `.git` file with no commondir (a submodule) continues upward.
+    - `$HOME` ends the walk unless it is `start` itself: ~/.hippo belongs to a session whose
+      cwd is home, never to every directory under it — measured, a session in a sibling
+      directory with no .hippo/ wrote its scribe rows and CLI writes to ~/.hippo for six days.
+      Nothing above home is adopted either: an ancestor's .hippo/ may be another user's."""
     try:
         home = Path.home().resolve()
     except (RuntimeError, OSError):
         home = None
-    for p in [d, *d.parents]:
-        if (p / ".hippo").is_dir():
-            return p / ".hippo"
+    found, d = None, start
+    while True:
+        if d == home and d != start:
+            return found
+        if found is None and (d / ".hippo").is_dir():
+            found = d / ".hippo"
+        git = d / ".git"
+        if git.is_dir():
+            return found
+        if git.exists():
+            main = main_worktree(d)
+            if main is not None:
+                return main / ".hippo" if (main / ".hippo").is_dir() else None
+            found = None
+        if d == home or d.parent == d:
+            return found
+        d = d.parent
+
+
+def main_worktree(wt):
+    """The main worktree of the linked worktree rooted at `wt` (its `.git` file → gitdir →
+    commondir, which is `<main>/.git`), or None: a submodule's gitdir has no commondir, and a
+    bare repository has no main worktree."""
+    try:
+        line = (wt / ".git").read_text(encoding="utf-8").splitlines()[0]
+        if not line.startswith("gitdir:"):
+            return None
+        gitdir = wt / line[len("gitdir:"):].strip()  # an absolute gitdir replaces wt
+        common = (gitdir / (gitdir / "commondir").read_text(encoding="utf-8").strip()).resolve()
+    except (OSError, IndexError, UnicodeDecodeError):
+        return None
+    return common.parent if common.name == ".git" else None
+
+
+def linked_worktree_main(start):
+    """The main worktree when `start` lies inside a linked worktree, else None."""
+    for p in [start, *start.parents]:
         if (p / ".git").is_dir():
-            break
-        if p == home:  # never go above $HOME — we could adopt someone else's project
-            break
+            return None
+        if (p / ".git").exists():
+            return main_worktree(p)
     return None
 
 
@@ -749,6 +796,12 @@ def extract_json(text):
 
 
 def cmd_init(_args):
+    """A linked worktree is refused: a .hippo/ there is a copy every walk skips (walk_hippo),
+    so `created` would be a success that records nothing."""
+    main = linked_worktree_main(Path.cwd().resolve())
+    if main is not None:
+        die(f"hippo init: this is a linked git worktree of {main} — its project's .hippo/ "
+            f"belongs there (run `hippo init` in {main})")
     hp = Path.cwd() / ".hippo"
     if hp.is_dir():
         print(f"already exists: {hp}")
@@ -8342,14 +8395,16 @@ def main():
         if hp is None:
             # Reads stay completely silent outside a project (§3.1). A *write* does not: the
             # caller typed it expecting a record, and silence reads as success. (Worktrees are
-            # no longer the usual cause — find_hippo walks through their .git file, §9.1.) A `cd`
-            # into another tree in the same shell call is (measured, 2026-09-26: main's `task
+            # no longer the usual cause — walk_hippo continues in their main worktree, §9.1.) A
+            # `cd` into another tree in the same shell call is (measured, 2026-09-26: main's `task
             # set` after one was lost), so the way back leads: `init` first makes a stray one.
+            # The cwd is named: a session outside any project once wrote to ~/.hippo for six
+            # days without anyone seeing which directory it resolved from.
             if getattr(args, "writes", False):
                 print(
-                    "hippo: no .hippo/ found from here — nothing was recorded. Run it again from "
-                    "the project root (or with HIPPO_DIR=<root>/.hippo); `hippo init` only for a "
-                    "new project.",
+                    f"hippo: no .hippo/ found from {Path.cwd()} — nothing was recorded. Run it "
+                    "again from the project root (or with HIPPO_DIR=<root>/.hippo); `hippo init` "
+                    "only for a new project.",
                     file=sys.stderr,
                 )
             sys.exit(0)

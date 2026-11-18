@@ -5,8 +5,10 @@ default outcome ref; audience decides which directives reach which reader. The i
 test everywhere: a self-report is a claim, never a verdict."""
 
 import json
+import os
+import shutil
 
-from conftest import read_ledger
+from conftest import read_ledger, tracked_hippo_worktrees
 
 
 def _launch(run_hippo, cwd, did="dlane1"):
@@ -236,6 +238,50 @@ def test_a_write_outside_every_project_points_back_before_init(uninitialized_dir
     assert "nothing was recorded" in err
     assert err.index("project root") < err.index("HIPPO_DIR") < err.index("hippo init")
     assert not (uninitialized_dir / ".hippo").exists()
+
+
+def test_a_tracked_hippo_copy_in_a_worktree_is_never_the_project(tmp_project, run_hippo,
+                                                                 tmp_path):
+    """A project that tracks .hippo/ gives every worktree a copy; the walk skipped none of them
+    and 8 of 38 worktrees held rows the real ledger never saw (measured, 1.17.1). From either
+    worktree — inside the repo or outside it — a write and the wrapper's own rows reach the main
+    worktree's ledger, and init refuses to make a copy look like a project."""
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    (stub / "codex").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (stub / "codex").chmod(0o755)
+    for n, wt in enumerate(tracked_hippo_worktrees(tmp_project)):
+        did = f"dwtcopy{n}"
+        proc = run_hippo(["log", "dispatch", "--id", did, "--kind", "impl",
+                          "--exec", "codex/sol/high", "--scope", "x"], cwd=wt)
+        assert proc.returncode == 0, proc.stderr
+        proc = run_hippo(["dispatch", "--kind", "impl", "--scope", f"wrapper {n}", "--", "-m",
+                          "x"], cwd=wt, env={"PATH": f"{stub}:{os.environ['PATH']}"})
+        assert proc.returncode == 0, proc.stderr
+        rows = read_ledger(tmp_project)
+        assert any(e.get("id") == did for e in rows)
+        assert any(e.get("scope") == f"wrapper {n}" and e["ev"] == "dispatch" for e in rows)
+        assert (wt / ".hippo" / "ledger.jsonl").read_text(encoding="utf-8") == ""
+        shutil.rmtree(wt / ".hippo")
+        init = run_hippo(["init"], cwd=wt)
+        assert init.returncode != 0 and "linked git worktree" in init.stderr
+        assert not (wt / ".hippo").exists()
+
+
+def test_home_is_a_project_only_for_a_session_in_home_itself(tmp_path, run_hippo):
+    """Measured: a session in a sibling directory with no .hippo/ wrote to ~/.hippo for six days.
+    Below home the walk stops before it, and the refused write names where it looked from."""
+    home = tmp_path / "home"
+    (home / "sibling").mkdir(parents=True)
+    assert run_hippo(["init"], cwd=home, env={"HOME": str(home)}).returncode == 0
+    away = run_hippo(["task", "add", "feat/away", "--title", "x"], cwd=home / "sibling",
+                     env={"HOME": str(home)})
+    assert "nothing was recorded" in away.stderr and str(home / "sibling") in away.stderr
+    there = run_hippo(["task", "add", "feat/home", "--title", "x"], cwd=home,
+                      env={"HOME": str(home)})
+    assert there.returncode == 0, there.stderr
+    tasks = (home / ".hippo" / "tasks.yaml").read_text(encoding="utf-8")
+    assert "feat/home" in tasks and "feat/away" not in tasks
 
 
 # --------------------------------------------------------------------------

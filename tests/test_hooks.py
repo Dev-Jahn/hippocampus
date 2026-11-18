@@ -19,7 +19,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from conftest import REPO_ROOT
+from conftest import REPO_ROOT, tracked_hippo_worktrees
 
 
 def _run_hook(script_path, payload: dict, cwd, env=None, timeout=10):
@@ -282,6 +282,32 @@ def test_a_worktree_isolated_subagent_gets_the_directives_too(tmp_project, repo_
     assert proc.returncode == 0, proc.stderr
     lines = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"].splitlines()
     assert lines == SLICE
+
+
+def test_a_tracked_hippo_copy_in_a_worktree_is_never_the_project(tmp_project, repo_root,
+                                                                 run_hippo, tmp_path):
+    """The hooks' walk is the CLI's (§3.3): a worktree's checked-out .hippo/ is skipped. A main
+    session started in the worktree gets nothing — no capsule from the copy, so no scribe either
+    (Stop runs the same walk) — and a worktree agent gets the directives recorded after the copy
+    was made, which only the main worktree's .hippo/ holds. Above a project, $HOME is not one."""
+    inside, outside = tracked_hippo_worktrees(tmp_project)
+    _directives(tmp_project, run_hippo)
+    for wt in (inside, outside):
+        start = {"cwd": str(wt), "hook_event_name": "SessionStart", "source": "startup"}
+        proc = _run_hook(repo_root / "hooks" / "session_start.sh", start, cwd=wt)
+        assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), wt
+        proc = _subagent(wt, repo_root)
+        assert proc.returncode == 0, proc.stderr
+        lines = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"].splitlines()
+        assert lines == SLICE, wt
+
+    home = tmp_path / "home"
+    (home / "sibling").mkdir(parents=True)
+    (home / ".hippo").mkdir()
+    start = {"cwd": str(home / "sibling"), "hook_event_name": "SessionStart", "source": "startup"}
+    proc = _run_hook(repo_root / "hooks" / "session_start.sh", start, cwd=home / "sibling",
+                     env={"HOME": str(home)})
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
 
 
 def test_a_subagent_hook_is_silent_for_forks_lanes_and_outside_a_project(
