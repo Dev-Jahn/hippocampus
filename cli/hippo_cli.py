@@ -1472,13 +1472,40 @@ def cmd_task_done(args):
         die(f"no such task id: {args.id}")
     t["status"] = "done"
     if args.note:
-        t.setdefault("notes", [])
-        if not isinstance(t["notes"], list):
-            t["notes"] = [t["notes"]]
-        t["notes"].append(args.note)
+        note_append(t, args.note)
     t["updated"] = now_iso()
     tasks_save(args.hp, data)
     print(f"done {args.id}")
+
+
+def note_append(t, text):
+    """Append one note to task `t` as `<YYYY-MM-DDTHH:MMZ> <text>`: notes is a list of strings,
+    oldest first, the latest last. A hand-edited scalar becomes the list's first item."""
+    notes = t.get("notes")
+    notes = [] if notes is None else notes if isinstance(notes, list) else [notes]
+    notes.append(f"{now_iso()[:16]}Z {text}")
+    t["notes"] = notes
+
+
+def cmd_task_note(args):
+    """`task note <id> <text>`: one timestamped note appended, nothing replaced (`task set …
+    notes` stays the replace).
+
+    Measured (steno, 13 days on 1.17.1): 524 `task set <id> notes` calls, 225 of them over
+    1,500 chars — the whole notes re-sent to add a line — notes up to 13 KB, one overwrite that
+    lost notes, and 61 scripts editing tasks.yaml by sed or python, one of which left it
+    unparseable. Append was the operation wanted and the CLI had none. Not a worker write
+    (§3.5.3d): a note claims no state — the task's status, title and deps are untouched."""
+    if not args.text.strip():
+        die("task note: the text is empty — nothing to append")
+    data = tasks_load(args.hp)
+    t = find_task(data, args.id)
+    if not t:
+        die(f"no such task id: {args.id}")
+    note_append(t, args.text)
+    t["updated"] = now_iso()
+    tasks_save(args.hp, data)
+    print(f"{args.id}: note {len(t['notes'])} appended")
 
 
 def cmd_task_drop(args):
@@ -7729,6 +7756,10 @@ def build_parser():
     a.add_argument("field")
     a.add_argument("value")
     a.set_defaults(fn=cmd_task_set, writes=True)
+    a = t.add_parser("note", help="append one timestamped note (set … notes replaces)")
+    a.add_argument("id")
+    a.add_argument("text")
+    a.set_defaults(fn=cmd_task_note, writes=True)
     a = t.add_parser("done", help="mark as done")
     a.add_argument("id")
     a.add_argument("--note", help="append to notes")

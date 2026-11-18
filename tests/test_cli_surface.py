@@ -222,14 +222,14 @@ def test_task_dash_h_shows_task_usage(tmp_project, run_hippo):
     proc = run_hippo(["task", "-h"], cwd=tmp_project)
     assert proc.returncode == 0, proc.stderr
     assert "usage: hippo task" in proc.stdout
-    assert "{add,set,done,list,show,drop}" in proc.stdout
+    assert "{add,set,note,done,list,show,drop}" in proc.stdout
 
 
 def test_noun_help_lists_subcommands_even_outside_project(
     uninitialized_dir, run_hippo
 ):
     for noun, marker in (
-        ("task", "{add,set,done,list,show,drop}"),
+        ("task", "{add,set,note,done,list,show,drop}"),
         ("log", "tail"),
         ("directive", "{add,list,withdraw}"),
         ("prior", "{show,distill}"),

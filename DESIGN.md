@@ -332,6 +332,7 @@ hippo status [--inject]
 hippo task add <type>/<slug> --title T [--notes N] [--deps a,b]
     [--status pending|active|done|dropped]
 hippo task set <id> title|status|notes|deps <value>      # positional: no --flags
+hippo task note <id> <text>      # appends one timestamped note; set … notes replaces
 hippo task done <id> [--note N]
 hippo task list [--status s1,s2] [--all] [--json]
 hippo task show <id> [--json]
@@ -365,6 +366,12 @@ hippo scribe --transcript P --session S   # internal: the Stop hook calls it det
   views recomputed from the ledger every time.
 - Task states: `pending|active|done|dropped`. tasks.yaml may be edited by hand and the CLI always
   re-parses it. No acrobatics such as comment preservation (a lesson from 0.x).
+- `notes` is a list of strings, oldest first. `task note <id> <text>` appends one as
+  `<YYYY-MM-DDTHH:MMZ> <text>` (so does `task done --note`), never replacing; `task set … notes`
+  is the replace, one unstamped item; a hand-written scalar reads as the list's first item.
+  Measured (steno, 13 days on 1.17.1): 524 `task set … notes` calls, 225 of them over 1,500
+  chars — the whole notes re-sent to add a line — notes up to 13 KB, one overwrite that lost
+  notes, and 61 scripts editing tasks.yaml by sed or python, one of which left it unparseable.
 - `deps` answers one question — *what can I start now* — and `task list` is where it answers it:
   a task with an unfinished dep gets a `waiting on:` line under it, nothing otherwise. A dep naming
   no task is printed with a `?`, because that is the same silent shape as a dangling `ref`.

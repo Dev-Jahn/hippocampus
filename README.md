@@ -131,6 +131,7 @@ hippo status [--inject]
 hippo task add <type>/<slug> --title T [--notes N] [--deps a,b]
     [--status pending|active|done|dropped]
 hippo task set <id> title|status|notes|deps <value>      # positional: no --flags
+hippo task note <id> <text>      # appends one timestamped note; set … notes replaces
 hippo task done <id> [--note N]
 hippo task list [--status s1,s2] [--all] [--json]
 hippo task show <id> [--json]

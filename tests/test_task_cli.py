@@ -112,3 +112,40 @@ def test_task_show_missing_id_fails_with_stderr_usage(tmp_project, run_hippo):
     assert proc.returncode != 0
     # DESIGN.md §3.3: attach the usage to stderr on error
     assert proc.stderr.strip() != ""
+
+
+def test_task_note_appends_and_set_notes_replaces(tmp_project, run_hippo):
+    """`task note` appends one timestamped note and never replaces (measured: 225 of 524
+    `task set … notes` calls re-sent over 1,500 chars to add a line, and one lost notes);
+    `task set … notes` stays the replace. A hand-edited scalar is kept as the first note."""
+    import re
+
+    import yaml
+
+    assert run_hippo(["task", "add", "feat/n", "--title", "N", "--notes", "first"],
+                     cwd=tmp_project).returncode == 0
+    for text in ("second", "third: `quoted` $HOME"):
+        proc = run_hippo(["task", "note", "feat/n", text], cwd=tmp_project)
+        assert proc.returncode == 0, proc.stderr
+
+    def notes(tid):
+        tasks = yaml.safe_load((tmp_project / ".hippo" / "tasks.yaml").read_text())["tasks"]
+        return next(t for t in tasks if t["id"] == tid)["notes"]
+
+    got = notes("feat/n")
+    assert got[0] == "first" and len(got) == 3
+    stamp = r"\d{4}-\d\d-\d\dT\d\d:\d\dZ "
+    assert re.fullmatch(stamp + "second", got[1])
+    assert re.fullmatch(stamp + re.escape("third: `quoted` $HOME"), got[2])
+
+    p = tmp_project / ".hippo" / "tasks.yaml"
+    data = yaml.safe_load(p.read_text())
+    data["tasks"][0]["notes"] = "a hand-written scalar"
+    p.write_text(yaml.safe_dump(data), encoding="utf-8")
+    assert run_hippo(["task", "note", "feat/n", "more"], cwd=tmp_project).returncode == 0
+    assert notes("feat/n")[0] == "a hand-written scalar" and len(notes("feat/n")) == 2
+
+    assert run_hippo(["task", "set", "feat/n", "notes", "only"], cwd=tmp_project).returncode == 0
+    assert notes("feat/n") == ["only"]
+    empty = run_hippo(["task", "note", "feat/n", "  "], cwd=tmp_project)
+    assert empty.returncode != 0 and notes("feat/n") == ["only"]
