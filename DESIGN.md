@@ -2149,7 +2149,10 @@ Four rules govern the directive block:
   stderr can be discarded, and was.
 - **Staleness is shown, never resolved.** A directive lives until it is withdrawn, so its age is
   the one thing about it that changes: every live line carries its age from 14 days
-  (`live(23d): …`), and the volume notes name every directive 30 days or older with the one
+  (`live(23d): …`), counted from the id's first `directive add` (since it was last withdrawn,
+  if it was), with a later change of its text named beside it (`live(37d, rewritten 2d ago):
+  …`) — measured (1.17.1), counted from the latest write, a rule shown `live(37d)` showed no
+  age once re-added under its id; and the volume notes name every directive 30 days or older with the one
   question that matters — still true? The lifetimes this replaced (§4) sorted directives by how
   long they *should* hold, and the measurement says nobody closed them: 63 of 75 live `phase`
   directives were past 14 days, and the phase-only nudge produced no withdrawals. Age applies to

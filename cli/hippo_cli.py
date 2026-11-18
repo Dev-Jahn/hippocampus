@@ -1223,7 +1223,31 @@ def live_directives(hp, reader):
             and (d.get("audience") or "all") in (reader, "all")]
 
 
-def directive_lines(live):
+def directive_ages(hp):
+    """id → (since, rewritten): when the id's current live run began — its first active write
+    after it was last not live — and when that run's text last changed, or None. The rows
+    `directives` folds (a lane's never count).
+
+    A re-add under the same id is how a directive is updated (`--id` reuse), so the latest
+    row's stamp is the age of the wording, not of the rule: measured (1.17.1), a rule shown
+    `live(37d)` showed no age once re-added under its id — the staleness question it carried
+    went with it."""
+    out, prev = {}, {}
+    for e in read_ledger(hp):
+        if e.get("ev") != "directive" or not e.get("id") or e.get("src") == "executor":
+            continue
+        did, t, last = e["id"], event_time(e), prev.get(e["id"])
+        if e.get("state") != "active":
+            out.pop(did, None)
+        elif last is None or last.get("state") != "active":
+            out[did] = (t, None)
+        elif one_line(e.get("text", "")) != one_line(last.get("text", "")):
+            out[did] = (out[did][0], t)
+        prev[did] = e
+    return out
+
+
+def directive_lines(hp, live):
     """One `· live: …` line per directive, in ledger order and in full.
 
     Every active directive appears whole: a directive that is invisible at session start is
@@ -1231,13 +1255,20 @@ def directive_lines(live):
     of the first. Volume is handled by warning the author at `directive add` time and, past
     the total mark, in main's capsule (directive_volume_line) — never by dropping text here.
     Age is the whole staleness mechanism (nothing expires by itself — the verdict stays with
-    main and the user), so it is shown only once it is worth a glance."""
+    main and the user), so it is shown only once it is worth a glance. It counts from the start
+    of the directive's live run (`directive_ages`), and a later rewrite of its text is named
+    beside it: `live(37d, rewritten 2d ago)`."""
+    ages = directive_ages(hp)
     now = datetime.now(timezone.utc)
     out = []
     for d in live:
-        t = event_time(d)
-        age = (now - t).days if t else 0
-        label = f"live({age}d)" if age >= DIRECTIVE_AGE_SHOW_D else "live"
+        # Absent only when withdrawn between the two ledger reads: no age, as for a new rule.
+        since, rewritten = ages.get(d["id"], (None, None))
+        age = (now - since).days if since else 0
+        label = "live"
+        if age >= DIRECTIVE_AGE_SHOW_D:
+            new = (now - rewritten).days if rewritten else age
+            label = f"live({age}d, rewritten {new}d ago)" if new < age else f"live({age}d)"
         out.append(f"· {label}: {one_line(d.get('text', ''))}")
     return out
 
@@ -1269,7 +1300,7 @@ def status_lines(hp, compacted=False, transcript=None):
             f"· priors {stamp('PRIORS.md')} · worklog {stamp('worklog.md')}"
         )
     ]
-    lines += directive_lines(live)
+    lines += directive_lines(hp, live)
     # Nothing flying → no line. The capsule only spends a line on a question that has an answer.
     flying = in_flight(hp)
     if compacted and reader == "main":
@@ -1413,7 +1444,7 @@ def subagent_lines(hp):
     main's state, and a worker acts on them through main's brief, not beside it (principle 2)."""
     live = live_directives(hp, "executor")
     head = ([f"[hippo] directives {len(live)} live — this project's recorded rules",
-             *directive_lines(live)] if live else [])
+             *directive_lines(hp, live)] if live else [])
     return [*head, WORKER_RULE]
 
 
