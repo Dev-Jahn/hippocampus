@@ -3271,15 +3271,63 @@ def khala_records(ld):
             yield rec
 
 
-def khala_resumed(ld, args):
-    """The name of the lane whose codex session `args` resume (`… resume <session> …`), off
-    that lane's record — None when they resume none, or no record of it names one."""
+def resumed_session(args):
+    """The codex session id `args` resume (`… resume <session> …`), or None — they resume none,
+    or name none (`resume --last`)."""
     at = codex_resume_at(args)
     if at is None:
         return None
     after = args[at + 1:]
-    sid = next((a for i, a in enumerate(after) if not a.startswith("-")
-                and (i == 0 or after[i - 1] not in CODEX_VALUE_OPTIONS)), None)
+    return next((a for i, a in enumerate(after) if not a.startswith("-")
+                 and (i == 0 or after[i - 1] not in CODEX_VALUE_OPTIONS)), None)
+
+
+def resumed_exec(hp, rest, label):
+    """A resume's exec label: the slots its own argv leaves `unset` taken from the lane whose
+    session it resumes → (label, a stderr note or None).
+
+    Measured (steno, 13 days on 1.17.1): 78 of 641 dispatches (12%) were resumes typed as
+    `-- -C <dir> resume <session> "…"` — no `-m`, no effort — and recorded `codex/unset/unset`,
+    which made PRIORS a `research × codex/unset/unset` row of n=61; every one of the 78 resumed a
+    session another lane record of the project names with its model and effort. The model and
+    effort codex resumes on are the session's own, so the resumed lane's are the honest
+    label: from the newest record of that session that has the slot (`.hippo/lanes/`, kept a
+    week), the model else from its `ev:usage` row (written from codex's banner). Argv still
+    wins — a `-m` on the resume is what codex runs. Nothing found is said, not guessed."""
+    _, model, effort = label.split("/")
+    sid = resumed_session(rest)
+    if "unset" not in (model, effort) or sid is None or hp is None:
+        return label, None
+    recs = sorted((r for p in (hp / "lanes").glob("d*.json") if (r := read_record(p))
+                   and r.get("codex_session") == sid and isinstance(r.get("exec"), str)),
+                  key=lambda r: r.get("started") or "", reverse=True)
+    used = {r.get("id"): r.get("model") for r in read_ledger(hp)
+            if r.get("ev") == "usage" and r.get("src") == "wrapper"} if recs else {}
+    found = {}
+    for r in recs:
+        parts = r["exec"].split("/")
+        slots = {"model": parts[1], "effort": parts[2]} if len(parts) == 3 else {}
+        if slots.get("model") in (None, "unset") and used.get(r.get("id")):
+            slots["model"] = used[r.get("id")]
+        for k, v in slots.items():
+            if v and v != "unset":
+                found.setdefault(k, (v, r.get("id")))
+    have = {"model": model, "effort": effort}
+    taken = {k: found[k] for k in have if have[k] == "unset" and k in found}
+    have.update({k: v for k, (v, _) in taken.items()})
+    new = f"codex/{have['model']}/{have['effort']}"
+    if not taken:
+        return label, (f"resume of session {sid}: no lane record of it names a model or effort "
+                       f"— recorded as {label}; pass -m and -c model_reasoning_effort=… to "
+                       "label it")
+    froms = ", ".join(sorted({d for _, d in taken.values()}))
+    return new, f"resume of session {sid}: exec {new}, taken from lane {froms}"
+
+
+def khala_resumed(ld, args):
+    """The name of the lane whose codex session `args` resume (`… resume <session> …`), off
+    that lane's record — None when they resume none, or no record of it names one."""
+    sid = resumed_session(args)
     recs = [r for r in khala_records(ld) if sid and r.get("codex_session") == sid]
     name = max(recs, key=lambda r: r.get("started") or "")["khala"].split("@")[0] if recs else ""
     return name if khala_name_ok(name) else None
@@ -3435,7 +3483,10 @@ def run_dispatch(argv):
     # depth-2 becomes an event in the ledger, not a prohibition nobody can check).
     parent = os.environ.get("HIPPO_DISPATCH", "")
     hp = find_hippo()
-    check_fanout(hp, parent, exec_label(rest).split("/")[1])
+    exec_, note = resumed_exec(hp, rest, exec_label(rest))
+    if note:
+        print(f"dispatch: {note}", file=sys.stderr)
+    check_fanout(hp, parent, exec_.split("/")[1])
     # The lane's files (§3.6): codex's raw stderr, its stdout (the report) and the record,
     # written before the id is printed so a watcher never races the record into existence.
     # With no .hippo/ there is no record and the raw log goes to a temp file the last line names.
@@ -3447,7 +3498,7 @@ def run_dispatch(argv):
     if hp is None:
         print("dispatch: no .hippo/ — skipping the dispatch record", file=sys.stderr)
     else:
-        e = {"ev": "dispatch", "id": did, "kind": kind, "exec": exec_label(rest), "scope": scope,
+        e = {"ev": "dispatch", "id": did, "kind": kind, "exec": exec_, "scope": scope,
              "depth": depth}
         if task:
             e["task"] = task
@@ -3466,7 +3517,7 @@ def run_dispatch(argv):
         fd, name = tempfile.mkstemp(prefix=f"hippo-{did}-", suffix=".log")
         os.close(fd)
         log, report_copy, record = Path(name), None, None
-    lane = Lane(did, scope, exec_label(rest), record, log, report_copy, kind, task, depth,
+    lane = Lane(did, scope, exec_, record, log, report_copy, kind, task, depth,
                 codex_resume_args(rest, Path.cwd()), khala=kh)
     print(f"dispatch:{did}", flush=True)
     if kh:

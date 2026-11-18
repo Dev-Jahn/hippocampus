@@ -1452,6 +1452,15 @@ batch still relaunches the entry fresh — main picks one. A resume is a new dis
 own usage (§3.2, `ev:usage`) and no brief of its own: its last argument is the continuation,
 and the task is in the session, so it gets no launch notes and its triage reads `brief: null`
 — weaker evidence than a first lane's route, where the report has to carry the task.
+A resume's exec label is the session's (1.18.0): a slot its argv leaves `unset` — no `-m`, no
+`model_reasoning_effort` — comes from the newest lane record of the session it resumes that has
+it (the model, failing that, from that lane's wrapper `ev:usage` row, which reads codex's
+banner), with a stderr line naming the lane; argv still wins, since a `-m` on the resume is what
+codex runs; and a session no record names keeps `unset`, said on stderr, never guessed.
+Measured (steno, 13 days on 1.17.1): 78 of 641 dispatches (12%) were resumes typed as `-- -C
+<dir> resume <session> "…"`, recorded `codex/unset/unset` — a PRIORS `research ×
+codex/unset/unset` row of n=61 — and a lane record of every one of those sessions named
+`gpt-6.1-sol/high`. The wrapper's own resume (below) stays inside one lane and one label.
 
 **A model at capacity** (1.16.0). The stop above was a harness loss: at 15:59Z, 5 minutes into
 a gpt-6.1-sol high lane, codex printed `ERROR: Selected model is at capacity. Please try a
