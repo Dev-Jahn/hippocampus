@@ -25,7 +25,7 @@ import yaml
 from conftest import HIPPO_BIN, REPO_ROOT, read_ledger
 from test_batch import _journal, _journal_path, _manifest, _outdir
 from test_dispatch import _stub_codex
-from test_lanes import _lanes, _record, _session, _statusline
+from test_lanes import _lanes, _record
 
 sys.path.insert(0, str(REPO_ROOT / "cli"))
 import hippo_cli  # noqa: E402
@@ -735,14 +735,7 @@ def test_an_ended_batch_says_how_it_ended(tmp_path):
         "0 skipped", "error: RuntimeError: boom",
         "the journal holds every exit; `hippo dispatch --batch /w/wide.yaml` resumes",
         "journal: /w/wide.journal.jsonl"]
-
-    sys.path.insert(0, str(REPO_ROOT / "scripts"))
-    import lane_status
-    counts = "2 running · 1/4 done · 0 failed"
-    assert lane_status.batch_row(rec, tmp_path) == \
-        f"codex batch · wide · lost, its process is gone · 1m00s · {counts}"
-    assert lane_status.batch_row(killed, tmp_path) == \
-        f"codex batch · wide · killed by SIGTERM rc=143 · 2m00s · {counts}"
+    # The agent-panel row of these two: tests/lane_row.test.ts.
 
 
 def test_a_batch_reads_only_the_lanes_it_names_as_running(tmp_path):
@@ -805,41 +798,6 @@ def test_a_signal_to_a_full_batch_is_on_its_record_at_once(tmp_project, tmp_path
     lines = _hippo(tmp_project, os.environ, "--watch", bid).stdout.splitlines()
     assert lines[0].startswith("batch wf killed by SIGTERM rc=143 after ")
     assert lines[1] == f"the journal holds every exit; `hippo dispatch --batch {manifest}` resumes"
-
-
-def test_a_batch_row_reads_the_batch_and_only_its_running_lanes(tmp_project, tmp_path):
-    hippo_cli.lanes_dir(tmp_project / ".hippo")  # the statusline pointer, as a lane start makes
-    lanes = _lanes(tmp_project)
-    bid, did, decoy = "b" + "12" * 16, "d" + "ab" * 16, "d" + "cd" * 16
-    started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 7215))
-    t = hippo_cli.now_iso()
-    batch = {"id": bid, "manifest": "/w/wide.yaml", "stem": "wide", "pid": os.getpid(),
-             "started": started, "total": 3, "todo": 3, "skipped": 0, "launched": 2,
-             "running": 1, "ok": 1, "failed": 0, "done": 1, "running_ids": [did],
-             "last": "lane a: exited rc=0", "last_at": "2026-01-01T00:00:00Z",
-             "journal": "/w/wide.journal.jsonl", "harvest": None}
-    (lanes / f"{bid}.json").write_text(json.dumps(batch), encoding="utf-8")
-    (lanes / f"{did}.json").write_text(json.dumps(
-        {"id": did, "scope": "pass2 tensorize", "pid": os.getpid(), "started": started,
-         "cmds": 4, "last": "exec: pytest -q", "last_at": t}), encoding="utf-8")
-    # Newer still, but not one of the batch's running lanes: never read.
-    (lanes / f"{decoy}.json").write_text(json.dumps(
-        {"id": decoy, "scope": "someone else", "last": "exec: rm", "last_at": "2099-01-01T00:00:00Z"}),
-        encoding="utf-8")
-    text = f"hippo dispatch --batch wide.yaml\nbatch:{bid}\n--watch {bid}\n"
-    ctx = _session(tmp_path, tmp_project, [("arow", "hippo:lane", text)])
-    ctx["columns"] = 0
-    (line,) = _statusline(tmp_project, ctx).stdout.splitlines()
-    assert json.loads(line) == {"id": "arow", "content": (
-        "codex batch · wide · 2h00m · 1 running · 1/3 done · 0 failed · "
-        "last: pass2 tensorize: exec: pytest -q")}
-
-    (lanes / f"{bid}.json").write_text(json.dumps(
-        {**batch, "running": 0, "running_ids": [], "done": 3, "ok": 2, "failed": 1,
-         "status": "exited", "rc": 1, "started": "2026-10-02T00:00:00Z",
-         "ended": "2026-10-02T00:12:03Z"}), encoding="utf-8")
-    assert json.loads(_statusline(tmp_project, ctx).stdout)["content"] == \
-        "codex batch · wide · exited rc=1 · 12m03s · 0 running · 3/3 done · 1 failed"
 
 
 def _relay_grep(path):
