@@ -989,46 +989,105 @@ def age_label(t, now):
     return f"{mins // 60}h{mins % 60:02d}m"
 
 
-def in_flight(hp):
-    """Delegations launched but not yet judged — the one part of "where was I" that is a fact.
+def delegations(hp, rows):
+    """The launches still main's business → [(dispatch row, lane state, lane record)]: launched
+    within IN_FLIGHT_WINDOW_H by a launcher (`wrapper`/`cli`), and either not judged yet or
+    judged while its lane still runs. The state is `watch_state` of the lane's record in
+    .hippo/lanes/ (`running`, `ended`, `lost`), or None for a launch with no record — a `log
+    dispatch` by hand, or a record that could not be written — which nothing can call running
+    or ended.
 
-    Only launcher-written dispatches count (`wrapper`/`cli`): those are the ones somebody chose to
-    launch and will come back to. Scribe-inferred rows would swamp it — measured on a consuming
-    project, the same query over all writers returned 16 where three lanes were actually flying,
-    and restricting it to the launcher returned exactly those three, matching by hand the list the
-    project was maintaining in a file.
-
-    A dispatch older than a day is not in flight, it is forgotten; `prior distill` already reports
-    those as open items, which is the right place for them.
-
-    A lane's self-reported outcome does not land it: the claim rides along, subject visible
-    (§9.3), and the entry leaves this line only when main's verdict arrives. The judge's latest
-    route rides the same way — evidence beside the claim, never a verdict (§3.6)."""
-    rows = read_ledger(hp)
+    Only launcher-written dispatches count: those are the ones somebody chose to launch and will
+    come back to. Scribe-inferred rows would swamp it — measured on a consuming project, the same
+    query over all writers returned 16 where three lanes were actually flying, and restricting
+    it to the launcher returned exactly those three, matching by hand the list the project was
+    maintaining in a file. A dispatch older than a day is not in flight, it is forgotten; `prior
+    distill` already reports those as open items, which is the right place for them."""
     judged = judged_refs(rows)
-    claims = executor_claims(rows)
-    triages = {e.get("ref"): e for e in rows if e.get("ev") == "triage"}
     now = datetime.now(timezone.utc)
     out = []
     for e in rows:
         if e.get("ev") != "dispatch" or e.get("src") not in ("wrapper", "cli"):
             continue
-        if e.get("id") in judged:
-            continue
         t = event_time(e)
         if not t or (now - t) > timedelta(hours=IN_FLIGHT_WINDOW_H):
             continue
-        parts = [age_label(t, now)]
-        if claims.get(e.get("id")):
-            parts.append(f"claims {claims[e.get('id')]}")
-        tri = triages.get(e.get("id"))
-        if tri:
-            parts.append(f"triage {tri.get('route')}")
-            if tri.get("verify") is True:
-                parts.append("verify")
-        tail = " · ".join(parts)
-        out.append(f"{one_line(e.get('scope', ''), 44)} ({tail})")
+        did = str(e.get("id") or "")
+        rec = read_record(hp / "lanes" / f"{did}.json") if SAFE_ID_RE.fullmatch(did) else None
+        state = watch_state(rec) if rec else None
+        if did in judged and state != "running":
+            continue
+        out.append((e, state, rec))
     return out
+
+
+def in_flight(hp):
+    """`in flight` (§6): the delegations not known to have ended — the one part of "where was
+    I" that is a fact. A lane whose record says it runs reads `running <age>`, judged or not
+    (main may judge a lane early; it still runs, and costs); a launch with no lane record keeps
+    the bare age since launch, since nothing tells whether it still runs. A lane that ended is
+    not here but on `lanes_ended`'s line: measured (1.17.1, 46 capsules of one main session),
+    194 of the line's 285 entries (68%) were lanes that had already ended, up to 23.7h old and
+    shown with their age since launch, while lanes main had judged as their wrappers ran
+    vanished (7 wrappers alive, 1 shown).
+
+    A lane's self-reported outcome does not end an entry: the claim rides along, subject
+    visible (§9.3), and the entry leaves only when main's verdict arrives. The judge's latest
+    route rides the same way — evidence beside the claim, never a verdict (§3.6)."""
+    rows = read_ledger(hp)
+    now = datetime.now(timezone.utc)
+    verdicts = {e.get("ref"): e.get("result") for e in reversed(verdict_rows(rows))}
+    out = []
+    for e, state, _ in delegations(hp, rows):
+        if state in ("ended", "lost"):
+            continue
+        age = age_label(event_time(e), now)
+        head = [f"running {age}" if state == "running" else age]
+        if e.get("id") in verdicts:
+            head.append(f"judged {verdicts[e.get('id')]}")
+        out.append(_delegation_item(e, rows, head))
+    return out
+
+
+def lanes_ended(hp):
+    """The capsule's `ended, awaiting your verdict:` line, or None (§6, main's only): the lanes
+    whose record says they ended — or were lost, their wrapper gone with no end recorded — and
+    that main has not judged, each with how it ended and how long ago. Its own line, so an
+    ended lane can never read as running (`in_flight`)."""
+    rows = read_ledger(hp)
+    now = datetime.now(timezone.utc)
+    items = []
+    for e, state, rec in delegations(hp, rows):
+        if state not in ("ended", "lost"):
+            continue
+        if state == "lost":
+            how = "lost: wrapper gone, no end recorded"
+        elif rec.get("signal"):
+            how = f"killed by {rec['signal']}"
+        else:
+            how = ("timed out" if rec.get("timed_out") else
+                   f"rc={rec['rc']}" if rec.get("rc") is not None else rec.get("status", "ended"))
+        at = _iso_time(rec.get("ended") or rec.get("last_at") or rec.get("started"))
+        when = f"{'last seen' if state == 'lost' else 'ended'} {age_label(at, now)} ago"
+        items.append(_delegation_item(e, rows, [how, when] if at else [how]))
+    return f"· ended, awaiting your verdict: {', '.join(items)}" if items else None
+
+
+def _delegation_item(e, rows, head):
+    """`scope (head · claims … · triage …)` — one entry of the in-flight or ended line: the
+    lane's latest claim and the judge's latest route ride beside what is known of its run."""
+    did = e.get("id")
+    parts = list(head)
+    claim = executor_claims(rows).get(did)
+    if claim:
+        parts.append(f"claims {claim}")
+    tri = next((r for r in reversed(rows) if r.get("ev") == "triage" and r.get("ref") == did),
+               None)
+    if tri:
+        parts.append(f"triage {tri.get('route')}")
+        if tri.get("verify") is True:
+            parts.append("verify")
+    return f"{one_line(e.get('scope', ''), 44)} ({' · '.join(parts)})"
 
 
 SCRIBE_FAILING_AT = 3  # this many turn-scribe runs failed in a row earns a capsule line
@@ -1082,10 +1141,29 @@ def task_flag_shows(task, flag):
 
 def task_check(hp, tasks):
     """The capsule's `check:` line, or None (§6, main's capsule only): the flags that still
-    show, in tasks.yaml order. Closing a task is main's call, so the line asks and never acts."""
+    show, in tasks.yaml order. Closing a task is main's call, so the line asks and never acts.
+
+    New work on a task answers its flag as a task write does: a flag is quiet while a
+    delegation on its task is still main's business (`delegations`: running, or not judged
+    yet), and for good once a dispatch on its task is recorded after its stamp. Measured
+    (1.17.1, 46 capsules of one main session): of 102 flags shown, main closed 5; 38 had a
+    dispatch on that task in the 6h before, 12 a lane running on it, and one task was flagged
+    15 times."""
     flags = task_flags(hp)
-    ids = [t["id"] for t in tasks
-           if isinstance(t.get("id"), str) and task_flag_shows(t, flags.get(t["id"]))]
+    rows = read_ledger(hp)
+    busy = {e.get("task") for e, _, _ in delegations(hp, rows)}
+    worked = {}
+    for e in rows:
+        if e.get("ev") == "dispatch" and e.get("task") and (t := event_time(e)):
+            worked[e["task"]] = max(t, worked.get(e["task"], t))
+
+    def shows(task):
+        tid, flag = task["id"], flags.get(task["id"])
+        if not task_flag_shows(task, flag) or tid in busy:
+            return False
+        return tid not in worked or worked[tid] <= _iso_time(flag["t"])
+
+    ids = [t["id"] for t in tasks if isinstance(t.get("id"), str) and shows(t)]
     if not ids:
         return None
     if len(ids) == 1:
@@ -1198,6 +1276,9 @@ def status_lines(hp, compacted=False, transcript=None):
         flying += native_in_flight(hp, transcript)
     if flying:
         lines.append(f"· in flight: {', '.join(flying)}")
+    ended = lanes_ended(hp) if reader == "main" else None  # a verdict is main's to give
+    if ended:
+        lines.append(ended)
     p = hp / "worklog.md"
     if p.exists():
         # Within the latest date section, only look at the "- HH:MM …" entries the scribe wrote.

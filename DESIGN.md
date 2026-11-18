@@ -2003,7 +2003,12 @@ every session start, compaction included, in tasks.yaml order, and is absent whe
 is the judge's reading and worded as one, never a status: main closes the task (`task
 done|drop`) or writes what is left into its notes, and either write moves the task's `updated`
 stamp past the flag, which is what hides it — nothing is deleted by hand and nothing is applied
-(staleness is shown, never resolved, as the third rule below says of directives). Neither a
+(staleness is shown, never resolved, as the third rule below says of directives). New work on the
+task answers the flag the same way: it is quiet while a delegation on its task is still main's
+business (on the in-flight or ended line above), and for good once a dispatch on its task is
+recorded after its stamp. Measured (1.17.1, 46 capsules of one main session): of 102 flags shown,
+main closed 5; 38 had a dispatch on that task in the 6h before, 12 a lane running on it, and one
+task was flagged 15 times. Neither a
 lane's capsule nor a subagent's slice carries it: closing a task is main's call, and a worker's
 surface is two commands (§9.7). Without the key the scribe never writes the file, so a project
 that never had one never sees the line.
@@ -2032,15 +2037,28 @@ an unanchored search promoted a transcript line to "the cause"; a timeout or a s
 from the exit code. One failure is noise (a timeout, a flaky network); three in a row is an organ
 that stopped working.
 
-`in flight` is delegations launched and not yet judged, within 24h, **counting only what a
-launcher wrote** (`src` `wrapper`/`cli`). A lane's self-report does not land an entry — it rides
-it, subject visible (`pass2 tensorize (0h42m · claims accepted)`): an executor-sourced statement
-never renders as a flat fact (§9.3), and only main's verdict clears the line. It is the one part of "where was I" that is a fact rather
-than a plan, and it is the reason it belongs here instead of in a hand-kept file: measured on a
-consuming project, this query returned exactly the three lanes that project was listing by hand,
-while the same query over every writer returned 16 — scribe-inferred rows swamp it. With nothing
-flying the line is absent; a dispatch older than a day is not in flight but forgotten, and
-`prior distill` already reports those as open items.
+`in flight` is delegations launched within 24h and not known to have ended, **counting only what
+a launcher wrote** (`src` `wrapper`/`cli`). A lane's self-report does not land an entry — it rides
+it, subject visible (`pass2 tensorize (running 0h42m · claims accepted)`): an executor-sourced
+statement never renders as a flat fact (§9.3), and only main's verdict clears the line. It is the
+one part of "where was I" that is a fact rather than a plan, and it is the reason it belongs here
+instead of in a hand-kept file: measured on a consuming project, this query returned exactly the
+three lanes that project was listing by hand, while the same query over every writer returned 16
+— scribe-inferred rows swamp it. With nothing flying the line is absent; a dispatch older than a
+day is not in flight but forgotten, and `prior distill` already reports those as open items.
+
+A wrapper lane's record in `.hippo/lanes/` says whether it still runs, read as `--watch` reads it
+(no `ended` and the wrapper alive). Running, it reads `running <age since launch>` — judged or
+not, a judged one marked `judged <verdict>`, since main may judge early and the lane still runs
+and costs. Ended (or lost: the wrapper gone with no end recorded) and not judged, it leaves this
+line for main's own line `· ended, awaiting your verdict: r2 kernel (rc=1 · ended 2h05m ago)` —
+`killed by SIGTERM` or `timed out` in place of the rc, `lost: …, last seen …` for a lost one;
+judged and ended, it is on neither. A launch with no record (a `log dispatch` by hand) keeps the
+bare age: nothing tells whether it runs. Measured (1.17.1, 46 capsules of one main session):
+194 of the line's 285 entries (68%) were lanes that had ended, up to 23.7h before, shown with
+their age since launch as if flying; and lanes main judged while their wrappers still ran
+vanished from it (7 wrappers alive, 1 shown). A lane's capsule has no ended line — a verdict is
+main's.
 
 After a compaction the line also names main's native runs still out (§3.5.3c) —
 `build:parser (workflow · 0h12m)` — read from main's transcript, not the ledger: launched in the
