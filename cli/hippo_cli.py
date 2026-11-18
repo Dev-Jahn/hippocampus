@@ -83,7 +83,9 @@ ALLOWED = {
     "review": ("id", "base", "source", "findings"),
     "review-status": ("ref", "addressed", "at"),
     "directive": ("id", "text", "lifetime", "state", "audience"),
-    "clerk": ("name", "ok", "ms", "tokens"),
+    # dropped: the clerk's events a scribe run set aside as restatements of rows already in
+    # the ledger (`scribe_restates`) — counted here, never dumped.
+    "clerk": ("name", "ok", "ms", "tokens", "dropped"),
     "usage": ("ref", "tokens", "model", "tin", "tcached", "tout"),
     # p: the compact probabilities the route was computed from — done, blocked, ask, creep,
     # evidence, and risk (a 0-3 score). A question the reply did not answer is absent.
@@ -133,7 +135,8 @@ TRIAGE_TRIMMED = ("stderr_tail", "brief", "changes", "report")  # what fit_triag
 # kebab ASCII or nothing. An id derived from non-ASCII text collapses to the empty string, and
 # an id that is empty (or spelled differently every time) cannot supersede anything.
 DIRECTIVE_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-INT_FIELDS = ("findings", "rework", "ms", "tokens", "depth", "tin", "tcached", "tout")
+INT_FIELDS = ("findings", "rework", "ms", "tokens", "depth", "tin", "tcached", "tout",
+              "dropped")
 
 
 def validate_event(e):
@@ -1775,15 +1778,45 @@ def check_scribe_outcome(hp, e, native=None, held=None):
     rows = read_ledger(hp)
     # A lane's self-report is a claim, not a verdict (§9.2): the scribe recording main's
     # explicit acceptance signal *after* a claim is the normal flow, not a re-judgment.
-    if e.get("ref") in judged_refs(rows):
-        return (f"ev=outcome: ref={e.get('ref')!r} already has a verdict — the scribe does not "
-                "re-judge (at most one outcome per dispatch; a second verdict belongs to main)")
+    last = [x for x in verdict_rows(rows) if x.get("ref") == e.get("ref")]
+    if last:  # one that agrees never gets here (`scribe_restates`): this one disagrees
+        return (f"ev=outcome: ref={e.get('ref')!r} already has a verdict ("
+                f"{last[-1].get('result')}, {last[-1].get('src')}) and this one says "
+                f"{e.get('result')!r} — the scribe does not re-judge (at most one outcome per "
+                "dispatch; a second verdict belongs to main)")
     why = (held or {}).get(e.get("ref")) or still_running(hp, e.get("ref"), rows, native)
     if why:
         return (f"ev=outcome: ref={e.get('ref')!r} was still running when this window was read: "
                 f"{why}. A verdict needs an ended delegation; a launch or a progress line is "
                 "not one")
     return None
+
+
+def scribe_restates(hp, e, native=None):
+    """True for a clerk event that only restates what the ledger already holds: set aside with
+    no dump, counted on the run's meter (`dropped`) — a restatement is no failure.
+
+    Measured (steno, 13 days on 1.17.1): 371 of 385 failure dumps were "N events rejected", and
+    324 of the 471 rejected events were the scribe re-emitting a verdict main had already
+    written — agreeing with it in 318. The dumps buried the few that mattered. So: an outcome
+    whose ref's latest verdict has the same result; a dispatch under an id the ledger already
+    has; and a dispatch naming a run hippo skips as a relay (NATIVE_SKIP — a hippo:lane agent
+    babysits a codex lane its wrapper records), bare or `ag-`-prefixed. A verdict that
+    disagrees with the recorded one is not a restatement and is still dumped
+    (`check_scribe_outcome`)."""
+    if not isinstance(e, dict):
+        return False
+    if e.get("ev") == "outcome":
+        last = [x for x in verdict_rows(read_ledger(hp)) if x.get("ref") == e.get("ref")]
+        return bool(last) and last[-1].get("result") == e.get("result")
+    if e.get("ev") != "dispatch" or not isinstance(e.get("id"), str):
+        return False
+    did = e["id"]
+    if any(x.get("ev") == "dispatch" and x.get("id") == did for x in read_ledger(hp)):
+        return True
+    runs = (native or {}).get("runs", {})
+    run = runs.get(did) or runs.get(NATIVE_PREFIX + did)
+    return run is not None and run["skip"]
 
 
 def still_running(hp, ref, rows, native=None):
@@ -7782,7 +7815,7 @@ def cmd_scribe(args):
              if r["ref"] and r["ref"] != r["id"]} if native else {}
     start = (window_start(transcript, since, end)
              if any(isinstance(e, dict) and e.get("ev") == "directive" for e in events) else None)
-    rejected = []
+    rejected, dropped = [], 0
     for e in events:
         # lifetime is retired (§3.2) and the prompt no longer asks for it; a clerk that still
         # says `turn` must not make its directive invisible to the view.
@@ -7791,6 +7824,9 @@ def cmd_scribe(args):
         if (isinstance(e, dict) and e.get("ev") == "outcome" and isinstance(e.get("ref"), str)
                 and e["ref"] in alias):
             e["ref"] = alias[e["ref"]]
+        if scribe_restates(hp, e, native):
+            dropped += 1
+            continue
         taken, verr = native_guard(hp, native_take, hp, e, native, alias) or (False, None)
         if not taken:
             verr = (validate_event(e) or validate_scribe_event(e) or check_ref(hp, e)
@@ -7811,7 +7847,8 @@ def cmd_scribe(args):
         worklog_append(hp, obj["worklog"].strip())
     settle()
     save_cursor()
-    append_event(hp, {**meter, "ok": True}, src="scribe")
+    append_event(hp, {**meter, "ok": True, **({"dropped": dropped} if dropped else {})},
+                 src="scribe")
     auto_distill(hp)
     # 9. Open tasks that look ended (DESIGN §3.5.9) — last, on both paths: it reads nothing
     # the scribe wrote (the clerk never writes tasks.yaml) and nothing waits on it.

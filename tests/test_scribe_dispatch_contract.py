@@ -135,7 +135,31 @@ def test_the_scribe_does_not_rejudge(tmp_project, run_hippo, fake_transcript, tm
             if e.get("ev") == "outcome" and e.get("ref") == "d9"]
     assert [e["result"] for e in outs] == ["revised"]
     dumps = list((tmp_project / ".hippo" / "failures").glob("*"))
-    assert "does not re-judge" in "".join(p.read_text() for p in dumps)
+    text = "".join(p.read_text() for p in dumps)
+    assert "does not re-judge" in text and "(revised, cli) and this one says 'accepted'" in text
+
+
+def test_a_restatement_is_dropped_and_counted_not_dumped(tmp_project, run_hippo,
+                                                         fake_transcript, tmp_path):
+    """Measured (steno, 1.17.1): 324 of 471 rejected events were the scribe re-emitting a verdict
+    main had already written, agreeing in 318, and 371 of 385 dumps were such runs. An agreeing
+    verdict and a dispatch under an id the ledger already has restate it: no dump, a count on
+    the run's meter. The disagreeing re-verdict above is still dumped."""
+    run_hippo(["log", "dispatch", "--id", "d9", "--kind", "impl",
+               "--exec", "fork/fable/inherit", "--scope", "x"], cwd=tmp_project)
+    run_hippo(["log", "outcome", "--ref", "d9", "--result", "accepted"], cwd=tmp_project)
+    mock = _scribe_output(tmp_path, "echo", [
+        {"ev": "outcome", "ref": "d9", "result": "accepted", "note": "merged"},
+        _dispatch("claude/claude-opus-5-5/high", "d9")])
+    proc = _run_scribe(run_hippo, tmp_project, mock)
+    assert proc.returncode == 0, proc.stderr
+
+    rows = read_ledger(tmp_project)
+    assert [e["src"] for e in rows if e.get("ev") == "outcome"] == ["cli"]
+    assert [e["src"] for e in rows if e.get("ev") == "dispatch"] == ["cli"]
+    assert not list((tmp_project / ".hippo" / "failures").glob("*"))
+    (meter,) = [e for e in rows if e.get("ev") == "clerk" and e.get("name") == "turn-scribe"]
+    assert meter["dropped"] == 2 and meter["ok"] is True
 
 
 def test_one_verdict_per_dispatch_holds_within_a_batch(tmp_project, run_hippo, fake_transcript,
