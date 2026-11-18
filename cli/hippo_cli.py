@@ -2922,6 +2922,8 @@ DISPATCH_USAGE = (
     "usage: hippo dispatch --kind <kind> --scope <scope> [--task <task-id>] [--depth N] "
     "[--fast] [--] <codex exec args...>\n"
     "       everything after -- goes to codex exec verbatim, even if it looks like a wrapper flag\n"
+    "       a resume (`-- … resume <session> …`) may omit --kind, --scope, --task and --depth:\n"
+    "       each is taken from the newest lane record of that session\n"
     "       --depth 0 (default): the lane is told not to re-delegate; --depth 1: it may spawn\n"
     "       children, which start at depth 0 (§9.5 — the clause is indexed, never enforced)\n"
     '       --fast: launch on codex\'s fast service tier (-c service_tier="fast"); '
@@ -2937,7 +2939,8 @@ def split_dispatch_argv(argv):
     """Strip dispatch's own flags and hand everything else to codex exec untouched.
 
     Why not argparse: the remaining arguments are codex's grammar (-m, -c k=v, -C dir …) and
-    this parser has no business interpreting them. After `--`, even wrapper-shaped flags pass."""
+    this parser has no business interpreting them. After `--`, even wrapper-shaped flags pass.
+    A missing --kind or --scope is resumed_labels' to fill or refuse; an absent --depth is None."""
     fields = {"kind": "", "scope": "", "task": "", "depth": ""}
     fast = False
     rest = []
@@ -2964,15 +2967,13 @@ def split_dispatch_argv(argv):
             rest.append(a)
             i += 1
             continue
-    if not fields["kind"] or not fields["scope"]:
-        die(DISPATCH_USAGE, 2)
     if fields["depth"]:
         try:
             fields["depth"] = int(fields["depth"])
         except ValueError:
             die(f"dispatch: --depth must be an integer: {fields['depth']!r}\n{DISPATCH_USAGE}", 2)
     else:
-        fields["depth"] = 0
+        fields["depth"] = None
     return fields["kind"], fields["scope"], fields["task"], fields["depth"], fast, rest
 
 
@@ -3622,11 +3623,49 @@ def resumed_exec(hp, rest, label):
     have.update({k: v for k, (v, _) in taken.items()})
     new = f"codex/{have['model']}/{have['effort']}"
     if not taken:
-        return label, (f"resume of session {sid}: no lane record of it names a model or effort "
-                       f"— recorded as {label}; pass -m and -c model_reasoning_effort=… to "
-                       "label it")
+        return label, (f"no lane record of it names a model or effort — recorded as {label}; "
+                       "pass -m and -c model_reasoning_effort=… to label it")
     froms = ", ".join(sorted({d for _, d in taken.values()}))
-    return new, f"resume of session {sid}: exec {new}, taken from lane {froms}"
+    return new, f"exec {new}, taken from lane {froms}"
+
+
+def resumed_labels(hp, rest, kind, scope, task, depth):
+    """A resume's kind, scope, task and depth: what its command line leaves out taken from the
+    newest lane record of the session it resumes → (kind, scope, task, depth, a stderr note or
+    None). The scope gets " (resumed)", as on the wrapper's own `resume:` line.
+
+    Measured (one consumer, 2026-11-18): a resume typed as `-- -C <dir> resume <session> "…"`
+    failed on a missing --scope — main's own restart checklist had dropped it — while the lane
+    record of that session held the scope, the kind and the task. The record is the durable
+    source: the `ev:dispatch` row holds the same labels but not the session id. Depth comes along
+    for the same reason resume_command carries it: it is the session's, and HIPPO_DEPTH sets the
+    re-delegation clause the session's capsule re-injects — a depth-1 lane resumed as depth 0
+    would be told the opposite of its launch. The command line always wins. Not a resume, or no
+    record of the session: a missing --kind/--scope stays the usage error, never a guess."""
+    sid = resumed_session(rest)
+    recs = [r for p in (hp / "lanes").glob("d*.json") if (r := read_record(p))
+            and r.get("codex_session") == sid] if sid and hp is not None else []
+    rec = max(recs, key=lambda r: r.get("started") or "") if recs else {}
+    taken = {}
+    if rec:  # a lane record always holds kind and scope (Lane.__init__)
+        if not kind:
+            kind = taken["kind"] = rec["kind"]
+        if not scope:
+            s = rec["scope"]
+            scope = taken["scope"] = s if s.endswith(" (resumed)") else f"{s} (resumed)"
+        if not task and rec.get("task"):
+            task = taken["task"] = rec["task"]
+        if depth is None and rec.get("depth"):
+            depth = taken["depth"] = rec["depth"]
+    if not kind or not scope:
+        if sid is None:
+            die(DISPATCH_USAGE, 2)
+        die(f"dispatch: --kind and --scope are required — no lane record of session {sid} to "
+            f"take them from\n{DISPATCH_USAGE}", 2)
+    if not taken:
+        return kind, scope, task, depth or 0, None
+    said = ", ".join(f"{k} {shlex.quote(str(v)) if k == 'scope' else v}" for k, v in taken.items())
+    return kind, scope, task, depth or 0, f"{said}, taken from lane {rec.get('id')}"
 
 
 def khala_resumed(ld, args):
@@ -3778,6 +3817,8 @@ def run_dispatch(argv):
     if "--watch" in head:
         return run_watch(argv)
     kind, scope, task, depth, fast, rest = split_dispatch_argv(argv)
+    hp = find_hippo()
+    kind, scope, task, depth, labels_note = resumed_labels(hp, rest, kind, scope, task, depth)
     if fast:
         # Prepended, so a caller's own -c service_tier=… later in argv still wins (codex takes
         # the last -c for a key). exec_label never reads it: the tier is a launch condition,
@@ -3787,10 +3828,10 @@ def run_dispatch(argv):
     # A launch from inside a lane is a child: record who spawned it (§9.5 — an unintended
     # depth-2 becomes an event in the ledger, not a prohibition nobody can check).
     parent = os.environ.get("HIPPO_DISPATCH", "")
-    hp = find_hippo()
-    exec_, note = resumed_exec(hp, rest, exec_label(rest))
-    if note:
-        print(f"dispatch: {note}", file=sys.stderr)
+    exec_, exec_note = resumed_exec(hp, rest, exec_label(rest))
+    if labels_note or exec_note:  # one line for what a resume took from its lane
+        said = "; ".join(n for n in (labels_note, exec_note) if n)
+        print(f"dispatch: resume of session {resumed_session(rest)}: {said}", file=sys.stderr)
     check_fanout(hp, parent, exec_.split("/")[1])
     # The lane's files (§3.6): codex's raw stderr, its stdout (the report) and the record,
     # written before the id is printed so a watcher never races the record into existence.
