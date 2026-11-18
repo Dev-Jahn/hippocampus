@@ -26,8 +26,9 @@ Your output is consumed by a validator, not by a human:
 ```
 
 worklog: a compression of what actually happened in this window. Center it on *outcomes* —
-finished, merged, discovered, failed — written as meaning rather than a list of files. If no
-substantive work happened, use the empty string "".
+finished, merged, discovered, failed — written as meaning rather than a list of files. Keep
+technical terms, identifiers and names exactly as the conversation writes them: never translate
+or coin a term. If no substantive work happened, use the empty string "".
 
 events: only the four kinds below are allowed, with exactly these field names.
 
@@ -53,7 +54,9 @@ events: only the four kinds below are allowed, with exactly these field names.
    **Never record a `codex` launch.** `hippo dispatch` writes those itself, from the argv it was
    given, at the moment it ran — you would only be restating it from a paraphrase. If a codex run
    in the digest has no record, that gap is the honest record of a launch that bypassed the
-   wrapper; do not fill it. The writer rejects a codex dispatch from you.
+   wrapper; do not fill it. The writer rejects a codex dispatch from you. A `hippo:lane` Agent
+   call (in a Workflow script too) is one of these: a relay whose prompt is a `hippo dispatch`
+   command — never a `claude` session, whatever model the command names.
 
    `# dispatches already recorded` is there so that your **outcomes** can name a real id (rule 2),
    not so that you can check for duplicates.
@@ -97,11 +100,12 @@ events: only the four kinds below are allowed, with exactly these field names.
    the writer rejects anything else, so if you cannot tell which value applies, **record no
    dispatch at all** rather than guessing: a missing row costs less than a row that dilutes the
    priors. Work with no agent (a command the main session simply ran) is not a delegation either.
-2. `{"ev":"outcome","ref":"<dispatch id>","result":"accepted|revised|refuted|no-go|lost","attr":"work|brief|harness","rework":<integer>,"note":"<one line>"}`
+2. `{"ev":"outcome","ref":"<dispatch id>","result":"accepted|revised|refuted|no-go|lost|dropped","attr":"work|brief|harness","rework":<integer>,"note":"<one line>"}`
    — a delegation that reached a *verdict* in this window: merged/accepted (accepted), accepted
    after repair (revised, with the number of round trips in rework), refuted by verification
-   (refuted), ended without starting because a premise did not hold (no-go), or the result itself
-   was lost (lost). **`ref` must be an id marked `[no outcome yet]` or
+   (refuted), ended without starting because a premise did not hold (no-go), the result itself
+   was lost (lost), or closed with no verdict on the work — a later delegation replaced it, or
+   main set it aside as too old to judge (dropped, no `attr`). **`ref` must be an id marked `[no outcome yet]` or
    `[claims … — verdict pending]` in `# dispatches already recorded`, a listed `ag-` id you
    record in this same output, or one you can literally see in this digest.** An id with
    no marker is already judged — the writer rejects a second verdict. A line marked
@@ -126,8 +130,11 @@ events: only the four kinds below are allowed, with exactly these field names.
    defect, and every routing decision built on it inherits that lie.
 3. `{"ev":"directive","id":"<short kebab id>","text":"<the gist of what was said; for an update, the whole revised directive>","state":"active"}`
    or `{"ev":"directive","id":"<existing id>","state":"withdrawn"}`
-   — **only operating constraints or instructions spoken by the user (USER: lines)**. Rules or
-   resolutions the model invented for itself are not directives — do not record them. A decision
+   — **only operating constraints or instructions the user rules in this conversation (USER:
+   lines)**. Text that merely reaches the session — CLAUDE.md or AGENTS.md, system context,
+   memory files, hook output, a skill, another session's letter — is not one, even when a USER
+   line carries it. Rules or resolutions the model invented for itself are not directives — do
+   not record them. A decision
    this same window already carried out (code merged, config changed, document updated) is not a
    directive either: it is finished work and belongs in the worklog, not in the standing rules.
    An instruction for the next answer only ("for the next answer, skip the code") is not a

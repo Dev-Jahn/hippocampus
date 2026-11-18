@@ -16,13 +16,14 @@ hippo status [--inject]
 hippo task add <type>/<slug> --title T [--notes N] [--deps a,b]
     [--status pending|active|done|dropped]
 hippo task set <id> title|status|notes|deps <value>      # positional: no --flags
+hippo task note <id> <text>      # appends one timestamped note; set … notes replaces
 hippo task done <id> [--note N]
 hippo task list [--status s1,s2] [--all] [--json]
 hippo task show <id> [--json]
 hippo task drop <id>
 hippo log dispatch --id D --kind K --exec executor/model/effort --scope S
     [--task T] [--depth N] [--parent D]
-hippo log outcome --ref <dispatch-id>|task:<task-id> --result accepted|revised|refuted|no-go|lost
+hippo log outcome --ref <dispatch-id>|task:<task-id> --result accepted|revised|refuted|no-go|lost|dropped
     [--attr work|brief|harness] [--rework N] [--by executor/model] [--note N]
 hippo log outcome --from-batch <journal> [--dry-run] < verdicts.jsonl
 hippo log review --id R --base <sha> --source S --findings N
@@ -43,7 +44,7 @@ hippo dispatch --watch <dispatch-id|batch-id> [--for SECONDS]
 
 ## When
 
-- Work will outlive this turn → `task add`; `task done` when it ships.
+- Work will outlive this turn → `task add`; `task note` as it moves; `task done` when it ships.
 - A delegation gets a verdict → `log outcome` (`--ref task:<id>` finds its open dispatch).
 - The user rules → `directive add`; re-add the same `--id` to change it, `withdraw` when done,
   `--audience main` when a lane never needs it. A rule for the next answer only is not one.

@@ -45,6 +45,22 @@ def test_no_go_and_lost_leave_the_denominator():
     assert "no-go 1" in out and "lost 1" in out  # still visible in the verdict breakdown
 
 
+def test_dropped_closes_a_dispatch_and_counts_nowhere_but_its_own_line():
+    """Measured (steno, 1.17.1): 36 of 38 `lost` outcomes were cleanups of delegations a newer
+    one overtook, read as harness losses. `dropped` closes the dispatch — no open item — and
+    stays out of the rate, the verification denominator and the attribution, on a line of its
+    own."""
+    rows = [_d(f"d{i}", minutes_ago=3000) for i in range(6)]
+    rows += [_o(f"d{i}") for i in range(3)] + [_o("d3", "refuted", attr="work")]
+    rows += [_o("d4", "dropped", attr="harness"), _o("d5", "dropped")]
+    out = facts(rows)
+    assert "| 4 | 3/4 (75.0%)" in out and "dropped 2" in out
+    assert "| codex/gpt-6-sol/xhigh | 4 | 1 | 25.0% |" in out
+    assert "work 1 / brief 0 / harness 0 / unattributed 0" in out
+    assert "\ndropped: 2 — closed with no verdict on the work" in out
+    assert out.split("## open items")[1].split("##")[0].strip().endswith("(none)")
+
+
 def test_a_refutation_is_never_rounded_away():
     """Two verify cells read 100% while each hid one refutation, and the verification budget
     advice was derived from exactly that zero."""

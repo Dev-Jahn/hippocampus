@@ -35,6 +35,18 @@ def _answers(scope, novelty, spec, verifiable=0.9, **over):
             "verifiable": {"noul": verifiable}, **FIT, **over}
 
 
+def _tier(name):
+    """The model a tier names on the shipped prices.yaml, read at call time: these tests are
+    about which tier a brief lands on, and the sheet decides which model that is — a price
+    refresh moves the names, never the rule (pinned on sheets of their own below)."""
+    import sys
+    cli = str(REPO_ROOT / "cli")
+    if cli not in sys.path:
+        sys.path.insert(0, cli)
+    import hippo_cli
+    return hippo_cli.price_ladder(hippo_cli.load_prices())[name]
+
+
 HARD = _answers(1.0, 2.8, 1.0)     # design judgment → top
 MIDDLING = _answers(1.0, 1.2, 0.5)  # some local decisions → mid
 EASY = _answers(0.4, 0.2, 0.1)      # fully specified, textbook → cheap
@@ -99,13 +111,14 @@ def _seed(project, kind, ex, n, accepted):
 # (a) difficulty → tier and effort
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("answers, tier, model, effort", [
-    (HARD, "top", "gpt-6-astra", "high"),
-    (MIDDLING, "mid", "gpt-6.1-sol", "medium"),
-    (EASY, "cheap", "gpt-6-luna", "medium"),
+@pytest.mark.parametrize("answers, tier, effort", [
+    (HARD, "top", "high"),
+    (MIDDLING, "mid", "medium"),
+    (EASY, "cheap", "medium"),
 ])
 def test_difficulty_picks_the_tier_and_the_effort(tmp_project, tmp_path, run_hippo,
-                                                  answers, tier, model, effort):
+                                                  answers, tier, effort):
+    model = _tier(tier)
     manifest = _wave(tmp_project)
     proc = _plan(run_hippo, tmp_project, manifest,
                  _mock(tmp_path, {"answers": answers, "default": DEFAULT}))
@@ -135,8 +148,9 @@ def test_the_ladder_is_printed_once_from_the_price_sheet(tmp_project, tmp_path, 
     proc = _plan(run_hippo, tmp_project, manifest,
                  _mock(tmp_path, {"answers": EASY, "default": DEFAULT}))
     ladders = [ln for ln in proc.stdout.splitlines() if ln.startswith("ladder ")]
-    assert ladders == ["ladder codex: cheap gpt-6-luna · mid gpt-6.1-sol · top gpt-6-astra"]
-    assert _row(proc, "other")[6] == "codex/gpt-6-luna/medium"
+    assert ladders == [f"ladder codex: cheap {_tier('cheap')} · mid {_tier('mid')} · "
+                       f"top {_tier('top')}"]
+    assert _row(proc, "other")[6] == f"codex/{_tier('cheap')}/medium"
 
 
 def test_the_ladder_reads_price_levels_not_rows():
@@ -206,16 +220,17 @@ def test_the_request_asks_the_route_questions_over_the_whole_brief(tmp_project, 
 
 def test_a_tier_this_kind_keeps_failing_at_is_bumped_one_step(tmp_project, tmp_path,
                                                               run_hippo):
-    _seed(tmp_project, "impl", "codex/gpt-6-luna/medium", 5, accepted=1)
+    cheap = _tier("cheap")
+    _seed(tmp_project, "impl", f"codex/{cheap}/medium", 5, accepted=1)
     proc = _plan(run_hippo, tmp_project, _wave(tmp_project),
                  _mock(tmp_path, {"answers": EASY, "default": DEFAULT}))
     assert proc.returncode == 0, proc.stderr
 
     row = _row(proc, "solo")
-    assert row[6] == "codex/gpt-6.1-sol/medium", "cheap scored 1/5 — one tier up"
+    assert row[6] == f"codex/{_tier('mid')}/medium", "cheap scored 1/5 — one tier up"
     assert row[7] == "no evidence", "the evidence column follows the suggestion"
     assert _notes(proc, "solo") == [
-        "cheap → mid: priors impl×codex/gpt-6-luna/medium 1/5 is under 0.50 first-pass"]
+        f"cheap → mid: priors impl×codex/{cheap}/medium 1/5 is under 0.50 first-pass"]
 
 
 def test_a_cheaper_tier_that_clears_the_bar_takes_the_work(tmp_project, tmp_path, run_hippo):
@@ -315,7 +330,7 @@ def test_every_entry_lands_in_the_plan_file(tmp_project, tmp_path, run_hippo):
     assert r["difficulty"]["novelty"] == {"score": 2.8, "confidence": 0.8}
     assert r["difficulty"]["verifiable"] == 0.9, "a noul compacts to its probability"
     assert r["kind_fit"] == {"choice": "impl", "confidence": 0.95}
-    assert r["suggested"] == {"model": "gpt-6-astra", "effort": "high"}
+    assert r["suggested"] == {"model": _tier("top"), "effort": "high"}
     assert r["evidence"] == "no evidence"
     assert r["jev"]["ok"] is True
 
@@ -364,7 +379,7 @@ def test_with_the_judge_off_the_deterministic_half_still_prints(tmp_project, run
     proc = _plan(run_hippo, tmp_project, manifest)
     assert proc.returncode == 0, proc.stderr
     assert "judge off — no TYPESAFE_API_KEY" in proc.stderr
-    assert "ladder codex: cheap gpt-6-luna" in proc.stdout
+    assert f"ladder codex: cheap {_tier('cheap')}" in proc.stdout
 
     row = _row(proc, "solo")
     assert row[1:5] == ["-", "-", "-", "-"], "no difficulty without the judge"
@@ -411,14 +426,15 @@ def test_with_the_judge_an_unrouted_entry_launches_on_the_suggestion(tmp_project
     assert proc.returncode == 0, proc.stderr
 
     sent = argv.read_text(encoding="utf-8").split("\0")
-    assert sent[:5] == ["exec", "-m", "gpt-6-astra", "-c", "model_reasoning_effort=high"]
+    top = _tier("top")
+    assert sent[:5] == ["exec", "-m", top, "-c", "model_reasoning_effort=high"]
     (d,) = [e for e in read_ledger(tmp_project) if e.get("ev") == "dispatch"]
-    assert d["exec"] == "codex/gpt-6-astra/high"
+    assert d["exec"] == f"codex/{top}/high"
     # The plan goes to stderr before the batch starts: stdout is the harvest's.
-    assert "ladder codex: cheap gpt-6-luna" in proc.stderr
+    assert f"ladder codex: cheap {_tier('cheap')}" in proc.stderr
     assert proc.stderr.index("ladder codex") < proc.stderr.index("[1/1] solo")
     assert "ladder" not in proc.stdout
-    assert _plan_file(manifest)[0]["suggested"] == {"model": "gpt-6-astra", "effort": "high"}
+    assert _plan_file(manifest)[0]["suggested"] == {"model": top, "effort": "high"}
 
 
 def test_an_unrouted_entry_the_judge_cannot_route_launches_nothing(tmp_project, tmp_path,
@@ -540,5 +556,5 @@ def test_with_no_hippo_it_says_so_and_still_plans(uninitialized_dir, tmp_path, r
                  _mock(tmp_path, {"answers": HARD, "default": DEFAULT}))
     assert proc.returncode == 0, proc.stderr
     assert "no .hippo/" in proc.stderr
-    assert _row(proc, "solo")[6] == "codex/gpt-6-astra/high"
+    assert _row(proc, "solo")[6] == f"codex/{_tier('top')}/high"
     assert _row(proc, "solo")[7] == "no evidence"

@@ -83,7 +83,9 @@ ALLOWED = {
     "review": ("id", "base", "source", "findings"),
     "review-status": ("ref", "addressed", "at"),
     "directive": ("id", "text", "lifetime", "state", "audience"),
-    "clerk": ("name", "ok", "ms", "tokens"),
+    # dropped: the clerk's events a scribe run set aside as restatements of rows already in
+    # the ledger (`scribe_restates`) — counted here, never dumped.
+    "clerk": ("name", "ok", "ms", "tokens", "dropped"),
     "usage": ("ref", "tokens", "model", "tin", "tcached", "tout"),
     # p: the compact probabilities the route was computed from — done, blocked, ask, creep,
     # evidence, and risk (a 0-3 score). A question the reply did not answer is absent.
@@ -114,7 +116,12 @@ EXEC_PLACEHOLDERS = {"executor", "vehicle", "model", "effort"}
 EXECUTORS = {"codex", "claude", "fork", "subagent", "workflow"}
 EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra", "inherit"}
 ENUMS = {
-    ("outcome", "result"): {"accepted", "revised", "refuted", "no-go", "lost"},
+    # dropped: closed with no verdict on the work — a later delegation replaced it, or it is too
+    # old for anyone to judge. Measured (steno, 1.17.1): 36 of 38 `lost` outcomes were cleanups
+    # of delegations a newer one overtook, main once wrote `no-go` for the same thing ("there is
+    # no 'superseded' value"), 37 native runs lost their verdicts to a compaction and 20 old
+    # dispatches were written `lost/harness` only to clear them. It mirrors the task status.
+    ("outcome", "result"): {"accepted", "revised", "refuted", "no-go", "lost", "dropped"},
     ("outcome", "attr"): {"work", "brief", "harness"},
     ("directive", "state"): {"active", "withdrawn", "expired"},
     # audience is *who* a directive binds (§9.4). Absent = all — a narrow default would silently
@@ -133,7 +140,8 @@ TRIAGE_TRIMMED = ("stderr_tail", "brief", "changes", "report")  # what fit_triag
 # kebab ASCII or nothing. An id derived from non-ASCII text collapses to the empty string, and
 # an id that is empty (or spelled differently every time) cannot supersede anything.
 DIRECTIVE_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-INT_FIELDS = ("findings", "rework", "ms", "tokens", "depth", "tin", "tcached", "tout")
+INT_FIELDS = ("findings", "rework", "ms", "tokens", "depth", "tin", "tcached", "tout",
+              "dropped")
 
 
 def validate_event(e):
@@ -383,14 +391,46 @@ def directives(hp):
     return cur
 
 
+# Where an unreadable tasks.yaml's one line goes instead of ending the command: None everywhere
+# but `status`, whose capsule must survive the file (cmd_status).
+TASKS_UNREADABLE = None
+
+
 def tasks_load(hp):
+    """tasks.yaml → {tasks: [...]}; a file that does not parse, or is not that shape, ends the
+    command with one line naming the file, where and why, and a non-zero exit.
+
+    Measured (steno, 1.17.1): a script editing tasks.yaml by hand left it unparseable — the
+    change was committed and pushed — and every hippo command then printed a raw PyYAML
+    traceback. Not an empty list either: a write would then save an empty registry over it.
+    `status` alone carries on (TASKS_UNREADABLE), with the line in what it prints, so the
+    capsule a session starts with still has its directives and says what is broken."""
     p = hp / "tasks.yaml"
-    data = yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else None
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else None
+    except yaml.YAMLError as ex:
+        mark = getattr(ex, "problem_mark", None)
+        where = f"line {mark.line + 1}, column {mark.column + 1}" if mark else "somewhere"
+        why = " ".join(filter(None, (getattr(ex, "problem", None),
+                                     getattr(ex, "context", None)))) or str(ex)
+        return tasks_unreadable(p, f"does not parse at {where}: {one_line(why)}")
     data = data or {}
     if not isinstance(data, dict) or not isinstance(data.get("tasks", []), list):
-        die(f"malformed tasks.yaml: expected {{tasks: [...]}} ({p})")
+        return tasks_unreadable(p, "is not {tasks: [...]}")
     data.setdefault("tasks", [])
     return data
+
+
+def tasks_unreadable(p, what):
+    line = (f"hippo: {p} {what} — fix the file by hand (plain YAML); no task command runs "
+            "until it reads")
+    if TASKS_UNREADABLE is None:
+        # One line on stderr, exit 1 — no usage block to bury it; the SystemExit carries the
+        # line, so a dump of a caught exit (native_guard) says what happened too.
+        sys.exit(line)
+    if line not in TASKS_UNREADABLE:
+        TASKS_UNREADABLE.append(line)
+    return {"tasks": []}
 
 
 def write_durable(p, text):
@@ -1598,6 +1638,21 @@ def precompact_lines(hp):
 
 
 def cmd_status(args):
+    """A tasks.yaml that does not read costs status its task lines, never the rest: what it can
+    print, then the file's one line (in the capsule itself under --inject, where the hook keeps
+    stdout only), exit 1 (tasks_load)."""
+    global TASKS_UNREADABLE
+    TASKS_UNREADABLE = []
+    try:
+        status_print(args)
+    finally:
+        broken, TASKS_UNREADABLE = TASKS_UNREADABLE, None
+    if broken:
+        print("\n".join(broken), file=sys.stdout if args.inject else sys.stderr)
+        sys.exit(1)
+
+
+def status_print(args):
     hp = args.hp
     if args.inject:
         # The hook names its moment in HIPPO_INJECT — internal, never a flag (§3.4): SessionStart
@@ -1686,13 +1741,40 @@ def cmd_task_done(args):
         die(f"no such task id: {args.id}")
     t["status"] = "done"
     if args.note:
-        t.setdefault("notes", [])
-        if not isinstance(t["notes"], list):
-            t["notes"] = [t["notes"]]
-        t["notes"].append(args.note)
+        note_append(t, args.note)
     t["updated"] = now_iso()
     tasks_save(args.hp, data)
     print(f"done {args.id}")
+
+
+def note_append(t, text):
+    """Append one note to task `t` as `<YYYY-MM-DDTHH:MMZ> <text>`: notes is a list of strings,
+    oldest first, the latest last. A hand-edited scalar becomes the list's first item."""
+    notes = t.get("notes")
+    notes = [] if notes is None else notes if isinstance(notes, list) else [notes]
+    notes.append(f"{now_iso()[:16]}Z {text}")
+    t["notes"] = notes
+
+
+def cmd_task_note(args):
+    """`task note <id> <text>`: one timestamped note appended, nothing replaced (`task set …
+    notes` stays the replace).
+
+    Measured (steno, 13 days on 1.17.1): 524 `task set <id> notes` calls, 225 of them over
+    1,500 chars — the whole notes re-sent to add a line — notes up to 13 KB, one overwrite that
+    lost notes, and 61 scripts editing tasks.yaml by sed or python, one of which left it
+    unparseable. Append was the operation wanted and the CLI had none. Not a worker write
+    (§3.5.3d): a note claims no state — the task's status, title and deps are untouched."""
+    if not args.text.strip():
+        die("task note: the text is empty — nothing to append")
+    data = tasks_load(args.hp)
+    t = find_task(data, args.id)
+    if not t:
+        die(f"no such task id: {args.id}")
+    note_append(t, args.text)
+    t["updated"] = now_iso()
+    tasks_save(args.hp, data)
+    print(f"{args.id}: note {len(t['notes'])} appended")
 
 
 def cmd_task_drop(args):
@@ -1888,6 +1970,12 @@ def validate_scribe_event(e):
     if effort not in EFFORTS:
         return (f"ev=dispatch: effort must be one of {'|'.join(sorted(EFFORTS))}: {effort!r} "
                 "(use `inherit` when the executor takes its setting from its parent)")
+    # A pair that cannot exist. Measured (steno, 1.17.1): 17 `claude/gpt-6.1-sol/high` rows under
+    # coined ids — the clerk's reading of `hippo:lane` relays, whose prompt names the codex
+    # lane's model. A Claude Code session runs a Claude model; a gpt model is a codex lane.
+    if executor == "claude" and parts[1].lower().startswith("gpt-"):
+        return (f"ev=dispatch: a claude executor does not run {parts[1]!r} — a gpt model is a "
+                "codex lane, which `hippo dispatch` records (a hippo:lane agent is its relay)")
     return None
 
 
@@ -1916,15 +2004,45 @@ def check_scribe_outcome(hp, e, native=None, held=None):
     rows = read_ledger(hp)
     # A lane's self-report is a claim, not a verdict (§9.2): the scribe recording main's
     # explicit acceptance signal *after* a claim is the normal flow, not a re-judgment.
-    if e.get("ref") in judged_refs(rows):
-        return (f"ev=outcome: ref={e.get('ref')!r} already has a verdict — the scribe does not "
-                "re-judge (at most one outcome per dispatch; a second verdict belongs to main)")
+    last = [x for x in verdict_rows(rows) if x.get("ref") == e.get("ref")]
+    if last:  # one that agrees never gets here (`scribe_restates`): this one disagrees
+        return (f"ev=outcome: ref={e.get('ref')!r} already has a verdict ("
+                f"{last[-1].get('result')}, {last[-1].get('src')}) and this one says "
+                f"{e.get('result')!r} — the scribe does not re-judge (at most one outcome per "
+                "dispatch; a second verdict belongs to main)")
     why = (held or {}).get(e.get("ref")) or still_running(hp, e.get("ref"), rows, native)
     if why:
         return (f"ev=outcome: ref={e.get('ref')!r} was still running when this window was read: "
                 f"{why}. A verdict needs an ended delegation; a launch or a progress line is "
                 "not one")
     return None
+
+
+def scribe_restates(hp, e, native=None):
+    """True for a clerk event that only restates what the ledger already holds: set aside with
+    no dump, counted on the run's meter (`dropped`) — a restatement is no failure.
+
+    Measured (steno, 13 days on 1.17.1): 371 of 385 failure dumps were "N events rejected", and
+    324 of the 471 rejected events were the scribe re-emitting a verdict main had already
+    written — agreeing with it in 318. The dumps buried the few that mattered. So: an outcome
+    whose ref's latest verdict has the same result; a dispatch under an id the ledger already
+    has; and a dispatch naming a run hippo skips as a relay (NATIVE_SKIP — a hippo:lane agent
+    babysits a codex lane its wrapper records), bare or `ag-`-prefixed. A verdict that
+    disagrees with the recorded one is not a restatement and is still dumped
+    (`check_scribe_outcome`)."""
+    if not isinstance(e, dict):
+        return False
+    if e.get("ev") == "outcome":
+        last = [x for x in verdict_rows(read_ledger(hp)) if x.get("ref") == e.get("ref")]
+        return bool(last) and last[-1].get("result") == e.get("result")
+    if e.get("ev") != "dispatch" or not isinstance(e.get("id"), str):
+        return False
+    did = e["id"]
+    if any(x.get("ev") == "dispatch" and x.get("id") == did for x in read_ledger(hp)):
+        return True
+    runs = (native or {}).get("runs", {})
+    run = runs.get(did) or runs.get(NATIVE_PREFIX + did)
+    return run is not None and run["skip"]
 
 
 def still_running(hp, ref, rows, native=None):
@@ -1945,12 +2063,9 @@ def still_running(hp, ref, rows, native=None):
     if run is not None:
         return None if run["ended"] else (f"native run {run['id']} has not ended (no "
                                           "notification, TaskStop or end in its run file yet)")
-    if not isinstance(ref, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", ref):
-        return None
-    rec = _read_json(hp / "lanes" / f"{ref}.json")
+    rec = lane_record(hp, ref)
     if rec:
-        return (f"its lane record has no end and its wrapper (pid {rec.get('pid')}) is alive"
-                if watch_state(rec) == "running" else None)
+        return lane_running(rec)
     launch = next((e for e in rows if e.get("ev") == "dispatch" and e.get("id") == ref
                    and e.get("src") == "wrapper"), None)
     t, now = event_time(launch or {}), datetime.now(timezone.utc)
@@ -1958,6 +2073,41 @@ def still_running(hp, ref, rows, native=None):
             or any(e.get("ev") in EXIT_EVS and e.get("ref") == ref for e in rows)):
         return None
     return f"no lane record and no exit row yet, launched {age_label(t, now)} ago"
+
+
+def lane_record(hp, ref):
+    """The wrapper lane record `ref` names, or {} — none, or `ref` is no lane id."""
+    if not isinstance(ref, str) or not SAFE_ID_RE.fullmatch(ref):
+        return {}
+    return _read_json(hp / "lanes" / f"{ref}.json")
+
+
+def lane_running(rec):
+    """Why the lane on record `rec` is running right now → a reason, or None — read as `--watch`
+    reads it (watch_state): no end on record and its wrapper alive. A record left behind by a
+    wrapper that died says nothing new from then on, and its dead pid is what tells it apart:
+    such a lane reads ended or lost, never running, so nothing it holds waits forever."""
+    if watch_state(rec) != "running":
+        return None
+    return f"its lane record has no end and its wrapper (pid {rec.get('pid')}) is alive"
+
+
+def verdict_on_running(hp, ref):
+    """Main's verdict on a lane still running → the one-line refusal, or None.
+
+    Measured (steno, 13 days on 1.17.1): main's cleanup loop wrote `lost/harness` on 7 lanes
+    that were mid-run, and six of them ran on to finish with `lost` as the first verdict —
+    the one PRIORS reads. The scribe was already held to an ended delegation
+    (`check_scribe_outcome`); main's own door had no such check. Only the positive reading
+    refuses: a running wrapper on record. The scribe's fallback for a launch with no record
+    (`still_running`) stays the scribe's — main typing a verdict on a lane whose record could
+    not be written must not wait out a day. A lane's own claim (src=executor) is written while
+    it runs by design and never reaches here."""
+    why = lane_running(lane_record(hp, ref))
+    if why is None:
+        return None
+    return (f"outcome: {ref} is still running ({why}) — nothing recorded. A verdict needs an "
+            f"ended lane: wait (`hippo dispatch --watch {ref}`) or stop it, then judge it")
 
 
 def check_scribe_directive(hp, e, start):
@@ -2062,6 +2212,7 @@ def log_outcome_bulk(args):
     known = {e.get("id") for e in ledger if e.get("ev") == "dispatch"}
     judged = judged_refs(ledger)
     claims = executor_claims(ledger)
+    claiming = resolve_src() == "executor"  # from inside a lane: claims, written while it runs
     rows, problems, seen = [], [], {}
     for n, raw in enumerate(sys.stdin.read().splitlines(), 1):
         if not raw.strip():
@@ -2137,6 +2288,10 @@ def log_outcome_bulk(args):
             problems.append(f"{where}: {ref} has no executor claim yet — judging an unclaimed "
                             "lane keeps the scalar command")
             continue
+        refusal = None if claiming else verdict_on_running(args.hp, ref)
+        if refusal:
+            problems.append(f"{where}: {refusal}")
+            continue
         rows.append(e)
     if problems:
         die(f"outcome --from-batch: {len(problems)} problem(s), nothing written\n"
@@ -2194,6 +2349,11 @@ def cmd_log(args):
         if not ref:
             die("outcome: --ref is required (inside a dispatched lane HIPPO_DISPATCH supplies it)")
         e.update(ref=resolve_ref(args.hp, ref), result=args.result)
+        refusal = None if resolve_src() == "executor" else verdict_on_running(args.hp, e["ref"])
+        if refusal:
+            # One line and no usage block: the command was right, the moment was not.
+            print(refusal, file=sys.stderr)
+            sys.exit(1)
         for k in ("attr", "rework", "by", "note"):
             if getattr(args, k) is not None:
                 e[k] = getattr(args, k)
@@ -2369,7 +2529,8 @@ def prior_cells(rows, prices=None):
             continue
         b = cells.setdefault((d.get("kind"), d.get("exec")),
                              {"judged": 0, "accepted": 0, "revised": 0, "refuted": 0,
-                              "no-go": 0, "lost": 0, "rework": 0, "tokens": 0, "usd": 0.0,
+                              "no-go": 0, "lost": 0, "dropped": 0, "rework": 0, "tokens": 0,
+                              "usd": 0.0,
                               "priced": 0, "unpriced": 0,
                               "unpriced_models": collections.Counter()})
         b["judged"] += 1
@@ -2394,13 +2555,13 @@ def prior_cells(rows, prices=None):
 
 
 def prior_n(b):
-    """The denominator of a first-pass rate: a no-go never started and a lost result was never
-    seen, so neither is a judgment of the work."""
-    return b["judged"] - b["no-go"] - b["lost"]
+    """The denominator of a first-pass rate: a no-go never started, a lost result was never
+    seen and a dropped one was closed unjudged, so none is a judgment of the work."""
+    return b["judged"] - b["no-go"] - b["lost"] - b["dropped"]
 
 
 AGREEMENT_ROUTES = ("accept-candidate", "escalate", "no-go-candidate", "failed")
-AGREEMENT_RESULTS = ("accepted", "revised", "refuted", "no-go", "lost")
+AGREEMENT_RESULTS = ("accepted", "revised", "refuted", "no-go", "lost", "dropped")
 
 
 def triage_agreement(rows):
@@ -2444,7 +2605,7 @@ def triage_agreement(rows):
         lines += ["", f"below the n={PRIOR_MIN_SAMPLE} threshold, no row reported "
                       f"({len(thin)}): " + ", ".join(thin)]
     acc = table["accept-candidate"]
-    b = sum(acc.values())
+    b = sum(acc.values()) - acc["dropped"]  # closed unjudged: neither right nor wrong
     if b:
         a = acc["accepted"] + acc["revised"]
         rate = f" ({100 * a / b:.1f}%)" if b >= PRIOR_MIN_SAMPLE else f" (n={b}, no rate)"
@@ -2479,14 +2640,14 @@ def prior_facts(rows, now, prices=None):
     per_exec, unpriced_models = {}, collections.Counter()
     for (_, ex), b in cells.items():
         p = per_exec.setdefault(ex, {"judged": 0, "accepted": 0, "revised": 0, "refuted": 0,
-                                     "no-go": 0, "lost": 0})
+                                     "no-go": 0, "lost": 0, "dropped": 0})
         for k in p:
             p[k] += b[k]
         unpriced_models.update(b["unpriced_models"])
 
     # Cells under the threshold are named but never given a rate: a percentage over n=1 reads as
     # evidence and is not one. Naming them keeps the omission visible instead of silent.
-    lines = ["## routing — accepted / (judged − no-go − lost), per kind × exec", "",
+    lines = ["## routing — accepted / (judged − no-go − lost − dropped), per kind × exec", "",
              f"prices as of {prices.get('as_of') or 'unknown'} (prices.yaml); "
              "cost columns cover measured usage only",
              "",
@@ -2500,7 +2661,7 @@ def prior_facts(rows, now, prices=None):
             thin.append(f"{kind}×{ex} (n={n})")
             continue
         verdicts = ", ".join(f"{k} {b[k]}" for k in ("accepted", "revised", "refuted", "no-go",
-                                                     "lost") if b[k])
+                                                     "lost", "dropped") if b[k])
         tok = f"{b['tokens']:,}" if b["tokens"] else "—"
         star = "*" if b["unpriced"] else ""
         usd_s = f"${b['usd']:.2f}{star}" if b["priced"] else ("—" + star)
@@ -2512,6 +2673,10 @@ def prior_facts(rows, now, prices=None):
     if thin:
         lines += ["", f"below the n={PRIOR_MIN_SAMPLE} threshold, no rate reported "
                       f"({len(thin)}): " + ", ".join(thin)]
+    dropped = sum(b["dropped"] for b in cells.values())
+    if dropped:
+        lines += ["", f"dropped: {dropped} — closed with no verdict on the work (replaced by a "
+                      "later delegation, or too old to judge); in no rate or loss count here"]
     if unpriced_models:
         lines += ["", "unpriced usage (* above — model not on the price sheet, or no billing "
                       "breakdown): " + ", ".join(f"{m}×{c}" for m, c in
@@ -2530,18 +2695,19 @@ def prior_facts(rows, now, prices=None):
               "| exec | judged | refuted+revised | rate |", "|---|---:|---:|---:|"]
     thin_exec = []
     for ex, b in sorted(per_exec.items(), key=lambda kv: -kv[1]["judged"]):
-        bad = b["refuted"] + b["revised"]
-        if b["judged"] < PRIOR_MIN_SAMPLE:
-            thin_exec.append(f"{ex} (n={b['judged']})")
+        bad, n = b["refuted"] + b["revised"], b["judged"] - b["dropped"]
+        if n < PRIOR_MIN_SAMPLE:
+            thin_exec.append(f"{ex} (n={n})")
             continue
-        lines.append(f"| {ex} | {b['judged']} | {bad} | {100 * bad / b['judged']:.1f}% |")
+        lines.append(f"| {ex} | {n} | {bad} | {100 * bad / n:.1f}% |")
     if thin_exec:
         lines += ["", f"below the n={PRIOR_MIN_SAMPLE} threshold, no rate reported "
                       f"({len(thin_exec)}): " + ", ".join(thin_exec)]
 
     lines += triage_agreement(rows)
 
-    attr = collections.Counter(e.get("attr") for e in outs if e.get("result") != "accepted")
+    attr = collections.Counter(e.get("attr") for e in outs
+                               if e.get("result") not in ("accepted", "dropped"))
     unjoined = sum(1 for e in outs if e.get("ref") not in known)
     lines += ["", "## attribution of non-accepted outcomes", "",
               f"work {attr['work']} / brief {attr['brief']} / harness {attr['harness']} "
@@ -3370,15 +3536,63 @@ def khala_records(ld):
             yield rec
 
 
-def khala_resumed(ld, args):
-    """The name of the lane whose codex session `args` resume (`… resume <session> …`), off
-    that lane's record — None when they resume none, or no record of it names one."""
+def resumed_session(args):
+    """The codex session id `args` resume (`… resume <session> …`), or None — they resume none,
+    or name none (`resume --last`)."""
     at = codex_resume_at(args)
     if at is None:
         return None
     after = args[at + 1:]
-    sid = next((a for i, a in enumerate(after) if not a.startswith("-")
-                and (i == 0 or after[i - 1] not in CODEX_VALUE_OPTIONS)), None)
+    return next((a for i, a in enumerate(after) if not a.startswith("-")
+                 and (i == 0 or after[i - 1] not in CODEX_VALUE_OPTIONS)), None)
+
+
+def resumed_exec(hp, rest, label):
+    """A resume's exec label: the slots its own argv leaves `unset` taken from the lane whose
+    session it resumes → (label, a stderr note or None).
+
+    Measured (steno, 13 days on 1.17.1): 78 of 641 dispatches (12%) were resumes typed as
+    `-- -C <dir> resume <session> "…"` — no `-m`, no effort — and recorded `codex/unset/unset`,
+    which made PRIORS a `research × codex/unset/unset` row of n=61; every one of the 78 resumed a
+    session another lane record of the project names with its model and effort. The model and
+    effort codex resumes on are the session's own, so the resumed lane's are the honest
+    label: from the newest record of that session that has the slot (`.hippo/lanes/`, kept a
+    week), the model else from its `ev:usage` row (written from codex's banner). Argv still
+    wins — a `-m` on the resume is what codex runs. Nothing found is said, not guessed."""
+    _, model, effort = label.split("/")
+    sid = resumed_session(rest)
+    if "unset" not in (model, effort) or sid is None or hp is None:
+        return label, None
+    recs = sorted((r for p in (hp / "lanes").glob("d*.json") if (r := read_record(p))
+                   and r.get("codex_session") == sid and isinstance(r.get("exec"), str)),
+                  key=lambda r: r.get("started") or "", reverse=True)
+    used = {r.get("id"): r.get("model") for r in read_ledger(hp)
+            if r.get("ev") == "usage" and r.get("src") == "wrapper"} if recs else {}
+    found = {}
+    for r in recs:
+        parts = r["exec"].split("/")
+        slots = {"model": parts[1], "effort": parts[2]} if len(parts) == 3 else {}
+        if slots.get("model") in (None, "unset") and used.get(r.get("id")):
+            slots["model"] = used[r.get("id")]
+        for k, v in slots.items():
+            if v and v != "unset":
+                found.setdefault(k, (v, r.get("id")))
+    have = {"model": model, "effort": effort}
+    taken = {k: found[k] for k in have if have[k] == "unset" and k in found}
+    have.update({k: v for k, (v, _) in taken.items()})
+    new = f"codex/{have['model']}/{have['effort']}"
+    if not taken:
+        return label, (f"resume of session {sid}: no lane record of it names a model or effort "
+                       f"— recorded as {label}; pass -m and -c model_reasoning_effort=… to "
+                       "label it")
+    froms = ", ".join(sorted({d for _, d in taken.values()}))
+    return new, f"resume of session {sid}: exec {new}, taken from lane {froms}"
+
+
+def khala_resumed(ld, args):
+    """The name of the lane whose codex session `args` resume (`… resume <session> …`), off
+    that lane's record — None when they resume none, or no record of it names one."""
+    sid = resumed_session(args)
     recs = [r for r in khala_records(ld) if sid and r.get("codex_session") == sid]
     name = max(recs, key=lambda r: r.get("started") or "")["khala"].split("@")[0] if recs else ""
     return name if khala_name_ok(name) else None
@@ -3534,7 +3748,10 @@ def run_dispatch(argv):
     # depth-2 becomes an event in the ledger, not a prohibition nobody can check).
     parent = os.environ.get("HIPPO_DISPATCH", "")
     hp = find_hippo()
-    check_fanout(hp, parent, exec_label(rest).split("/")[1])
+    exec_, note = resumed_exec(hp, rest, exec_label(rest))
+    if note:
+        print(f"dispatch: {note}", file=sys.stderr)
+    check_fanout(hp, parent, exec_.split("/")[1])
     # The lane's files (§3.6): codex's raw stderr, its stdout (the report) and the record,
     # written before the id is printed so a watcher never races the record into existence.
     # With no .hippo/ there is no record and the raw log goes to a temp file the last line names.
@@ -3546,7 +3763,7 @@ def run_dispatch(argv):
     if hp is None:
         print("dispatch: no .hippo/ — skipping the dispatch record", file=sys.stderr)
     else:
-        e = {"ev": "dispatch", "id": did, "kind": kind, "exec": exec_label(rest), "scope": scope,
+        e = {"ev": "dispatch", "id": did, "kind": kind, "exec": exec_, "scope": scope,
              "depth": depth}
         if task:
             e["task"] = task
@@ -3565,7 +3782,7 @@ def run_dispatch(argv):
         fd, name = tempfile.mkstemp(prefix=f"hippo-{did}-", suffix=".log")
         os.close(fd)
         log, report_copy, record = Path(name), None, None
-    lane = Lane(did, scope, exec_label(rest), record, log, report_copy, kind, task, depth,
+    lane = Lane(did, scope, exec_, record, log, report_copy, kind, task, depth,
                 codex_resume_args(rest, Path.cwd()), khala=kh)
     print(f"dispatch:{did}", flush=True)
     if kh:
@@ -7848,7 +8065,7 @@ def cmd_scribe(args):
              if r["ref"] and r["ref"] != r["id"]} if native else {}
     start = (window_start(transcript, since, end)
              if any(isinstance(e, dict) and e.get("ev") == "directive" for e in events) else None)
-    rejected = []
+    rejected, dropped = [], 0
     for e in events:
         # lifetime is retired (§3.2) and the prompt no longer asks for it; a clerk that still
         # says `turn` must not make its directive invisible to the view.
@@ -7857,6 +8074,9 @@ def cmd_scribe(args):
         if (isinstance(e, dict) and e.get("ev") == "outcome" and isinstance(e.get("ref"), str)
                 and e["ref"] in alias):
             e["ref"] = alias[e["ref"]]
+        if scribe_restates(hp, e, native):
+            dropped += 1
+            continue
         taken, verr = native_guard(hp, native_take, hp, e, native, alias) or (False, None)
         if not taken:
             verr = (validate_event(e) or validate_scribe_event(e) or check_ref(hp, e)
@@ -7877,7 +8097,8 @@ def cmd_scribe(args):
         worklog_append(hp, obj["worklog"].strip())
     settle()
     save_cursor()
-    append_event(hp, {**meter, "ok": True}, src="scribe")
+    append_event(hp, {**meter, "ok": True, **({"dropped": dropped} if dropped else {})},
+                 src="scribe")
     auto_distill(hp)
     # 9. Open tasks that look ended (DESIGN §3.5.9) — last, on both paths: it reads nothing
     # the scribe wrote (the clerk never writes tasks.yaml) and nothing waits on it.
@@ -7919,6 +8140,10 @@ def build_parser():
     a.add_argument("field")
     a.add_argument("value")
     a.set_defaults(fn=cmd_task_set, writes=True)
+    a = t.add_parser("note", help="append one timestamped note (set … notes replaces)")
+    a.add_argument("id")
+    a.add_argument("text")
+    a.set_defaults(fn=cmd_task_note, writes=True)
     a = t.add_parser("done", help="mark as done")
     a.add_argument("id")
     a.add_argument("--note", help="append to notes")

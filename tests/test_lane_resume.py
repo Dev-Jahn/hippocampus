@@ -503,6 +503,34 @@ def test_a_lane_that_resumes_an_earlier_lanes_session_pays_only_its_own_tokens(
     assert json.loads(capture.read_text())["state"]["brief"] is None
 
 
+def test_a_resume_typed_without_a_model_inherits_the_lanes_label(lab, capfd):
+    """Measured (steno, 1.17.1): 78 of 641 dispatches were resumes typed as `-- -C <dir> resume
+    <session> "…"` and recorded `codex/unset/unset` — a PRIORS row of n=61 — while a lane record
+    of each session named its model and effort. The resume takes the slots its argv leaves
+    unset from that record and says so; a session no record names stays unset, said too."""
+    code, first, _, _ = _dispatch(capfd)
+    assert code == 0
+
+    def resume(sid):
+        with pytest.raises(SystemExit) as done:
+            hippo_cli.run_dispatch(["--kind", "research", "--scope", "accounts (resumed)", "--",
+                                    "-C", lab.cwd, "resume", sid, hippo_cli.RESUME_CONTINUE])
+        out, err = capfd.readouterr()
+        assert done.value.code == 0, err
+        return out.splitlines()[0].removeprefix("dispatch:"), err
+
+    did, err = resume(SID)
+    rows = {e["id"]: e for e in _rows(lab.project, "dispatch")}
+    assert rows[did]["exec"] == "codex/gpt-6.1-sol/high"
+    assert lab.record(did)["exec"] == "codex/gpt-6.1-sol/high", "a resume of it inherits too"
+    assert f"exec codex/gpt-6.1-sol/high, taken from lane {first}" in err
+
+    did, err = resume("01a0ffff-0000-7000-8000-000000000000")
+    assert {e["id"]: e for e in _rows(lab.project, "dispatch")}[did]["exec"] == \
+        "codex/unset/unset"
+    assert "no lane record of it names a model or effort" in err
+
+
 def test_a_count_that_went_down_is_a_restart_not_a_negative_cost(lab):
     """The last count before the lane started is its baseline — unless the count fell below
     it: then the session's count began again, and all of it is the lane's."""

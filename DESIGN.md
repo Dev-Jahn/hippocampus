@@ -153,21 +153,36 @@ optional `src` (`scribe|cli|wrapper|executor`).
 {"t":"…","ev":"review-status","ref":"r007","addressed":"partial","at":"def4567"}
 {"t":"…","ev":"directive","id":"gpu-01","text":"use GPUs 0 and 1 only","state":"active"}
 {"t":"…","ev":"directive","id":"gpu-01","state":"withdrawn"}
-{"t":"…","ev":"clerk","name":"turn-scribe","ms":8100,"ok":true,"tokens":1400}
+{"t":"…","ev":"clerk","name":"turn-scribe","ms":8100,"ok":true,"tokens":1400,"dropped":3}
 {"t":"…","ev":"usage","ref":"d041","tokens":1100000,"tin":1000000,"tcached":400000,"tout":100000,"model":"gpt-6-sol"}
 {"t":"…","ev":"triage","ref":"d041","route":"accept-candidate","verify":false,"p":{"done":0.95,"blocked":0.02,"ask":0.03,"creep":0.04,"evidence":0.91,"risk":1.0}}
 ```
 
-- `outcome.result ∈ {accepted, revised, refuted, no-go, lost}`; `attr ∈ {work, brief, harness}`
+- `outcome.result ∈ {accepted, revised, refuted, no-go, lost, dropped}`; `attr ∈ {work, brief, harness}`
   (recommended whenever the result is not accepted — a failure count with no attribution produces a
   lying prior. Measured: the run of REFUTEDs was work, the NO-GO from contradictory GPU clauses was
   brief, and the vanished StructuredOutput was harness). A second outcome for one dispatch is
   legal from main — a deliberate re-verdict after rework is main's call — but it gets a stderr
   note, because the routing table is a *first-pass* rate and keeps reading the first verdict.
+  `dropped` (1.18.0) closes a dispatch with no verdict on the work — a later delegation
+  replaced it, or it is too old for anyone to judge — and, like the task status it mirrors,
+  says nothing good or bad: it leaves the in-flight line and the open items, and PRIORS keeps
+  it out of every rate and loss count (first-pass and verification denominators, attribution,
+  the judge's precision), giving it its own count under the routing table. Measured (steno,
+  13 days on 1.17.1): 36 of 38 `lost` outcomes were cleanups of delegations a newer one had
+  overtaken, read by PRIORS as harness losses; main once wrote `no-go` for the same thing
+  because there was no such value; 37 native runs lost their verdicts to a compaction, and 20
+  old dispatches were written `lost/harness` only to clear them.
   From the scribe a second outcome is rejected outright (§3.5.6b). A verdict needs an ended
   delegation: a scribe outcome on one still in flight is refused at write time (§3.5.6b), and
   one already in the ledger, stamped before its delegation ended, is no verdict in any view —
-  main's later verdict is the first (§3.6b). The ledger is not rewritten.
+  main's later verdict is the first (§3.6b). The ledger is not rewritten. Main's own verdict
+  (scalar and `--from-batch`) is refused too, in one line naming `hippo dispatch --watch`, while
+  the lane's record reads `running` — no `ended` and its wrapper alive, `--watch`'s reading; a
+  record its dead wrapper left behind reads ended or lost and holds nothing. Measured (steno,
+  13 days on 1.17.1): a cleanup loop wrote `lost/harness` on 7 lanes mid-run, and six ran on to
+  finish under that first verdict. Only that positive reading refuses main — not the scribe's
+  no-record fallback — and a lane's claim, written while it runs, is never refused.
 - `review-status.addressed ∈ {full, partial, none}` — closed like `result`, because it is the one
   field reviews are folded on ("not fully addressed"): a free-form "fully" would read as open
   forever. `hippo log review` prints a one-line stderr reminder to record the closing
@@ -326,13 +341,14 @@ hippo status [--inject]
 hippo task add <type>/<slug> --title T [--notes N] [--deps a,b]
     [--status pending|active|done|dropped]
 hippo task set <id> title|status|notes|deps <value>      # positional: no --flags
+hippo task note <id> <text>      # appends one timestamped note; set … notes replaces
 hippo task done <id> [--note N]
 hippo task list [--status s1,s2] [--all] [--json]
 hippo task show <id> [--json]
 hippo task drop <id>
 hippo log dispatch --id D --kind K --exec executor/model/effort --scope S
     [--task T] [--depth N] [--parent D]
-hippo log outcome --ref <dispatch-id>|task:<task-id> --result accepted|revised|refuted|no-go|lost
+hippo log outcome --ref <dispatch-id>|task:<task-id> --result accepted|revised|refuted|no-go|lost|dropped
     [--attr work|brief|harness] [--rework N] [--by executor/model] [--note N]
 hippo log outcome --from-batch <journal> [--dry-run] < verdicts.jsonl
 hippo log review --id R --base <sha> --source S --findings N
@@ -358,7 +374,19 @@ hippo scribe --transcript P --session S   # internal: the Stop hook calls it det
   door, `log <event>`; bare `hippo log` reads recent records; `directive` and `prior` are derived
   views recomputed from the ledger every time.
 - Task states: `pending|active|done|dropped`. tasks.yaml may be edited by hand and the CLI always
-  re-parses it. No acrobatics such as comment preservation (a lesson from 0.x).
+  re-parses it. No acrobatics such as comment preservation (a lesson from 0.x). A file that does
+  not parse (or is not `{tasks: [...]}`) ends every command that reads it with one line — the
+  file, line and column, the parser's reason — and exit 1: never a traceback, and never an empty
+  list a write would then save over it. `status` alone prints what it can and then that line (in
+  the capsule itself under `--inject`, still exit 1), so a session starts with its directives and
+  learns what is broken. Measured (steno, 1.17.1): a script's hand edit left the file
+  unparseable, it was committed and pushed, and every command printed a PyYAML traceback.
+- `notes` is a list of strings, oldest first. `task note <id> <text>` appends one as
+  `<YYYY-MM-DDTHH:MMZ> <text>` (so does `task done --note`), never replacing; `task set … notes`
+  is the replace, one unstamped item; a hand-written scalar reads as the list's first item.
+  Measured (steno, 13 days on 1.17.1): 524 `task set … notes` calls, 225 of them over 1,500
+  chars — the whole notes re-sent to add a line — notes up to 13 KB, one overwrite that lost
+  notes, and 61 scripts editing tasks.yaml by sed or python, one of which left it unparseable.
 - `deps` answers one question — *what can I start now* — and `task list` is where it answers it:
   a task with an unfinished dep gets a `waiting on:` line under it, nothing otherwise. A dep naming
   no task is printed with a `?`, because that is the same silent shape as a dangling `ref`.
@@ -959,11 +987,27 @@ an agent's own (PreCompact, below).
    malformed copy of an event that had also landed well; a later checkup read the pile as lost
    records and deleted 16. The per-run file is also what the checkup skill now reads against
    the ledger before calling a rejection a loss.
+   An event that only restates the ledger is no failure and gets no dump (1.18.0): an
+   `outcome` whose ref's latest verdict has the same result, a `dispatch` under an id the ledger
+   already has, and a `dispatch` naming a run 3c skips as a relay (a `hippo:lane` agent, bare
+   or `ag-`). It is set aside before every other rule and counted on the run's own meter row,
+   `ev:clerk name:turn-scribe dropped:<n>` (absent at 0). Measured (steno, 13 days on 1.17.1):
+   371 of 385 dumps were "N events rejected", and 324 of the 471 rejected events were the
+   scribe re-emitting a verdict main had already written — agreeing with it in 318. A re-emitted
+   verdict that *disagrees* is still dumped, with both results named (6b).
 6b. **Seven extra rules, on the clerk's output only.** A scribe `usage` is rejected — the
    wrapper observed the cost and was there when the lane ran. A scribe `dispatch` is rejected when its
    executor is `codex`, or when either closed slot of `exec` is outside its vocabulary
-   (`codex|claude|fork|subagent|workflow` / `low|medium|high|xhigh|max|ultra|inherit`). A scribe
-   `outcome` is rejected when its `ref` already has a verdict: "at most one outcome per
+   (`codex|claude|fork|subagent|workflow` / `low|medium|high|xhigh|max|ultra|inherit`), or
+   when it pairs `claude` with a `gpt-*` model — a pair that cannot exist (1.18.0). Measured
+   (steno, 1.17.1): 17 `claude/gpt-6.1-sol/high` rows under coined ids, each the clerk's reading
+   of a `hippo:lane` relay. 3c skips a relay (NATIVE_SKIP) and the restatement rule below covers
+   only `fork|subagent|workflow`, so `claude` — the one executor left for an unlisted launch —
+   let them through; the cause was the digest, which showed the relay as a plain Agent call
+   whose prompt named a gpt model. It now labels a `hippo:lane` call as the codex lane its
+   wrapper records, and rule 1 of the prompt says so. A scribe
+   `outcome` is rejected when its `ref` already has a different verdict (an agreeing one is a
+   restatement, step 6): "at most one outcome per
    dispatch" was in the prompt and the roster marked the judged ids, and the clerk re-judged
    anyway — measured on this repo's own ledger, one dispatch judged `revised` was re-judged
    `accepted` by two later scribe runs, and a verdict main had recorded through the CLI was
@@ -1019,7 +1063,8 @@ an agent's own (PreCompact, below).
    3.6h to its exit row, and 11 never wrote one. A native run is in flight while 3c's index has
    no end for it (a notification, a TaskStop, a run file's end). Any other dispatch — a row
    main logged, one the clerk coined — has no end to wait for and is not checked. Main's
-   `hippo log outcome` is never checked, and a lane's own claim stays a claim (§3.2). The
+   `hippo log outcome` is checked only against a running lane record (§3.2), and a lane's own
+   claim stays a claim. The
    roster marks such a line `[running — no verdict yet]` (step 5), and rule 2 says it takes no
    outcome in this window, whatever the digest says. Measured (steno, 2026-10-01): the clerk —
    gpt-6-luna at medium, 1.15.4's default (step 4) — read a window whose last assistant line
@@ -1449,6 +1494,15 @@ batch still relaunches the entry fresh — main picks one. A resume is a new dis
 own usage (§3.2, `ev:usage`) and no brief of its own: its last argument is the continuation,
 and the task is in the session, so it gets no launch notes and its triage reads `brief: null`
 — weaker evidence than a first lane's route, where the report has to carry the task.
+A resume's exec label is the session's (1.18.0): a slot its argv leaves `unset` — no `-m`, no
+`model_reasoning_effort` — comes from the newest lane record of the session it resumes that has
+it (the model, failing that, from that lane's wrapper `ev:usage` row, which reads codex's
+banner), with a stderr line naming the lane; argv still wins, since a `-m` on the resume is what
+codex runs; and a session no record names keeps `unset`, said on stderr, never guessed.
+Measured (steno, 13 days on 1.17.1): 78 of 641 dispatches (12%) were resumes typed as `-- -C
+<dir> resume <session> "…"`, recorded `codex/unset/unset` — a PRIORS `research ×
+codex/unset/unset` row of n=61 — and a lane record of every one of those sessions named
+`gpt-6.1-sol/high`. The wrapper's own resume (below) stays inside one lane and one label.
 
 **A model at capacity** (1.16.0). The stop above was a harness loss: at 15:59Z, 5 minutes into
 a gpt-6.1-sol high lane, codex printed `ERROR: Selected model is at capacity. Please try a
