@@ -48,6 +48,8 @@ hippo dispatch --watch <dispatch-id|batch-id> [--for SECONDS]
 - A delegation gets a verdict → `log outcome` (`--ref task:<id>` finds its open dispatch).
 - The user rules → `directive add`; re-add the same `--id` to change it, `withdraw` when done,
   `--audience main` when a lane never needs it. A rule for the next answer only is not one.
+  Its own text is all a reader gets: name the words, paths or limits it governs in it — a
+  pointer to a guide does not carry the guide.
 - An external review arrives → `log review`; its findings dealt with → `log review-status`.
 - Before routing a delegation → `prior`.
 - Codex lanes → `dispatch` (`--batch` for many, `--watch <id>` to wait); see `/hippo:dispatch`.

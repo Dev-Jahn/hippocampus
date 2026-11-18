@@ -2131,6 +2131,28 @@ machine's ten projects only mlx-vlm shows it. Like the notes it names a cost and
 the text: the pass is the user's call (propose, confirm, apply), and neither a lane's capsule nor
 a subagent's slice carries it.
 
+The line names a cost, not a failure of the rules to be applied: volume, order and layout did
+not move compliance where it was measured (1.18.0, 2026-11-18; 352 replays on claude-opus-5-5
+built from one consumer's real turns: its own last 15 replies, a real compact summary, its
+capsule of 32 directives, then a real English lane letter to relay in Korean; scored by regex
+against a terminology directive's own word list). With no capsule 38–50% of replies broke the
+rule; with it 3–4% (9 of 256), and no variant differed from the baseline within what n=16 a
+cell can show (about 20 points): 8 directives in place of 32, the rule first, the directives
+after the status lines, the rule rewritten list-first, two headers (every reply / situational),
+situational rules collapsed to one line each (45% fewer chars), a closing "re-read" line. So
+the capsule's directive block keeps its shape — every rule whole, in ledger order — and the
+collapse is not built: it saves characters, buys no compliance, and whether a collapsed rule
+is fetched when its situation comes was not measurable there. What did move it is the rule's
+own text: words the directive listed stayed out, words that only the guide it pointed at
+listed kept appearing (one of them 45 times). Hence the skill's sentence that a directive's
+text is all a reader gets. The report that prompted the measurement — a rule ignored "right
+after each compaction" — did not hold on the transcript either: over 2,313 replies about 10%
+broke it every day, 6.4% in the first five replies after a compaction and 10.9% after the
+fortieth, rising with reply length (3% under 300 chars, 22% over 1,000) and mostly when
+relaying English text. That residue is distance from the rule in a long tool-heavy context,
+which a start-of-session capsule cannot reach; a check on each outgoing reply could, and is
+not built — it is a per-reply hook whose cost on the replies it passes is unmeasured (§3.4).
+
 A `check:` line (main's only) names the open tasks whose flag still shows (§3.5.9) —
 `· check: feat/x, fix/y look finished or abandoned — close them, or note what is left` — at
 every session start, compaction included, in tasks.yaml order, and is absent when none does. It
