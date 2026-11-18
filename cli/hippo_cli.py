@@ -383,14 +383,45 @@ def directives(hp):
     return cur
 
 
+# Where an unreadable tasks.yaml's one line goes instead of ending the command: None everywhere
+# but `status`, whose capsule must survive the file (cmd_status).
+TASKS_UNREADABLE = None
+
+
 def tasks_load(hp):
+    """tasks.yaml → {tasks: [...]}; a file that does not parse, or is not that shape, ends the
+    command with one line naming the file, where and why, and a non-zero exit.
+
+    Measured (steno, 1.17.1): a script editing tasks.yaml by hand left it unparseable — the
+    change was committed and pushed — and every hippo command then printed a raw PyYAML
+    traceback. Not an empty list either: a write would then save an empty registry over it.
+    `status` alone carries on (TASKS_UNREADABLE), with the line in what it prints, so the
+    capsule a session starts with still has its directives and says what is broken."""
     p = hp / "tasks.yaml"
-    data = yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else None
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else None
+    except yaml.YAMLError as ex:
+        mark = getattr(ex, "problem_mark", None)
+        where = f"line {mark.line + 1}, column {mark.column + 1}" if mark else "somewhere"
+        why = " ".join(filter(None, (getattr(ex, "problem", None),
+                                     getattr(ex, "context", None)))) or str(ex)
+        return tasks_unreadable(p, f"does not parse at {where}: {one_line(why)}")
     data = data or {}
     if not isinstance(data, dict) or not isinstance(data.get("tasks", []), list):
-        die(f"malformed tasks.yaml: expected {{tasks: [...]}} ({p})")
+        return tasks_unreadable(p, "is not {tasks: [...]}")
     data.setdefault("tasks", [])
     return data
+
+
+def tasks_unreadable(p, what):
+    line = (f"hippo: {p} {what} — fix the file by hand (plain YAML); no task command runs "
+            "until it reads")
+    if TASKS_UNREADABLE is None:
+        print(line, file=sys.stderr)  # one line: the usage block would only bury it
+        sys.exit(1)
+    if line not in TASKS_UNREADABLE:
+        TASKS_UNREADABLE.append(line)
+    return {"tasks": []}
 
 
 def write_durable(p, text):
@@ -1384,6 +1415,21 @@ def precompact_lines(hp):
 
 
 def cmd_status(args):
+    """A tasks.yaml that does not read costs status its task lines, never the rest: what it can
+    print, then the file's one line (in the capsule itself under --inject, where the hook keeps
+    stdout only), exit 1 (tasks_load)."""
+    global TASKS_UNREADABLE
+    TASKS_UNREADABLE = []
+    try:
+        status_print(args)
+    finally:
+        broken, TASKS_UNREADABLE = TASKS_UNREADABLE, None
+    if broken:
+        print("\n".join(broken), file=sys.stdout if args.inject else sys.stderr)
+        sys.exit(1)
+
+
+def status_print(args):
     hp = args.hp
     if args.inject:
         # The hook names its moment in HIPPO_INJECT — internal, never a flag (§3.4): SessionStart

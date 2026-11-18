@@ -365,7 +365,13 @@ hippo scribe --transcript P --session S   # internal: the Stop hook calls it det
   door, `log <event>`; bare `hippo log` reads recent records; `directive` and `prior` are derived
   views recomputed from the ledger every time.
 - Task states: `pending|active|done|dropped`. tasks.yaml may be edited by hand and the CLI always
-  re-parses it. No acrobatics such as comment preservation (a lesson from 0.x).
+  re-parses it. No acrobatics such as comment preservation (a lesson from 0.x). A file that does
+  not parse (or is not `{tasks: [...]}`) ends every command that reads it with one line — the
+  file, line and column, the parser's reason — and exit 1: never a traceback, and never an empty
+  list a write would then save over it. `status` alone prints what it can and then that line (in
+  the capsule itself under `--inject`, still exit 1), so a session starts with its directives and
+  learns what is broken. Measured (steno, 1.17.1): a script's hand edit left the file
+  unparseable, it was committed and pushed, and every command printed a PyYAML traceback.
 - `notes` is a list of strings, oldest first. `task note <id> <text>` appends one as
   `<YYYY-MM-DDTHH:MMZ> <text>` (so does `task done --note`), never replacing; `task set … notes`
   is the replace, one unstamped item; a hand-written scalar reads as the list's first item.
