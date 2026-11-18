@@ -831,14 +831,17 @@ def test_m6_find_ws_stops_at_home(tmp_path, run_hippo):
     )
     assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
 
-    # …while a .hippo at $HOME itself is still perfectly findable.
+    # A .hippo at $HOME itself is not adopted from below either (measured: a sibling session
+    # wrote to ~/.hippo for six days, DESIGN §3.3) — only a session in $HOME itself finds it.
     (home / ".hippo").mkdir()
     (home / ".hippo" / "ledger.jsonl").touch()
-    ok = run_hippo(
+    below = run_hippo(
         ["status", "--inject"],
         cwd=home / "projects" / "elsewhere",
         env={"HOME": str(home)},
     )
+    assert (below.returncode, below.stdout, below.stderr) == (0, "", "")
+    ok = run_hippo(["status", "--inject"], cwd=home, env={"HOME": str(home)})
     assert ok.returncode == 0, ok.stderr
     assert ok.stdout.startswith("[hippo]"), ok.stdout
 
