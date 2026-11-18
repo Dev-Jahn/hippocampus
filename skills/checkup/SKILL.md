@@ -68,7 +68,9 @@ Code) or `~/.codex/sessions/` in dated subdirectories (Codex) — take the newes
 ## Check 3 — waste patterns (ledger + a sample of recent transcripts)
 
 - **Orphan dispatches**: a dispatch with no outcome after 24h — check whether the process still
-  exists, and report "dead but unjudged" separately from "still running".
+  exists, and report "dead but unjudged" separately from "still running". One nobody will judge —
+  replaced by a later delegation, or too old — closes as `log outcome --result dropped`, never
+  `lost`: `lost` counts against the harness in PRIORS.
 - **Rework concentration**: (kind × exec) cells with a high rework sum — candidates for
   reconsidering routing, cross-checked against PRIORS.
 - **Attribution skew**: a high share of attr=brief points at brief quality, attr=harness at
