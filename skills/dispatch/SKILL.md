@@ -70,10 +70,12 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   own name** — `KHALA_SESSION` = the `--task` slug (`-2` on a clash, the same on a resume) and
   `KHALA_PARENT` = you, from `khala whoami` — shown as `khala: <name>@<node>` on its launch line,
   in its final lines and in its record: write to that address, and never name the lane itself in
-  the brief. Do put in the brief any peer it should write to (say a Claude subagent you give a
-  mailbox with a `KHALA_SESSION=<name>` line; see the khala skill) — it sends and replies there
-  directly, without you. Its worktree's `.khala-codex-session` is kept out of commits by the repo's
-  `info/exclude`. **khala says an ended lane has unread letters**: run that lane's `resume:`
+  the brief. The lane's capsule tells it to write to its parent only when it needs a decision or
+  is blocked and cannot continue. Progress and results belong in its report, and the relay
+  already tells you when it ends. Do put in the brief any peer it should write to (say a Claude
+  subagent you give a mailbox with a `KHALA_SESSION=<name>` line; see the khala skill) — it
+  sends and replies there directly, without you. The repo's `info/exclude` keeps its
+  worktree's `.khala-codex-session` out of commits. **khala says an ended lane has unread letters**: run that lane's `resume:`
   line — it reads them as it starts, under the same name, with you as its parent.
 - **Deadlines (Claude Code)**: a background call's `timeout` is its deadline — 30 minutes when
   none is given — so every background `hippo dispatch`, plain form and batch alike, passes
@@ -121,7 +123,8 @@ entries:
     `Workflow({scriptPath: "…/m.workflow.js"})` it names — each lane an agent in `/workflows`,
     its progress in that agent's Activity every minute — then `hippo dispatch --batch m.yaml`
     for the harvest (one-row way if a lane failed: the rerun relaunches it first). Cost, in
-    relays: ≈ $0.02 per lane + ≈ $0.004 per minute of lane runtime.
+    relays: zero model calls on the mod path. The Haiku fallback makes additional calls as
+    watch windows expire.
   - *A wide batch*: `Agent(subagent_type: "hippo:lane", description: "<batch scope>", prompt:
     "hippo dispatch --batch m.yaml")` — one row (`codex batch · m · 6m02s · 4 running · 12/40
     done · 1 failed · last: …`), one relay for the whole batch, the harvest in its reply (a

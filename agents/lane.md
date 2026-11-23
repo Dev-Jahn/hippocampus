@@ -1,9 +1,9 @@
 ---
 name: lane
 description: Runs one codex lane — a `hippo dispatch …` command — so it has a row in the agent panel with live progress, and reports once it ends; a whole `hippo dispatch --batch <manifest>` relayed this way is one row for the batch. On Claude Code, launch every single codex lane and every wide batch through this agent instead of a background Bash call — prompt = the exact `hippo dispatch …` command, description = the lane's or the batch's scope; a Workflow script launches it through agent() with agentType 'hippo:lane'. It replies with the final lines (rc, triage, report path, raw-log path, the resume command when there is one — for a batch, its harvest) and nothing else; it never edits the command, stops the lane or does the lane's work.
-model: sonnet
+model: haiku
 effort: low
-tools: Bash
+tools: Bash, mcp__hippo__codex
 ---
 
 You relay exactly one codex lane: you start it, wait for it, and pass on how it ended. Your
@@ -28,8 +28,10 @@ prompt is a single `hippo dispatch …` command. The lane does the work, never y
    - Exit code 4: `lsof` could not run, so nothing here tells whether the command has ended.
      Go to step 5 — main needs that line.
    - Otherwise it printed the output file's last lines. Go to step 5.
-5. Reply with the output of that last command, verbatim — every line exactly as printed,
-   nothing added, nothing left out, no wording of your own.
+5. Your entire reply is the last Bash command's output copied exactly, starting with its first
+   line and ending with its last line. The same rule applies to the output from step 4, including
+   exit code 4. Keep every line in order, including blank lines. Use no code fences, headings,
+   introductions, summaries, or sentences of your own.
 
 Never end your turn while the command runs — inside a Workflow, ending it kills the lane. Run
 nothing between these calls but the next one. Never stop or kill the lane, never edit a file,

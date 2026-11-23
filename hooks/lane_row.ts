@@ -1,4 +1,4 @@
-import type { AgentInfo, EngineInterface as Engine, Register } from 'claude-code'
+import type { AgentInfo, EngineInterface as Engine, On } from 'claude-code'
 
 // The agent-panel row of each hippo:lane agent (DESIGN §3.6 "The row"): its codex lane's
 // progress — `codex · <scope> · <elapsed> · <cmds> cmds · <last event>` — or, for an agent
@@ -179,19 +179,22 @@ async function readRecord($: Engine, path: string): Promise<Rec | undefined> {
 }
 
 /** The wrapper's pid still runs — the check `hippo dispatch --watch` makes (watch_state). */
-async function alive($: Engine, pid: unknown): Promise<boolean> {
+export async function alive($: Engine, pid: unknown): Promise<boolean> {
   if (!Number.isInteger(pid) || (pid as number) <= 1) return false
   const r = await $.process.run(['kill', '-0', String(pid)])
   return r.exitCode === 0 || !/no such process/i.test(r.stderr) // EPERM: it runs, as another user
 }
 
 /** The row's text, or undefined where the engine's own row stands. */
-async function rowBody($: Engine, props: { id: string; cwd: string }): Promise<string | undefined> {
+async function rowBody($: Engine, props: { id: string; cwd: string }, relayId?: string): Promise<string | undefined> {
   if (!SAFE_ID.test(props.id)) return undefined
-  const { transcriptPath } = await $.session.info()
-  if (!transcriptPath?.endsWith('.jsonl')) return undefined
-  const transcript = `${transcriptPath.slice(0, -'.jsonl'.length)}/subagents/agent-${props.id}.jsonl`
-  const id = dispatchId(await $.fs.read(transcript).catch(() => ''))
+  let id = relayId
+  if (!id) {
+    const { transcriptPath } = await $.session.info()
+    if (!transcriptPath?.endsWith('.jsonl')) return undefined
+    const transcript = `${transcriptPath.slice(0, -'.jsonl'.length)}/subagents/agent-${props.id}.jsonl`
+    id = dispatchId(await $.fs.read(transcript).catch(() => ''))
+  }
   if (!id) return undefined
   const hippo = await findHippoFrom($, props.cwd)
   if (!hippo) return undefined
@@ -226,12 +229,12 @@ function keepFresh($: Engine) {
   ticking = timer
 }
 
-export const register: Register = (on) => {
+export function registerLaneRow(on: On, relayId: (agentId: string) => string | undefined) {
   on('ui.render', { component: 'AgentRow', props: { type: LANE_AGENT } }, async ($, e, next) => {
     keepFresh($)
     let body: string | undefined
     try {
-      body = await rowBody($, e.props)
+      body = await rowBody($, e.props, relayId(e.props.id))
     } catch (err) {
       // An ask superseded by a newer one is aborted mid-call (measured, 2.1.327): no failure.
       if (!next.signal.aborted) $.ui.log(`hippo: lane row ${e.props.id} left as drawn (${err})`, { to: 'debug' })

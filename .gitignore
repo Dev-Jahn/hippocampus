@@ -4,3 +4,4 @@ __pycache__/
 .hippo/
 .ruff_cache/
 .khala-session
+.claude-plugin/types/
