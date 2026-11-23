@@ -94,6 +94,24 @@ def _child_env(tmp_path, did):
     return json.loads((tmp_path / "envs" / f"{did}.json").read_text(encoding="utf-8"))
 
 
+def _capsule(cwd, env, source="startup"):
+    proc = subprocess.run(
+        ["bash", str(REPO_ROOT / "hooks" / "session_start.sh")],
+        cwd=cwd, env=env, input=json.dumps({"cwd": str(cwd), "source": source}),
+        capture_output=True, text=True, timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    if not proc.stdout:
+        return ""
+    return json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def _assert_letter_rule(capsule):
+    assert "Write to your parent (main@mbp) only when you need a decision or are blocked and cannot continue." in capsule
+    assert "Put progress and results in your report. The relay already tells your parent when the lane ends." in capsule
+    assert "Write to peers named in your brief as instructed." in capsule
+
+
 def _did(proc):
     return proc.stdout.splitlines()[0].removeprefix("dispatch:")
 
@@ -215,11 +233,13 @@ def test_the_parent_is_mains_whoami_or_nothing_with_the_reason(tmp_path):
 
 
 def test_lane_env_scrubs_claude_and_sets_the_identity(tmp_path):
-    base = {**CLAUDE, "HOME": "/h", "KHALA_SESSION": "main", "KHALA_PARENT": "boss@mbp"}
+    base = {**CLAUDE, "HOME": "/h", "KHALA_SESSION": "main", "KHALA_PARENT": "boss@mbp",
+            "HIPPO_KHALA_PARENT": "boss@mbp"}
     assert hippo_cli.lane_env(base) == {"HOME": "/h", "KHALA_SESSION": "main",
                                         "KHALA_PARENT": "boss@mbp"}
     assert hippo_cli.lane_env(base, _lane(base=base)) == {
-        "HOME": "/h", "KHALA_SESSION": "x", "KHALA_PARENT": "main@mbp"}
+        "HOME": "/h", "KHALA_SESSION": "x", "KHALA_PARENT": "main@mbp",
+        "HIPPO_KHALA_PARENT": "main@mbp"}
     unknown = _lane(base=base, main=(None, "`khala whoami` exited 2 (old)"))
     assert hippo_cli.lane_env(base, unknown) == {"HOME": "/h", "KHALA_SESSION": "x"}, \
         "an inherited KHALA_PARENT names main's own parent: dropped, never passed on"
@@ -326,6 +346,9 @@ def test_a_single_lane_runs_as_itself_with_main_as_its_parent(tmp_project, tmp_p
     did = _did(proc)
     child = _child_env(tmp_path, did)
     assert (child["KHALA_SESSION"], child["KHALA_PARENT"]) == ("khala-lane", "main@mbp")
+    _assert_letter_rule(_capsule(wt, child))
+    _assert_letter_rule(_capsule(wt, child, source="compact"))
+    assert "khala" not in _capsule(tmp_project, env).lower()
     assert not set(CLAUDE) & set(child)
     assert "lane s · 0s · khala: khala-lane@mbp · parent main@mbp" in proc.stderr.splitlines()
     row, rec = _row(tmp_project, did), _record(tmp_project, did)
@@ -345,6 +368,7 @@ def test_with_whoami_missing_the_lane_has_no_parent_and_says_why(tmp_project, tm
     did = _did(proc)
     child, rec, row = _child_env(tmp_path, did), _record(tmp_project, did), _row(tmp_project, did)
     assert child["KHALA_SESSION"] == f"lane-{did[1:9]}" and "KHALA_PARENT" not in child
+    assert "khala" not in _capsule(tmp_project, child).lower()
     assert rec["khala"] == row["khala"] == f"lane-{did[1:9]}", "no node is known either"
     assert "khala_parent" not in rec and "khala_parent" not in row
     assert "no KHALA_PARENT: `khala whoami` exited 2" in rec["khala_note"]
@@ -364,8 +388,19 @@ def test_without_khala_only_the_claude_variables_leave(tmp_project, tmp_path):
     assert {k: child.get(k) for k in kept} == kept, "the rest passes as it did"
     assert not set(CLAUDE) & set(child)
     assert {k for k in child if k.startswith("KHALA")} == {"KHALA_SESSION", "KHALA_PARENT"}
+    assert "khala" not in _capsule(tmp_project, child).lower()
     assert "khala" not in _row(tmp_project, did) and "khala" not in _record(tmp_project, did)
     assert "khala:" not in proc.stderr and not (wt / ".khala-codex-session").exists()
+
+
+def test_a_lane_with_a_parent_outside_a_project_still_gets_the_letter_rule(
+        uninitialized_dir, tmp_path):
+    proc = _dispatch(uninitialized_dir, _env(tmp_path, FAKE_KHALA), "go")
+    assert proc.returncode == 0, proc.stderr
+    child = _child_env(tmp_path, _did(proc))
+    capsule = _capsule(uninitialized_dir, child)
+    _assert_letter_rule(capsule)
+    assert len(capsule.splitlines()) == 1
 
 
 def test_a_printed_resume_runs_under_the_lanes_recorded_name(tmp_project, tmp_path):
@@ -419,6 +454,7 @@ def test_a_lane_that_ended_well_still_ends_on_a_resume_line_that_keeps_its_name_
     rid = _did(again)
     child = _child_env(tmp_path, rid)
     assert (child["KHALA_SESSION"], child["KHALA_PARENT"]) == ("x-2", "main@mbp")
+    _assert_letter_rule(_capsule(tmp_project, child, source="resume"))
     rrec, row = _record(tmp_project, rid), _row(tmp_project, rid)
     assert (rrec["khala"], rrec["khala_parent"]) == ("x-2@mbp", "main@mbp")
     assert (row["khala"], row["khala_parent"]) == ("x-2@mbp", "main@mbp")
@@ -447,6 +483,8 @@ def test_batch_lanes_of_one_task_get_distinct_names_and_no_claude_variables(
     children = [json.loads(p.read_text()) for p in (tmp_path / "envs").iterdir()]
     assert sorted(c["KHALA_SESSION"] for c in children) == ["x", "x-2"]
     assert all(c["KHALA_PARENT"] == "main@mbp" and not set(CLAUDE) & set(c) for c in children)
+    for child in children:
+        _assert_letter_rule(_capsule(tmp_project, child))
     rows = [e for e in read_ledger(tmp_project) if e.get("ev") == "dispatch"]
     assert sorted(r["khala"] for r in rows) == ["x-2@mbp", "x@mbp"]
     assert sum("· khala: x" in ln for ln in proc.stderr.splitlines()) == 2

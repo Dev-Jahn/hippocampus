@@ -92,7 +92,7 @@ Judge guardrails (invariant):
 
 ```
 runtime (thin):   bin/hippo (shim) + cli/hippo_cli.py + 4 hooks (2 on Codex) + scripts/{clerk_run,digest_lite,dispatch}
-                  + hooks/lane_row.ts (a mod: the lane row in Claude Code's agent panel)
+                  + hooks/lane.ts (a mod: model-less relay and the lane row in Claude Code's agent panel)
 cognition (text): clerks/{turn-scribe,distiller}.md + clerks/jev/*.yaml + skills/{hippo,checkup,dispatch}
                   + agents/lane.md
 resident (small): the capsule injected at SessionStart (§6 below)
@@ -116,13 +116,15 @@ enforcement:      none
   config.yaml       # optional: overrides such as the clerk backend (everything works without it)
 ```
 
-In a directory with no `.hippo/`, every hook and every CLI command is a **completely silent no-op**
-(zero contamination of other projects) — except a write, whose caller expects a record: it says
+In a directory with no `.hippo/`, hooks and CLI reads are **silent no-ops** by default. A write
+whose caller expects a record says
 on stderr that nothing was recorded from `<cwd>`, to run it again from the project root (or with
 `HIPPO_DIR`), and `hippo init` only for a new project. The way back leads because the measured cause is a `cd`
 into another tree in the same shell call (2026-09-26: main's `task set` was lost that way), and
 an `init` offered first would make a stray project there. Which `.hippo/` owns a directory is
 §3.3's walk: a copy inside a linked worktree never does, and `~/.hippo` owns only `~` itself.
+Dispatch still runs outside a project, and a lane with a hippo-assigned khala parent receives
+its letter rule through SessionStart (§3.6).
 
 A project may commit `.hippo/` (to share one memory, or read it from another machine). Every
 linked worktree then carries a checked-out copy, which hippo never reads or writes (§3.3) — rows
@@ -457,7 +459,8 @@ SessionStart source (or `worktree-compact`, below), `subagent` or `precompact` (
 an agent's own (PreCompact, below).
 
 - **SessionStart** (startup, resume, clear, compact): `hooks/session_start.sh` → silent exit 0 with
-  no `.hippo/`; otherwise `hippo status --inject` (the §6 format), wrapped as
+  no `.hippo/`, except that a lane with a hippo-assigned khala parent gets its letter rule alone;
+  otherwise `hippo status --inject` (the §6 format), wrapped as
   `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "…"}}`. Both
   hosts read that shape; codex 0.146 *requires* it (0.144 took the bare text, so the capsule
   silently stopped arriving on a host upgrade — the failure mode a shared contract has: it moves
@@ -672,7 +675,8 @@ an agent's own (PreCompact, below).
   self-narrative.
 
 Beside the four command hooks, `hooks/claude-hooks.json` names one **hooks module**
-(`"modules": ["./lane_row.ts"]`, a Claude Code mod): a `ui.render` hook on the agent panel's
+(`"modules": ["./lane.ts"]`, a Claude Code mod), which registers the model-less relay (§3.6)
+and the panel row from `hooks/lane_row.ts`. The panel row uses a `ui.render` hook on the agent panel's
 `AgentRow`, matched to `hippo:lane` rows, plus a 5s redraw timer — the lane row (§3.6 "The
 row"). It is held to the same four conditions. (1) Its reason: the row it replaces,
 `subagentStatusLine`, is deprecated "in favor of mods" on 2.1.327 and listed as removed in the
@@ -988,8 +992,8 @@ codex rejects the unknown `modules` key and would drop that whole file.
    low until 1.15.3, and low's quality gap to medium cost more than its saving: on iislab-slurm
    (2026-09-29/30) a luna-low clerk asked to record 7 listed runs emitted 33 events, the list ~5
    times over, and rewrote directives main had just written into shorter ones (step 6b). The
-   claude fallback stays sonnet-low — the lane agent's tier (§3.6), never measured short of the
-   job; hippo runs no haiku (the A/B note in clerk_run.sh). 120s timeout. The claude backend
+   claude fallback stays sonnet-low, never measured short of the clerk's job (the A/B note in
+   clerk_run.sh). 120s timeout. The claude backend
    saves no session
    (`--no-session-persistence`): measured (2026-09-27), without it every clerk run was a
    transcript in the host project's folder — 534 of 537 in mlx-vlm, 506 (85MB) in a Windows
@@ -1275,6 +1279,15 @@ the parent from `khala whoami` again — the same pair when main runs it. With n
 `PATH` none of this exists — no call, no variable, no field — and the lane's environment is
 what it was, less the Claude session's variables.
 
+Over 5.6 days in a consuming project, khala letters woke main 763 times. About 90% came from
+codex lanes reporting intermediate progress such as "registered" or "submitted". A lane
+writes to its hippo-assigned parent only when it needs a decision or is blocked and cannot
+continue. Progress and results go in the lane's report, and completion already reaches the
+parent through the relay. Instructions to write to peers named in the brief still apply.
+The wrapper marks the parent it assigned in `HIPPO_KHALA_PARENT`, so the existing SessionStart
+capsule carries the rule on startup, resume and compaction. It is the only injected line
+outside a `.hippo/` project. Lanes without a hippo-assigned parent receive no khala instruction.
+
 **The lane's own record** (1.15.0). In Claude Code a background `hippo dispatch` showed as a
 shell row labelled with its raw command, and nobody could see what the lane was doing: codex's
 raw stderr runs to megabytes (one lane: 56k lines, 2.3MB), so 18 of 18 real background launches
@@ -1354,11 +1367,11 @@ blocking foreground call, never a sleep, is what keeps it open.
 
 **The lane agent** (`agents/lane.md`, Claude Code). A codex lane launched as `Agent(subagent_type:
 "hippo:lane", description: "<scope>", prompt: "<the hippo dispatch command>")` gets a row in the
-agent panel — Enter opens its transcript, x stops it, and the kill trap records the stop. The agent
-is sonnet at low effort with Bash alone (hippo's cheap Claude tier; it runs no haiku — §3.5.4): it
-runs the command verbatim in the background with `timeout: 2147483647`, reads the id off the
-first `dispatch:<id>` or `batch:<id>` in its output (a whole batch is one row, "Two faces"
-below), loops `--watch` in the foreground, and replies with the final lines, which reach main as
+agent panel — Enter opens its transcript, x stops it, and the kill trap records the stop. With
+the mod absent or when it hands over, the agent uses `model: haiku` at low effort. Its Bash
+instructions run the command verbatim in the background with `timeout: 2147483647`, read the
+id off the first `dispatch:<id>` or `batch:<id>` in its output (a whole batch is one row, "Two faces"
+below), loop `--watch` in the foreground, and reply with the final lines, which reach main as
 the one completion notification. The timeout is there because a background Bash call's
 `timeout` is its deadline: measured (b200-cluster, 2026-10-01), lane d1034f0c, relayed with
 none, was SIGTERMed at exactly 30m00s, and Claude Code told the relay "Background command … was
@@ -1379,12 +1392,26 @@ inside its last watch call, not after its turn — and x on the row was recorded
 triage included, within a second. The relay's cost, re-measured at sonnet/low (headless 2.1.281, a
 stub codex, 2026-09-24): 4 calls, 10.4k cache-read + 4.5k cache-write + 0.6k output tokens for a
 24s lane, with exactly the three Bash calls its body names; each further 9-minute watch window adds
-one short call. (The first build ran haiku: 17.1k + 7.1k + 1.5k on a 1m27s lane, and it did not
-keep to the body's calls.) It is a relay, not the delegate surface §4 retired: it routes nothing
-and binds no role — main still chose the exec in the command it hands over — and it never edits
-that command, stops the lane or does its work, so no judgment of its own reaches the record. The
-plain Bash form stays for the Codex host, which has no agent panel, and for a lane launched from
-inside a lane.
+one short call. The first build on 2026-09-24 used Haiku 4.5: 17.1k + 7.1k + 1.5k on a 1m27s
+lane, with deviations from the body's calls. Since 2026-10 the `haiku` alias resolves to
+`claude-haiku-5-5`. Measured by main (2026-10-14, Claude Code 2.1.296), Haiku 5.5 copied the
+final lines unchanged in 18 of 18 runs with `.hippo/`. Three harmless call deviations added
+an `echo` to the grep or used an id prefix the CLI strips. It cost $0.00085 per relay against
+Sonnet's $0.0143. Main chooses the executor in the command it hands over. The relay runs the
+command as given and passes on the result. The plain Bash form stays for the Codex host,
+which has no agent panel, and for a lane launched from inside a lane.
+
+**The model-less relay** (`hooks/lane.ts`). Over 5.6 days in a consuming project, 333
+`hippo:lane` relays made 12,862 Sonnet calls, 780 for one day-long lane. The relays accounted
+for 11% of the project's spend. The mod answers the lane agent's `turn.step` requests
+locally, keeping the real Bash launch, id grep and final `--watch` so the panel finds the
+record, the kill trap still works and main receives the final lines. A single lane's wrapper
+writes `.hippo/lanes/<id>.events.jsonl` as it reads Codex's stderr. The mod draws its messages
+as agent text, and its commands and patches as `Bash` and `Update` rows through the synthetic
+`mcp__hippo__codex` tool. The tool displays recorded results. A whole batch uses one-minute
+`--watch` windows for progress. The mod passes control to the agent's model if it cannot
+continue the relay, including when it finds no id or lane record. The agent body also covers
+the entire relay when mods are disabled.
 
 **With no record to watch** — `--watch` exits 2 because the project has no `.hippo/`, or the
 output never shows a `dispatch:` id — the agent waits on the command itself, in one foreground
@@ -1416,18 +1443,25 @@ until the lane's shell was gone — the long one's exiting 3 once at 541s — an
 the wrapper's lines and the host's `[exited with code 0]`), each Workflow's result held them as
 given, and main got one notification per plain agent. A Workflow script launches the agent as
 `agent("<command>", {agentType: 'hippo:lane'})`; with no schema it returns those lines as a
-string. The relays are no run of their own to the scribe (§3.5.3c): their cost — 38,801 sonnet
-tokens for the two above — is recorded nowhere, and a Workflow made of nothing else gets no row
-— the Workflow face of a batch is one, so the dispatch skill quotes its relays' price and main
-pays it knowingly ("Two faces" below). Headless
+string. The scribe records the underlying lanes (§3.5.3c) and omits the relay's own usage
+and Workflows composed only of relays. The two Sonnet relays above consumed 38,801 tokens.
+Headless
 `-p` waits for a background Workflow only ten minutes past main's last turn, then kills it
 (`print wind-down … at the wait ceiling`; the lane is recorded `killed by SIGTERM`), which is
 why the Workflow's long lane was 570s.
 
-**The row** (`hooks/lane_row.ts`, a hooks module named by `hooks/claude-hooks.json`, §3.4).
+In the same 2026-10-14 Haiku 5.5 measurement, 4 of 6 runs without `.hippo/` rewrote the
+`lsof` path's reply. Deviations included a dropped first line, a code fence and a sentence
+of the agent's own. Steps 4–5 now explicitly require the last Bash command's full output,
+from its first line through its last, including blank lines. The revised wording has not
+been re-measured.
+
+**The row** (`hooks/lane_row.ts`, registered by `hooks/lane.ts`, §3.4).
 Claude Code asks a mod's `ui.render` hook on `AgentRow` for each agent row as its props change;
-the hook's matcher takes `hippo:lane` rows only, so no other row enters the module. For a lane
-row it reads the agent's transcript — `subagents/agent-<id>.jsonl` beside the session's
+the hook's matcher takes `hippo:lane` rows only, so no other row enters the module. A running
+model-less relay supplies the id it read from the grep, since the Codex output it shows may
+name other dispatches. Otherwise the row reads the agent's transcript —
+`subagents/agent-<id>.jsonl` beside the session's
 transcript (`$.session.info()`) — for the lane's dispatch id (the last `dispatch:<id>`,
 `batch:<id>` or `--watch <id>` in it — the prompt, which comes first, is main's text and may
 quote other ids), finds `.hippo/` from the row's `cwd` by `findHippoFrom` — `$HIPPO_DIR`, else
@@ -1487,7 +1521,7 @@ any size launched from the session is main's judgment, and gating it would be th
 this design rejects. A lane that bypasses the wrapper still succeeds: this stops accidents,
 not adversaries, and every measured failure was an accident.
 
-This surface is the one exception to the silent no-op rule: with no `.hippo/` it warns and
+With no `.hippo/`, dispatch warns and
 **launches anyway**. Its real job is running codex, and swallowing the launch because the record
 failed would make it a trap rather than a wrapper. The remaining arguments — including everything
 after `--` — are passed through without interpretation; that is codex's grammar, not this CLI's.
@@ -1754,8 +1788,8 @@ change the first two levels, and a Workflow lane's live progress can only be its
 tool results, at the third (the `AgentRow` hook that replaced the status line, §3.6 "The
 row", is unmeasured for a Workflow's agents). One short poll by a sonnet/low relay cost ~16.5k cache-read + ~200
 cache-write + 155 output tokens ≈ $0.004 (Sonnet 5.5: $2 in, $0.10 cache read — $0.20 when
-measured, cut by 2026-10-12 — $2.50 5-minute cache write, $10 out per Mtok). So a batch has two faces, and the dispatch skill gives main both
-with their price:
+measured, cut by 2026-10-12 — $2.50 5-minute cache write, $10 out per Mtok). The dispatch
+skill gives main two ways to run a batch.
 
 - **Watched lanes — the Workflow face.** `--dry-run` writes `<manifest dir>/<stem>.workflow.js`
   and names it on stderr with the call that runs it — `Workflow({scriptPath: "<abs path>"})` —
@@ -1768,13 +1802,13 @@ with their price:
   global but `agent`. Every string from the manifest is JSON-encoded with `ensure_ascii`, so no
   quote, backslash, newline or U+2028/2029 in a scope, kind or path can end a string early (a
   test runs `node --check` on it and runs it under a stub `agent()` with such strings). Each
-  relay watches its lane's record, and that record says `face: "workflow"`, so `--watch` polls
+  lane has its own transcript in the mod. When the model relays it, the lane's record
+  says `face: "workflow"`, so `--watch` polls
   every minute instead of every nine: one Activity line a minute per lane — `lane <id> running ·
-  3m12s · 14 cmds · last: exec: pytest -q` — at ≈$0.004 a minute on top of the relay's ≈$0.02
-  start and end (the 24s measurement above, at Sonnet 5.5 prices). The window is the record's
+  3m12s · 14 cmds · last: exec: pytest -q`. With Sonnet this added ≈$0.004 a minute to the
+  relay's ≈$0.02 start and end (the 24s measurement above, at Sonnet 5.5 prices). The window is the record's
   choice, not the relay's: `agents/lane.md` stays one fixed body with no window in it, and an
-  explicit `--for` still wins. A Workflow of relays is no run to the scribe (§3.5.3c), so that
-  cost is recorded nowhere — it is the price of watching. After the Workflow, `hippo dispatch
+  explicit `--for` still wins. After the Workflow, `hippo dispatch
   --batch <manifest>` harvests; like any rerun it first relaunches what failed with a cause a
   relaunch could clear, so after a failure it goes the one-row way. Each relay runs its own
   lane as a background call of its own, so each lane has its own deadline (the lane agent
@@ -1792,8 +1826,8 @@ with their price:
   `batch <stem> exited rc=1 after 12m03s · 7 launched · 5 ok · 2 failed · 3 skipped`, then the
   harvest, and exit 0. The harvest is the run's stdout from the table on, kept as `<bid>.out`;
   up to 40 lines it is printed whole, past that by path with the summary line — the relay
-  copies its last call's output into its reply verbatim, so a 222-row table would be paid
-  again as relay output and copied by a model, where a path costs nothing. The agent's row
+  copies its last call's output into its reply verbatim. A path keeps a 222-row table out of
+  the reply, including when the model relays it. The agent's row
   reads the same (§3.6, "The row"). An x on it is SIGTERM to the relay's shells, which reaches
   the batch's handler: the lanes are signalled as before, and the batch record says `killed`
   within 0.5s — the main thread wakes twice a second while lanes run. Outside the lanes, in the
@@ -2275,6 +2309,7 @@ appended —
 — the lane's whole operating contract, generated where the lane reads it (principle 5) instead
 of hand-copied into every brief. The depth line follows `HIPPO_DEPTH` (§9.5): at depth ≥ 1 it
 grants dispatching children instead, and notes they start at depth 0.
+When hippo assigns a khala parent, the capsule appends the letter rule from §3.6.
 
 Four rules govern the directive block:
 

@@ -50,7 +50,8 @@ def _path_without_khala(path):
 # inside a dispatched lane must not run as that lane.
 os.environ.setdefault("HIPPO_JEV_BACKEND", "off")
 os.environ["PATH"] = _path_without_khala(os.environ.get("PATH", ""))
-for _lane_var in ("HIPPO_DISPATCH", "HIPPO_DEPTH", "KHALA_SESSION", "KHALA_PARENT"):
+for _lane_var in ("HIPPO_DISPATCH", "HIPPO_DEPTH", "KHALA_SESSION", "KHALA_PARENT",
+                  "HIPPO_KHALA_PARENT"):
     os.environ.pop(_lane_var, None)
 # bin/hippo runs through `uv run --script`, whose cache lives under $HOME: a test that points
 # HOME at a temp directory would otherwise send uv to the network for the CLI's dependencies.
