@@ -55,4 +55,6 @@ fi
 git push origin "${commit}:refs/heads/main"
 git tag -f "v${ver}" "$commit"
 git push -f origin "v${ver}"
+# The local main follows what was just pushed; git refuses if main is checked out somewhere.
+git branch -f main "$commit"
 echo "released v${ver}: main=${commit:0:9} (src ${src:0:9}) — CI refreshes the marketplace pin"
