@@ -1394,7 +1394,7 @@ blocking calls causes neither. Measured end to end (2.1.281, a stub codex behind
 inside its last watch call, not after its turn — and x on the row was recorded `killed by SIGTERM`,
 triage included, within a second. The relay's cost, re-measured at sonnet/low (headless 2.1.281, a
 stub codex, 2026-09-24): 4 calls, 10.4k cache-read + 4.5k cache-write + 0.6k output tokens for a
-24s lane, with exactly the three Bash calls its body names; each further 9-minute watch window adds
+24s lane, with exactly the three Bash calls its body names; each further watch window (nine minutes then, 150 seconds now — below) adds
 one short call. The first build on 2026-09-24 used Haiku 4.5: 17.1k + 7.1k + 1.5k on a 1m27s
 lane, with deviations from the body's calls. Since 2026-10 the `haiku` alias resolves to
 `claude-haiku-5-5`. Measured by main (2026-10-14, Claude Code 2.1.296), Haiku 5.5 copied the
@@ -1431,10 +1431,28 @@ refusal, with no Bash call and no lane record, and the bare command with `-C <di
 `gpt-6-luna` lane in that directory over seven turns of 0 tokens each. The refusal by
 `lane.md` itself, with the mod off, was not measured.
 
+**The fallback's wait is 150 seconds a call.** Claude Code moves a foreground Bash call to the
+background once it has run 180 seconds ("Command was moved to the background (ID: …) after
+running for 180s"), so the nine-minute window the agent was built on (2.1.281, above) no longer
+blocks. Measured in a consuming project (2026-11-23, Claude Code 2.1.330, hippo 1.20.0, the
+Haiku fallback): each `--watch` with `timeout: 600000` was moved at 180s, Haiku wrote a
+sentence and ended its turn, main was told the agent "is waiting on its own background work",
+and the watch's end at 540s woke the agent to start over — one wake-up of main per lane every
+nine minutes (3m09s, 12m11s, 21m13s, 30m15s on one lane). Sonnet had kept its turn open
+through the same move, at the price of its own extra calls. So `lane.md` steps 3 and 4 wait
+150 seconds a call (`--watch <id> --for 150`, the `lsof` loop's `-lt 150`, `timeout: 170000`),
+say that every reply before the last is a Bash call, and that a result reporting a move to
+the background means run the same command again; the mod's own watch call takes the same
+window. Re-measured (the same day, 2.1.330, the mod removed from a copy of the plugin, a real
+`gpt-6-luna` lane of 7m07s): three watch calls, none moved to the background, the agent's turn
+never ended, and main had two turns in all — the launch and the result. Haiku read about 6–7k
+cached tokens per call, 24 calls an hour. On the mod's path the same lane length measured 0
+tokens over six turns, one `mcp__hippo__codex` call blocking the seven minutes.
+
 **With no record to watch** — `--watch` exits 2 because the project has no `.hippo/`, or the
 output never shows a `dispatch:` id — the agent waits on the command itself, in one foreground
 call: `f='<output file>'; SECONDS=0; while lsof -w -t "$f" >/dev/null; r=$?; [ $r = 0 ]; do [
-$SECONDS -lt 540 ] || exit 3; sleep 5; done; [ $r = 1 ] || { echo "lane: cannot tell whether the
+$SECONDS -lt 150 ] || exit 3; sleep 5; done; [ $r = 1 ] || { echo "lane: cannot tell whether the
 command still runs (lsof exited $r)" >&2; exit 4; }; tail -n 20 "$f"`. The background shell and
 the wrapper hold that file open until they exit — codex writes into the wrapper's pipes, and
 Claude Code itself does not hold it (measured with `lsof`, 2.1.282) — so the loop ends with the

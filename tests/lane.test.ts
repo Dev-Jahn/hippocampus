@@ -141,7 +141,7 @@ test('a hippo:lane relay asks no model: launch, id, codex rows, final lines', as
   step = await readStep($, 3)
   expect(step.chunks.filter((c) => c.kind === 'text').map((c) => c.text)).toEqual(['One test fails; fixing it.'])
   bash.push(FINAL)
-  expect((await runBash($, step)).command).toBe(`hippo dispatch --watch ${HEX}`)
+  expect((await runBash($, step)).command).toBe(`hippo dispatch --watch ${HEX} --for 150`)
 
   // 5. Its output is the reply, verbatim.
   step = await readStep($, 4)

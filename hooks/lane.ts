@@ -29,7 +29,8 @@ const AGENT = 'hippo:lane'
 const TOOL = 'codex'
 const TOOL_NAME = 'mcp__hippo__codex' // the plugin is `hippo`
 const LAUNCH_TIMEOUT = 2147483647 // lane.md step 1: the host clamps it to its longest deadline
-const WATCH_TIMEOUT = 600000
+const WATCH_FOR = 150 // seconds per watch: the host moves a foreground call to the background at 180s
+const WATCH_TIMEOUT = 170000
 const BATCH_WATCH_FOR = 60 // seconds per batch progress row
 const ID_WAIT_SECONDS = 60 // how long the launch may take to print its id
 const LIVENESS_EVERY = 5 // seconds between record checks while codex is quiet
@@ -117,7 +118,7 @@ async function* call(e: TurnStepInput, relay: Relay, block: number, text: string
 }
 
 const watchCall = (relay: Relay) => ({
-  command: `hippo dispatch --watch ${relay.id!.slice(relay.id!.indexOf(':') + 1)}${relay.id!.startsWith('batch:') ? ` --for ${BATCH_WATCH_FOR}` : ''}`,
+  command: `hippo dispatch --watch ${relay.id!.slice(relay.id!.indexOf(':') + 1)} --for ${relay.id!.startsWith('batch:') ? BATCH_WATCH_FOR : WATCH_FOR}`,
   description: relay.id!.startsWith('batch:') ? 'Watch the codex batch' : 'Collect the lane\'s final lines',
   timeout: WATCH_TIMEOUT,
 })

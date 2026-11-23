@@ -638,12 +638,12 @@ def test_every_background_launch_asks_for_the_hosts_longest_deadline():
 
 def _lane_agent_wait(path, window=None):
     """The lane agent's wait on a background command it has no lane record for (lane.md step
-    4), as the text gives it, with `<path>` filled in; `window` shortens its 540s. The sleep is
+    4), as the text gives it, with `<path>` filled in; `window` shortens its 150s. The sleep is
     cut to 1s so the suite stays fast — the loop is otherwise the one the agent runs."""
     text = (REPO_ROOT / "agents" / "lane.md").read_text(encoding="utf-8")
     (cmd,) = re.findall(r"^   `(f='<path>'.*)`$", text, re.M)
     cmd = cmd.replace("<path>", str(path)).replace("sleep 5", "sleep 1")
-    return cmd.replace("-lt 540", f"-lt {window}") if window else cmd
+    return cmd.replace("-lt 150", f"-lt {window}") if window else cmd
 
 
 def _hold(path, argv):
