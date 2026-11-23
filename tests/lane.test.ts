@@ -42,7 +42,7 @@ async function readStep($: any, index: number, agentId = RELAY) {
 // Claude Code, as far as one relay needs it: the model (counted — it must never be asked), the
 // Bash tool (answering with the next text of `bash`), and the lane's files.
 function host(on: any, bash: string[], served: { lines: number }, record = RECORD) {
-  const asked = { model: 0 }
+  const asked = { model: 0, bash: 0 }
   on('session.start', () => ({ cwd: '/work' }))
   on('tool.register', () => ({ value: { tool: 'mcp__hippo__codex' } }))
   on('agent.spawn', () => ({ model: 'claude-sonnet', agentId: RELAY }))
@@ -51,7 +51,8 @@ function host(on: any, bash: string[], served: { lines: number }, record = RECOR
     yield { kind: 'text', index: 0, text: 'model' }
     return { turnId: e.turnId, index: e.index, answer: 'model', toolUses: [], stopReason: 'end_turn', usage: null }
   })
-  on('tool.call', () => {
+  on('tool.call', ($: unknown, e: { tool: string }) => {
+    if (e.tool === 'Bash') asked.bash++
     const text = bash.shift() ?? ''
     return { result: { stdout: text, stderr: '' }, text }
   })
@@ -146,7 +147,7 @@ test('a hippo:lane relay asks no model: launch, id, codex rows, final lines', as
   step = await readStep($, 4)
   expect(step.result.answer).toBe(FINAL)
   expect(step.result.stopReason).toBe('end_turn')
-  expect(asked.model).toBe(0)
+  expect(asked).toEqual({ model: 0, bash: 3 })
 })
 
 test('the relay hands the conversation to the model when there is no lane record', async ($, on) => {
@@ -162,15 +163,39 @@ test('the relay hands the conversation to the model when there is no lane record
   expect(asked.model).toBe(1)
 })
 
-test('every other agent, and a lane prompt that is no dispatch command, is the model’s', async ($, on) => {
+test('a hippo:lane relay refuses a non-command prompt on its first step', async ($, on) => {
+  const asked = host(on, [], { lines: 0 })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const instruction = 'Run exactly this command and nothing else; append no arguments:'
+  const prompts = [
+    [`${instruction}\n\ncd /Users/…/project && hippo dispatch --kind research --scope "…" …`, instruction],
+    ['Please launch the parser lane.', 'Please launch the parser lane.'],
+    [`cd /work && ${COMMAND}`, `cd /work && ${COMMAND}`],
+    [`HIPPO_DIR=/work/.hippo ${COMMAND}`, `HIPPO_DIR=/work/.hippo ${COMMAND}`],
+    ['```bash\n' + COMMAND + '\n```', '```bash'],
+    ['\r\n' + instruction, ''],
+    ['', ''],
+  ]
+  for (const [prompt, firstLine] of prompts) {
+    await $.agent.spawn({ prompt, description: 'parser fix', subagentType: 'hippo:lane' } as never)
+    const step = await readStep($, 0)
+    const refusal = `The hippo:lane prompt must be the command alone, beginning with \`hippo dispatch\`. The first line received was ${JSON.stringify(firstLine)}. Use \`-C <dir>\` for the lane's working directory.`
+    expect(asked).toEqual({ model: 0, bash: 0 })
+    expect(step.chunks).toEqual([
+      { kind: 'text', index: 0, text: refusal },
+      { kind: 'stop', stopReason: 'end_turn', usage: null },
+    ])
+    expect(step.result.answer).toBe(refusal)
+    expect(step.result.stopReason).toBe('end_turn')
+    expect(step.result.toolUses).toEqual([])
+  }
+})
+
+test('the mod leaves other agents to the model and denies stray codex row calls', async ($, on) => {
   const asked = host(on, [], { lines: 0 })
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await readStep($, 0, 'some-other-agent')
   expect(asked.model).toBe(1)
-  await $.agent.spawn({ prompt: 'Please launch the parser lane.', description: 'x', subagentType: 'hippo:lane' } as never)
-  const step = await readStep($, 0)
-  expect(step.result.answer).toBe('model')
-  expect(asked.model).toBe(2)
   const denied = await $.tool.call({ tool: 'mcp__hippo__codex', command: 'ls', item: 0 } as never)
   expect(denied.deny).toMatch(/nothing ran/)
 })

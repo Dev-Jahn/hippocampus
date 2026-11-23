@@ -1368,10 +1368,13 @@ blocking foreground call, never a sleep, is what keeps it open.
 **The lane agent** (`agents/lane.md`, Claude Code). A codex lane launched as `Agent(subagent_type:
 "hippo:lane", description: "<scope>", prompt: "<the hippo dispatch command>")` gets a row in the
 agent panel — Enter opens its transcript, x stops it, and the kill trap records the stop. With
-the mod absent or when it hands over, the agent uses `model: haiku` at low effort. Its Bash
-instructions run the command verbatim in the background with `timeout: 2147483647`, read the
-id off the first `dispatch:<id>` or `batch:<id>` in its output (a whole batch is one row, "Two faces"
-below), loop `--watch` in the foreground, and reply with the final lines, which reach main as
+the mod absent or when it hands over, the agent uses `model: haiku` at low effort. The prompt
+must be the `hippo dispatch …` command alone. The working directory goes in `-C <dir>` inside
+the command. With the mod absent, the agent checks the prompt before using Bash and gives
+the same refusal as the mod. Its Bash instructions run the command verbatim in the background
+with `timeout: 2147483647`, read the id off the first `dispatch:<id>` or `batch:<id>` in its
+output (a whole batch is one row, "Two faces" below), loop `--watch` in the foreground, and
+reply with the final lines, which reach main as
 the one completion notification. The timeout is there because a background Bash call's
 `timeout` is its deadline: measured (b200-cluster, 2026-10-01), lane d1034f0c, relayed with
 none, was SIGTERMed at exactly 30m00s, and Claude Code told the relay "Background command … was
@@ -1412,6 +1415,21 @@ as agent text, and its commands and patches as `Bash` and `Update` rows through 
 `--watch` windows for progress. The mod passes control to the agent's model if it cannot
 continue the relay, including when it finds no id or lane record. The agent body also covers
 the entire relay when mods are disabled.
+
+The first step checks that the trimmed prompt begins with `hippo dispatch` followed by
+whitespace. If it fails, the mod ends the turn with one reply giving the rule, the first line
+received, and `-C <dir>` for the lane's directory. It makes zero model requests and zero Bash
+calls. In a consuming project on 2026-11-23 (Claude Code 2.1.330, hippo 1.20.0), main
+prefaced the command with “Run exactly this command and nothing else; append no arguments:”
+and wrapped it in `cd /Users/…/project && hippo dispatch …`. Five of five relays after the
+update fell through to Haiku from the first turn, at about 23–26k cache-read tokens per turn
+versus zero tokens per turn on the mod path. The silent handover hid the cause from main.
+Accepting one prefix would invite more forms to recognize and repair. The refusal tells main
+how to send the command directly. Measured live after the change (2026-11-23, Claude Code
+2.1.330): that same three-line prompt ended the agent on one turn of 0 tokens carrying the
+refusal, with no Bash call and no lane record, and the bare command with `-C <dir>` ran its
+`gpt-6-luna` lane in that directory over seven turns of 0 tokens each. The refusal by
+`lane.md` itself, with the mod off, was not measured.
 
 **With no record to watch** — `--watch` exits 2 because the project has no `.hippo/`, or the
 output never shows a `dispatch:` id — the agent waits on the command itself, in one foreground
