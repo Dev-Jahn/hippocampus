@@ -13,20 +13,51 @@ module scope.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
+
+def _path_without_khala(path):
+    """PATH with every directory that holds a `khala` swapped for a mirror of it without one:
+    `hippo dispatch` asks `khala whoami` wherever it finds khala, and no test may reach the real
+    one (a developer machine has it on PATH). A test that wants khala puts a fake one first."""
+    out, root = [], None
+    for d in path.split(os.pathsep):
+        if d and os.access(os.path.join(d, "khala"), os.X_OK):
+            if root is None:
+                root = Path(tempfile.mkdtemp(prefix="hippo-tests-path-"))
+                atexit.register(shutil.rmtree, root, True)
+            mirror = root / str(len(out))
+            mirror.mkdir()
+            for name in os.listdir(d):
+                if name != "khala":
+                    (mirror / name).symlink_to(os.path.join(d, name))
+            d = str(mirror)
+        out.append(d)
+    return os.pathsep.join(out)
+
+
 # Every subprocess a test starts inherits this environment, through run_hippo or not: the judge
 # stays off unless a test pins a backend (a developer machine carries a live TYPESAFE_API_KEY,
-# and `hippo dispatch` now asks the judge), and a suite run from inside a dispatched lane must
-# not run as that lane.
+# and `hippo dispatch` now asks the judge), no real khala is on PATH, and a suite run from
+# inside a dispatched lane must not run as that lane.
 os.environ.setdefault("HIPPO_JEV_BACKEND", "off")
-for _lane_var in ("HIPPO_DISPATCH", "HIPPO_DEPTH"):
+os.environ["PATH"] = _path_without_khala(os.environ.get("PATH", ""))
+for _lane_var in ("HIPPO_DISPATCH", "HIPPO_DEPTH", "KHALA_SESSION", "KHALA_PARENT",
+                  "HIPPO_KHALA_PARENT"):
     os.environ.pop(_lane_var, None)
+# bin/hippo runs through `uv run --script`, whose cache lives under $HOME: a test that points
+# HOME at a temp directory would otherwise send uv to the network for the CLI's dependencies.
+if "UV_CACHE_DIR" not in os.environ and shutil.which("uv"):
+    os.environ["UV_CACHE_DIR"] = subprocess.run(
+        ["uv", "cache", "dir"], capture_output=True, text=True, check=True).stdout.strip()
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HIPPO_BIN = REPO_ROOT / "bin" / "hippo"
@@ -137,6 +168,26 @@ def read_ledger(project_dir) -> list[dict]:
         return []
     lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
     return [json.loads(ln) for ln in lines]
+
+
+def tracked_hippo_worktrees(project) -> tuple[Path, Path]:
+    """Make `project` a git repository that tracks its .hippo/, and add two linked worktrees —
+    one in .claude/worktrees/, one outside the repository — each carrying a checked-out copy
+    of .hippo/ (the measured shape of DESIGN §3.3's copy rule). → (inside, outside)."""
+    def git(*a):
+        subprocess.run(["git", "-C", str(project), "-c", "user.name=t", "-c", "user.email=t@t",
+                        *a], check=True, capture_output=True)
+
+    (project / "README").write_text("x\n", encoding="utf-8")
+    git("init", "-q")
+    git("add", "README", ".hippo")
+    git("commit", "-qm", "init")
+    inside = project / ".claude" / "worktrees" / "agent-a1b2c3"
+    outside = project.parent / f"{project.name}-wt"
+    for wt in (inside, outside):
+        git("worktree", "add", "-q", str(wt))
+        assert (wt / ".hippo" / "ledger.jsonl").exists()
+    return inside, outside
 
 
 def worklog_path(project_dir) -> Path:

@@ -19,7 +19,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from conftest import REPO_ROOT
+from conftest import REPO_ROOT, tracked_hippo_worktrees
 
 
 def _run_hook(script_path, payload: dict, cwd, env=None, timeout=10):
@@ -284,6 +284,32 @@ def test_a_worktree_isolated_subagent_gets_the_directives_too(tmp_project, repo_
     assert lines == SLICE
 
 
+def test_a_tracked_hippo_copy_in_a_worktree_is_never_the_project(tmp_project, repo_root,
+                                                                 run_hippo, tmp_path):
+    """The hooks' walk is the CLI's (§3.3): a worktree's checked-out .hippo/ is skipped. A main
+    session started in the worktree gets nothing — no capsule from the copy, so no scribe either
+    (Stop runs the same walk) — and a worktree agent gets the directives recorded after the copy
+    was made, which only the main worktree's .hippo/ holds. Above a project, $HOME is not one."""
+    inside, outside = tracked_hippo_worktrees(tmp_project)
+    _directives(tmp_project, run_hippo)
+    for wt in (inside, outside):
+        start = {"cwd": str(wt), "hook_event_name": "SessionStart", "source": "startup"}
+        proc = _run_hook(repo_root / "hooks" / "session_start.sh", start, cwd=wt)
+        assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), wt
+        proc = _subagent(wt, repo_root)
+        assert proc.returncode == 0, proc.stderr
+        lines = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"].splitlines()
+        assert lines == SLICE, wt
+
+    home = tmp_path / "home"
+    (home / "sibling").mkdir(parents=True)
+    (home / ".hippo").mkdir()
+    start = {"cwd": str(home / "sibling"), "hook_event_name": "SessionStart", "source": "startup"}
+    proc = _run_hook(repo_root / "hooks" / "session_start.sh", start, cwd=home / "sibling",
+                     env={"HOME": str(home)})
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
+
+
 def test_a_subagent_hook_is_silent_for_forks_lanes_and_outside_a_project(
         tmp_project, repo_root, run_hippo, uninitialized_dir):
     """With no directive live a worker still gets the writes line — a hippo write from its shell
@@ -320,10 +346,32 @@ def test_pre_compact_asks_for_hippo_deltas_over_main_s_lists(tmp_project, repo_r
     assert proc.returncode == 0, proc.stderr
     text = proc.stdout
     assert "`## hippo deltas`" in text and "hippo task done <id> --note" in text
-    assert "- feat/alpha — Alpha — parser written" in text
+    assert "- feat/alpha — Alpha — 0m ago — parser written" in text
     assert "fix/beta" not in text  # done is not open
     assert "- gpu-pin — use GPUs 0 and 1 only" in text and "- main-only —" in text
     assert "worker-rule" not in text  # main's audience: a manual /compact shows this to main
+
+
+def test_pre_compact_shows_each_task_s_latest_notes_and_age(tmp_project, repo_root):
+    """The head of long notes is boilerplate, so the summarizer could not see what was recorded
+    and re-proposed it (measured: 216 of 303 delta commands targeted an id written in the 24h
+    before). A task shows how long ago it was updated and the newest part of its notes: a list's
+    last item, a string's tail."""
+    from datetime import timedelta
+    ago = (datetime.now(timezone.utc) - timedelta(hours=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    tail = "stage 3 merged at abc123"
+    (tmp_project / ".hippo" / "tasks.yaml").write_text(
+        "tasks:\n"
+        f"- {{id: feat/list, title: L, status: active, updated: '{ago}', "
+        "notes: ['boilerplate scope paragraph', 'stage 2 merged']}\n"
+        f"- {{id: feat/text, title: T, status: active, updated: '2026-09-01T00:00:00Z', "
+        f"notes: '{'boilerplate ' * 20}{tail}'}}\n", encoding="utf-8")
+    text = _pre_compact(tmp_project, repo_root).stdout
+    assert "Leave out anything the lists below already show" in text
+    assert "- feat/list — L — 7h ago — stage 2 merged\n" in text
+    line = next(ln for ln in text.splitlines() if ln.startswith("- feat/text — T — "))
+    assert line.split(" — ")[2].endswith("d ago") and line.endswith(" " + tail)
+    assert line.split(" — ")[3].startswith("…") and len(line.split(" — ")[3]) == 80
 
 
 def _write_tasks(project, n, notes="n" * 90):
@@ -353,7 +401,7 @@ def test_pre_compact_is_capped_and_lists_by_id_what_does_not_fit_whole(
     proc = _pre_compact(tmp_project, repo_root)
     assert proc.returncode == 0, proc.stderr
     assert len(proc.stdout) <= 3000
-    whole, by_id = _listed(proc.stdout, "open tasks (id — title — notes):")
+    whole, by_id = _listed(proc.stdout, "open tasks (id — title — updated — latest notes):")
     assert 0 < len(whole) < 40 and len(whole) + len(by_id) == 40
     assert "more not shown" not in proc.stdout
     # Past even the ids, the least recently updated are cut and counted, and the most recent keep
@@ -361,7 +409,7 @@ def test_pre_compact_is_capped_and_lists_by_id_what_does_not_fit_whole(
     _write_tasks(tmp_project, 400)
     proc = _pre_compact(tmp_project, repo_root)
     assert len(proc.stdout) <= 3000
-    whole, by_id = _listed(proc.stdout, "open tasks (id — title — notes):")
+    whole, by_id = _listed(proc.stdout, "open tasks (id — title — updated — latest notes):")
     assert whole and by_id
     assert f"({400 - len(whole) - len(by_id)} more not shown" in proc.stdout
 
@@ -380,7 +428,7 @@ def test_pre_compact_keeps_tasks_in_view_past_many_directives(tmp_project, repo_
     proc = _pre_compact(tmp_project, repo_root)
     assert proc.returncode == 0, proc.stderr
     assert len(proc.stdout) <= 3000
-    t_whole, t_ids = _listed(proc.stdout, "open tasks (id — title — notes):")
+    t_whole, t_ids = _listed(proc.stdout, "open tasks (id — title — updated — latest notes):")
     assert len(t_whole) >= 3 and len(t_whole) + len(t_ids) == 18  # every open task in view
     d_whole, d_ids = _listed(proc.stdout, "live directives (id — text):")
     shown = d_whole + d_ids
@@ -437,13 +485,15 @@ def _lines(path, recs, mode="w"):
         f.writelines(json.dumps(r, separators=(",", ":")) + "\n" for r in recs)
 
 
-def _session(project, main, agents=None):
-    """agents: {path under subagents/, no suffix: (agent_type, the agent's own records)}"""
+def _session(project, main, agents=None, agent_at=None):
+    """agents: {path under subagents/, no suffix: (agent_type, the agent's own records)}, each
+    record stamped `agent_at` (default: now — an agent at a compaction point is a live one)."""
     shutil.rmtree(project / "t", ignore_errors=True)
     _lines(project / "t.jsonl", main)
+    stamp = (agent_at or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z")
     for rel, (atype, recs) in (agents or {}).items():
         path = project / "t" / "subagents" / f"{rel}.jsonl"
-        _lines(path, [{**r, "isSidechain": True} for r in recs])
+        _lines(path, [{"timestamp": stamp, **r, "isSidechain": True} for r in recs])
         path.with_name(path.name.replace(".jsonl", ".meta.json")).write_text(
             json.dumps({"agentType": atype}), encoding="utf-8")
 
@@ -596,6 +646,25 @@ def test_main_s_own_compactions_keep_the_request(tmp_project, repo_root):
                 "[hippo] tasks"), case
 
 
+def test_a_dead_agent_never_takes_an_idle_main_s_compaction(tmp_project, repo_root):
+    """The host compacts an idle main ~55 minutes after its turn ended, and main is then at no
+    compaction point. Measured: one hippo:lane relay whose transcript ended at a compaction point
+    days before took every later idle compaction (3 of 3) — no deltas request, no capsule. A
+    compacting agent's last line is as old as its summary at most (5.5 minutes, the slowest of
+    169), so one older than COMPACTING_AGENT_RECENT is a dead agent's, and the compaction main's;
+    one inside it is still the agent's."""
+    from datetime import timedelta
+    old = datetime.now(timezone.utc) - timedelta(minutes=55)
+    for atype in ("hippo:lane", "general-purpose"):
+        _session(tmp_project, IDLE, {"agent-a1": (atype, WORKING)}, agent_at=old)
+        assert "`## hippo deltas`" in _pre_compact_at(tmp_project, repo_root).stdout, atype
+        assert _session_start(tmp_project, repo_root).startswith("[hippo] tasks"), atype
+    recent = datetime.now(timezone.utc) - timedelta(minutes=6)  # a slow summary's SessionStart
+    _session(tmp_project, IDLE, {"agent-a1": ("general-purpose", WORKING)}, agent_at=recent)
+    assert _pre_compact_at(tmp_project, repo_root).stdout == ""
+    assert not _session_start(tmp_project, repo_root).startswith("[hippo] tasks")
+
+
 def test_main_s_line_that_lands_in_the_flush_keeps_the_request(tmp_path, monkeypatch):
     """The host writes each transcript on a 100ms flush, so main compacting right after its tool
     returned can still end, on disk, in the call. Both sides are read once that flush has passed:
@@ -669,3 +738,61 @@ def test_the_capsule_after_a_compaction_points_at_the_deltas(tmp_project, repo_r
 
     assert "## hippo deltas" in capsule("compact").splitlines()[-1]
     assert "hippo deltas" not in capsule("startup")
+
+
+def test_after_a_compaction_main_gets_the_latest_worklog_with_times(tmp_project, repo_root):
+    """The summary can be older than the compaction (measured: 46–130 minutes for precomputed
+    ones, ~55 for idle ones, 1.5–2h in a second report) and state finished work as unfinished;
+    the worklog is the fresher record. After a compaction main's capsule carries its last four
+    entries, each dated, across a day boundary, with the time now, and the task and directive
+    ids hippo wrote in the last 3h, newest first — a delta on one of those is older than the
+    write. Elsewhere `last:` stays one dated line."""
+    from datetime import timedelta
+    hp = tmp_project / ".hippo"
+    (hp / "worklog.md").write_text(
+        "## 2026-11-17\n\n- 22:10 first\n- 23:40 second\n  - a nested bullet\n\n"
+        "## 2026-11-18\n\n- 00:05 third\n- 00:20 fourth\n- 00:31 " + "x" * 400 + "\n",
+        encoding="utf-8")
+    now = datetime.now(timezone.utc)
+    ago = lambda m: (now - timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+    local = lambda m: (now - timedelta(minutes=m)).astimezone().strftime("%H:%M")  # noqa: E731
+    (hp / "tasks.yaml").write_text(
+        f"tasks:\n- {{id: feat/new, title: N, status: active, updated: '{ago(10)}'}}\n"
+        f"- {{id: feat/old, title: O, status: active, updated: '{ago(200)}'}}\n"
+        f"- {{id: feat/shut, title: S, status: done, updated: '{ago(90)}'}}\n", encoding="utf-8")
+    with (hp / "ledger.jsonl").open("a", encoding="utf-8") as f:
+        for did, state, m in (("gpu-pin", "active", 150), ("gpu-pin", "withdrawn", 40),
+                              ("lane-rule", "active", 30)):
+            f.write(json.dumps({"t": ago(m), "ev": "directive", "id": did, "state": state,
+                                "text": "t", "src": "cli"}) + "\n")
+
+    def capsule(source):
+        payload = {"cwd": str(tmp_project), "hook_event_name": "SessionStart", "source": source}
+        proc = _run_hook(repo_root / "hooks" / "session_start.sh", payload, cwd=tmp_project)
+        assert proc.returncode == 0, proc.stderr
+        return _capsule(proc).splitlines()
+
+    lines = capsule("compact")
+    i = next(i for i, ln in enumerate(lines) if ln.startswith("· last, from the worklog (now "))
+    assert lines[i + 1:i + 6] == [
+        "  - 11-17 23:40 second", "  - 11-18 00:05 third", "  - 11-18 00:20 fourth",
+        "  - 11-18 00:31 " + "x" * 109 + "…",
+        f"  - written in hippo, last 3h: task feat/new {local(10)}, directive lane-rule "
+        f"{local(30)}, directive gpu-pin {local(40)}, task feat/shut {local(90)}"]
+    assert not lines[i + 6].startswith("  - ")
+    assert "`last` lines or hippo's lists, they win" in lines[-1]
+    assert "`hippo task show <id>`" in lines[-1] and "## hippo deltas" in lines[-1]
+    assert [ln for ln in capsule("startup") if "last" in ln or "written" in ln] == [
+        "· last: 11-18 00:31 " + "x" * 119 + "…"]
+
+
+def test_the_written_line_names_the_newest_with_times_and_caps_the_rest(tmp_project):
+    sys.path.insert(0, str(REPO_ROOT / "cli"))
+    import hippo_cli
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    tasks = [{"id": f"feat/t{i:02d}", "updated": (now - timedelta(minutes=i)).isoformat()}
+             for i in range(40)]
+    text = hippo_cli.store_written(tmp_project / ".hippo", tasks)
+    assert text.startswith("task feat/t00 ") and ", also feat/t06, feat/t07" in text
+    assert len(text) <= hippo_cli.STORE_WRITTEN_CHARS + 12 and text.endswith(" more)")

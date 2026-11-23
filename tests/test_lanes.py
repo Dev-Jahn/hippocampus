@@ -457,28 +457,6 @@ def test_a_child_codex_left_writing_to_stderr_does_not_hold_the_lane(tmp_project
     assert (rec["status"], rec["rc"], "timed_out" in rec) == ("exited", 0, False)
 
 
-def test_lanes_starting_in_one_instant_all_keep_their_records(tmp_project):
-    """Each start rewrites a stale statusline pointer through the same tmp file, and every
-    rename but the first finds it gone (measured: 2 of 3 simultaneous starts lost their
-    record). The pointer is best effort; the record is not."""
-    import concurrent.futures
-    import threading
-    hp = tmp_project / ".hippo"
-    ptr = hippo_cli.lanes_dir(hp) / ".statusline"
-    gate = threading.Barrier(3)
-
-    def start():
-        gate.wait()
-        return hippo_cli.lanes_dir(hp)
-
-    with concurrent.futures.ThreadPoolExecutor(3) as pool:
-        for _ in range(30):
-            ptr.write_text("/gone/1.14.0/scripts/lane_status.py", encoding="utf-8")
-            assert [f.result() for f in [pool.submit(start) for _ in range(3)]] == \
-                [hp / "lanes"] * 3
-    assert ptr.read_text(encoding="utf-8") == str(REPO_ROOT / "scripts" / "lane_status.py")
-
-
 def test_a_stop_is_on_record_before_a_slow_codex_exits(tmp_project, tmp_path):
     """Claude Code SIGKILLs the whole tree 1.5s after its SIGTERM. A codex slower than that to
     exit left no status at all, and the lane read as running; the stop goes on record at once."""
@@ -627,9 +605,9 @@ def test_watch_outside_a_project_says_where_records_live(uninitialized_dir):
     assert proc.returncode == 2 and "lane records live in .hippo/lanes/" in proc.stderr
 
 
-def test_the_lane_agent_is_a_low_effort_sonnet_relay_with_bash_and_the_mods_codex_rows():
+def test_the_lane_agent_is_a_low_effort_haiku_relay_with_bash_and_the_mods_codex_rows():
     """A frontmatter Claude Code cannot parse drops the agent without a word, and every lane
-    launched through it would fail to start. `mcp__hippo__codex` is the tool mods/lane.ts
+    launched through it would fail to start. `mcp__hippo__codex` is the tool hooks/lane.ts
     registers to draw codex's commands as the relay's rows: a subagent is refused a call to a
     tool its `tools:` does not name (measured, 2.1.296), and without mods the name matches
     nothing and the relay has Bash alone."""
@@ -638,7 +616,7 @@ def test_the_lane_agent_is_a_low_effort_sonnet_relay_with_bash_and_the_mods_code
     m = re.match(r"---\n(.*?)\n---\n", text, re.S)
     front = yaml.safe_load(m.group(1))
     assert (front["name"], front["model"], front["effort"], front["tools"]) == (
-        "lane", "sonnet", "low", "Bash, mcp__hippo__codex")
+        "lane", "haiku", "low", "Bash, mcp__hippo__codex")
     assert "run_in_background: true" in text and "hippo dispatch --watch <id>" in text
     assert "grep -m1 -oE '(batch:b|dispatch:d)[0-9a-f]{32}' <path>" in text
 
@@ -722,155 +700,3 @@ def test_the_lane_agents_wait_says_so_when_lsof_cannot_run(tmp_path, shell):
     finally:
         holder.kill()
         holder.wait()
-
-
-# --------------------------------------------------------------------------
-# the agent-panel row: settings.json's subagentStatusLine → scripts/lane_status.py
-# --------------------------------------------------------------------------
-
-DID = "d" + "ab" * 16
-
-
-def _statusline(cwd, ctx, env=None):
-    """Run the plugin's own subagentStatusLine command the way Claude Code does: through a
-    shell, in the project directory, with the rows as JSON on stdin."""
-    cmd = json.loads((REPO_ROOT / "settings.json").read_text(encoding="utf-8"))
-    return subprocess.run(["/bin/sh", "-c", cmd["subagentStatusLine"]["command"]], cwd=cwd,
-                          input=json.dumps(ctx), capture_output=True, text=True, timeout=30,
-                          env={**os.environ, "PWD": str(cwd), **(env or {})})
-
-
-def _session(tmp_path, project, agents):
-    """A main transcript and one subagent per (id, agentType, transcript text)."""
-    sess = tmp_path / "sess"
-    (sess / "subagents").mkdir(parents=True)
-    for aid, kind, text in agents:
-        (sess / "subagents" / f"agent-{aid}.meta.json").write_text(
-            json.dumps({"agentType": kind, "description": "d"}), encoding="utf-8")
-        (sess / "subagents" / f"agent-{aid}.jsonl").write_text(text, encoding="utf-8")
-    rows = [{"id": aid, "type": "local_agent", "status": "running", "description": f"row {aid}",
-             "cwd": str(project)} for aid, _, _ in agents]
-    return {"session_id": "s", "transcript_path": f"{sess}.jsonl", "cwd": str(project),
-            "columns": 120, "tasks": rows}
-
-
-def _lane_record(project, **over):
-    lanes = _lanes(project)
-    lanes.mkdir(exist_ok=True)
-    rec = {"id": DID, "scope": "pass2 tensorize", "exec": "codex/gpt-6-sol/high",
-           "pid": os.getpid(), "pgid": None, "started": hippo_cli.now_iso(), "codex_session": None, "cmds": 14,
-           "last": "exec: pytest -q tests/test_pass2.py", "last_at": hippo_cli.now_iso(),
-           **over}
-    (lanes / f"{DID}.json").write_text(json.dumps(rec), encoding="utf-8")
-
-
-def test_a_lane_row_shows_its_lane_and_every_other_row_keeps_its_default(tmp_project, tmp_path):
-    hippo_cli.lanes_dir(tmp_project / ".hippo")  # what every lane start does: the pointer
-    # Started 2h00m15s ago: a clock second passing while the status line runs cannot change
-    # the rendered elapsed time (a lane started "now" read 0s or 1s).
-    started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 7215))
-    _lane_record(tmp_project, started=started)
-    lane_text = (json.dumps({"type": "user", "message": {"content": "hippo dispatch …"}}) + "\n"
-                 + json.dumps({"tool_result": f"dispatch:{DID}"}) + "\n")
-    ctx = _session(tmp_path, tmp_project, [
-        ("alane", "hippo:lane", lane_text), ("aother", "general-purpose", f"dispatch:{DID}")])
-    proc = _statusline(tmp_project, ctx)
-    assert proc.returncode == 0, proc.stderr
-    (line,) = proc.stdout.splitlines()
-    assert json.loads(line) == {
-        "id": "alane",
-        "content": "codex · pass2 tensorize · 2h00m · 14 cmds · exec: pytest -q tests/test_pass2.py"}
-
-
-def test_a_lane_row_follows_the_last_id_its_agent_named_and_shows_the_end(tmp_project,
-                                                                          tmp_path):
-    hippo_cli.lanes_dir(tmp_project / ".hippo")
-    _lane_record(tmp_project, status="killed", signal="SIGTERM", rc=-15,
-                 started="2026-09-24T00:00:00Z", ended="2026-09-24T00:03:05Z")
-    other = "d" + "cd" * 16
-    text = f"prompt quoting dispatch:{other}\n--watch {DID}\n"
-    ctx = _session(tmp_path, tmp_project, [("alane", "hippo:lane", text)])
-    ctx["columns"] = 40
-    (sub := tmp_project / "deep" / "er").mkdir(parents=True)
-    ctx["tasks"][0]["cwd"] = str(sub)  # the record is found walking up, as the CLI finds .hippo
-    content = json.loads(_statusline(sub, ctx).stdout)["content"]
-    assert content == "codex · pass2 tensorize · killed by SIG…" and len(content) == 40
-    ctx["columns"] = 0
-    content = json.loads(_statusline(sub, ctx).stdout)["content"]
-    assert content == "codex · pass2 tensorize · killed by SIGTERM rc=-15 · 3m05s · 14 cmds"
-
-
-def test_a_lane_row_whose_wrapper_died_stops_counting(tmp_project, tmp_path):
-    """SIGKILLed before codex exited: the stop is on record but no rc, and the row neither
-    prints `rc=None` nor keeps a timer running. A wrapper that recorded nothing and is gone
-    shows `lost`, as `--watch` says."""
-    hippo_cli.lanes_dir(tmp_project / ".hippo")
-    dead = subprocess.Popen(["true"])
-    dead.wait()
-    ctx = _session(tmp_path, tmp_project, [("alane", "hippo:lane", f"dispatch:{DID}\n")])
-    _lane_record(tmp_project, pid=dead.pid, status="killed", signal="SIGTERM",
-                 started="2026-09-24T00:00:00Z", last_at="2026-09-24T00:00:16Z")
-    assert json.loads(_statusline(tmp_project, ctx).stdout)["content"] == \
-        "codex · pass2 tensorize · killed by SIGTERM · 16s · 14 cmds"
-    _lane_record(tmp_project, pid=dead.pid, started="2026-09-24T00:00:00Z",
-                 last_at="2026-09-24T00:00:16Z")
-    assert json.loads(_statusline(tmp_project, ctx).stdout)["content"] == (
-        "codex · pass2 tensorize · lost, its wrapper is gone · 16s · 14 cmds · "
-        "exec: pytest -q tests/test_pass2.py")
-
-
-def test_the_statusline_runs_no_pointer_it_cannot_trust(tmp_path):
-    """The command runs, as the user, whatever script the pointer names — so it looks only
-    where find_hippo looks (a .git directory and $HOME stop the walk: an ancestor's .hippo/
-    may be someone else's), and runs only a `…/scripts/lane_status.py` the user owns, named by
-    a pointer the user owns (ownership needs a second user to test; the rest is here)."""
-    shared, ran = tmp_path / "shared", tmp_path / "ran"
-    planted = shared / "x" / "scripts" / "lane_status.py"
-    other = shared / "other.py"
-    planted.parent.mkdir(parents=True)
-    for script in (planted, other):
-        script.write_text(f"open({str(ran)!r}, 'w').write('x')\n", encoding="utf-8")
-    ptr = shared / ".hippo" / "lanes" / ".statusline"
-    ptr.parent.mkdir(parents=True)
-    ptr.write_text(str(planted), encoding="utf-8")
-    (repo := shared / "repo" / "src").mkdir(parents=True)
-    (shared / "repo" / ".git").mkdir()
-    (home := shared / "home" / "proj").mkdir(parents=True)
-    (plain := shared / "plain").mkdir()
-    ctx = {"transcript_path": str(tmp_path / "s.jsonl"), "tasks": [{"id": "a1"}]}
-
-    for cwd, env in ((repo, None), (home, {"HOME": str(home.parent)})):
-        proc = _statusline(cwd, ctx, env)
-        assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), cwd
-        assert not ran.exists(), f"the walk from {cwd} went past its ceiling"
-    assert _statusline(plain, ctx).returncode == 0 and ran.exists(), \
-        "reached with no ceiling between, the same pointer is followed"
-    ran.unlink()
-    ptr.write_text(str(other), encoding="utf-8")
-    assert _statusline(plain, ctx).returncode == 0 and not ran.exists(), \
-        "a pointer to anything but a lane_status.py is not run"
-
-
-def test_a_lane_row_before_the_id_is_known_says_so(tmp_project, tmp_path):
-    hippo_cli.lanes_dir(tmp_project / ".hippo")
-    ctx = _session(tmp_path, tmp_project, [("alane", "hippo:lane", "just the prompt\n")])
-    assert json.loads(_statusline(tmp_project, ctx).stdout)["content"] == \
-        "codex · row alane · starting"
-
-
-def test_the_statusline_is_silent_where_no_lane_ever_started(tmp_project, tmp_path):
-    ctx = _session(tmp_path, tmp_project, [("alane", "hippo:lane", f"dispatch:{DID}")])
-    proc = _statusline(tmp_project, ctx)
-    assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), \
-        "no pointer, no python: every row keeps its default"
-
-
-def test_every_lane_start_points_the_statusline_at_this_plugin(tmp_project, tmp_path):
-    ptr = _lanes(tmp_project) / ".statusline"
-    ptr.parent.mkdir()
-    ptr.write_text("/gone/1.14.0/scripts/lane_status.py", encoding="utf-8")
-    week = time.time() - 30 * 86400
-    os.utime(ptr, (week, week))
-    proc = _run(tmp_project, tmp_path, "#!/bin/sh\nexit 0\n")
-    assert proc.returncode == 0, proc.stderr
-    assert ptr.read_text(encoding="utf-8") == str(REPO_ROOT / "scripts" / "lane_status.py")

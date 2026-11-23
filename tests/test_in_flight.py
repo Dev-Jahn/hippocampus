@@ -1,6 +1,9 @@
 """The `in flight` capsule line (DESIGN §6): launched, unjudged, recent, launcher-written."""
 
+import json
+import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 from conftest import REPO_ROOT
 
@@ -63,3 +66,45 @@ def test_a_stale_dispatch_is_not_in_flight(tmp_project, run_hippo):
                 '"exec":"codex/gpt-6-sol/high","scope":"ancient","src":"wrapper"}\n')
     assert _inject(run_hippo, tmp_project) == []
     assert hippo_cli.in_flight(hp) == []
+
+
+def test_a_lane_s_record_tells_running_from_ended(tmp_project, run_hippo):
+    """Measured (1.17.1, 46 capsules): 194 of 285 in-flight entries were lanes that had already
+    ended, shown with their age since launch, and lanes judged while their wrappers ran vanished.
+    A lane record decides: running (judged or not) on the in-flight line, `running <age>`; ended
+    or lost and unjudged on its own line, with how it ended and when; judged and ended, nowhere.
+    A launch with no record keeps the bare age."""
+    hp = tmp_project / ".hippo"
+    now = datetime.now(timezone.utc)
+    ago = lambda m: (now - timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+    for did in ("drun", "djudged", "dended", "dkilled", "dlost", "ddone", "dbare"):
+        _launch(run_hippo, tmp_project, did, f"scope {did}")
+    # Judged before the lane records exist: `log outcome` refuses a verdict on a running lane,
+    # so a row judged while its lane runs is one an earlier version wrote.
+    for did in ("djudged", "ddone"):
+        assert run_hippo(["log", "outcome", "--ref", did, "--result", "accepted"],
+                         cwd=tmp_project).returncode == 0
+    lanes = hp / "lanes"
+    lanes.mkdir()
+    gone = 2 ** 22 + 12345  # a pid no process has
+    records = {
+        "drun": {"pid": os.getpid(), "started": ago(42)},
+        "djudged": {"pid": os.getpid(), "started": ago(42)},
+        "dended": {"pid": gone, "status": "exited", "rc": 1, "ended": ago(125)},
+        "dkilled": {"pid": gone, "status": "killed", "rc": None, "signal": "SIGTERM",
+                    "ended": ago(5)},
+        "dlost": {"pid": gone, "last_at": ago(30)},
+        "ddone": {"pid": gone, "status": "exited", "rc": 0, "ended": ago(5)},
+    }
+    for did, rec in records.items():
+        (lanes / f"{did}.json").write_text(json.dumps({"id": did, **rec}), encoding="utf-8")
+    out = run_hippo(["status", "--inject"], cwd=tmp_project).stdout.splitlines()
+    assert [ln for ln in out if ln.startswith("· in flight:")] == [
+        "· in flight: scope drun (running 0h00m), scope djudged (running 0h00m · judged "
+        "accepted), scope dbare (0h00m)"]
+    assert [ln for ln in out if ln.startswith("· ended,")] == [
+        "· ended, awaiting your verdict: scope dended (rc=1 · ended 2h05m ago), scope dkilled "
+        "(killed by SIGTERM · ended 0h05m ago), scope dlost (lost: wrapper gone, no end "
+        "recorded · last seen 0h30m ago)"]
+    lane = run_hippo(["status", "--inject"], cwd=tmp_project, env={"HIPPO_DISPATCH": "x"})
+    assert "· ended," not in lane.stdout  # a verdict is main's to give

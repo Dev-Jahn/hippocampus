@@ -18,6 +18,7 @@ import os
 import queue
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -74,12 +75,17 @@ ALLOWED = {
     # depth: how far this lane may re-delegate (§9.5 — 0 = leaf, told not to spawn; the clause
     # is indexed, not deleted). parent: the dispatch id of the lane that launched this one —
     # an unintended depth-2 becomes an event in the ledger, not a prohibition nobody can check.
-    "dispatch": ("id", "kind", "exec", "scope", "task", "depth", "parent"),
+    # khala / khala_parent: the lane's khala address and its launcher's, where khala is
+    # installed (§3.6) — so main knows where to write to a lane.
+    "dispatch": ("id", "kind", "exec", "scope", "task", "depth", "parent", "khala",
+                 "khala_parent"),
     "outcome": ("ref", "result", "attr", "rework", "by", "note"),
     "review": ("id", "base", "source", "findings"),
     "review-status": ("ref", "addressed", "at"),
     "directive": ("id", "text", "lifetime", "state", "audience"),
-    "clerk": ("name", "ok", "ms", "tokens"),
+    # dropped: the clerk's events a scribe run set aside as restatements of rows already in
+    # the ledger (`scribe_restates`) — counted here, never dumped.
+    "clerk": ("name", "ok", "ms", "tokens", "restated"),
     "usage": ("ref", "tokens", "model", "tin", "tcached", "tout"),
     # p: the compact probabilities the route was computed from — done, blocked, ask, creep,
     # evidence, and risk (a 0-3 score). A question the reply did not answer is absent.
@@ -110,7 +116,12 @@ EXEC_PLACEHOLDERS = {"executor", "vehicle", "model", "effort"}
 EXECUTORS = {"codex", "claude", "fork", "subagent", "workflow"}
 EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra", "inherit"}
 ENUMS = {
-    ("outcome", "result"): {"accepted", "revised", "refuted", "no-go", "lost"},
+    # dropped: closed with no verdict on the work — a later delegation replaced it, or it is too
+    # old for anyone to judge. Measured (steno, 1.17.1): 36 of 38 `lost` outcomes were cleanups
+    # of delegations a newer one overtook, main once wrote `no-go` for the same thing ("there is
+    # no 'superseded' value"), 37 native runs lost their verdicts to a compaction and 20 old
+    # dispatches were written `lost/harness` only to clear them. It mirrors the task status.
+    ("outcome", "result"): {"accepted", "revised", "refuted", "no-go", "lost", "dropped"},
     ("outcome", "attr"): {"work", "brief", "harness"},
     ("directive", "state"): {"active", "withdrawn", "expired"},
     # audience is *who* a directive binds (§9.4). Absent = all — a narrow default would silently
@@ -129,7 +140,8 @@ TRIAGE_TRIMMED = ("stderr_tail", "brief", "changes", "report")  # what fit_triag
 # kebab ASCII or nothing. An id derived from non-ASCII text collapses to the empty string, and
 # an id that is empty (or spelled differently every time) cannot supersede anything.
 DIRECTIVE_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-INT_FIELDS = ("findings", "rework", "ms", "tokens", "depth", "tin", "tcached", "tout")
+INT_FIELDS = ("findings", "rework", "ms", "tokens", "depth", "tin", "tcached", "tout",
+              "restated")
 
 
 def validate_event(e):
@@ -222,32 +234,79 @@ def die(msg, code=1):
 
 
 def find_hippo():
-    """$HIPPO_DIR when it names a directory; otherwise walk up from cwd looking for .hippo/ (the
-    git root and $HOME are the ceiling).
+    """$HIPPO_DIR when it names a directory; otherwise the project that owns cwd (walk_hippo).
 
     HIPPO_DIR is planted by the dispatch wrapper into a lane's environment so a lane reports to
     the ledger that launched it, wherever its cwd is — measured, 12% of lane outcomes (141 of
-    1,167) were refused for a ref the lane's own `.hippo/` had never seen.
-
-    A `.git` *directory* is a real repository root: stop there, never adopt a project from
-    beyond it. A `.git` *file* marks a linked worktree, and by convention lanes live inside
-    the repo (`.claude/worktrees/<name>`) — walk through it, so an executor calling hippo
-    from its worktree resolves the project's real .hippo/ (§9.1)."""
+    1,167) were refused for a ref the lane's own `.hippo/` had never seen."""
     env = os.environ.get("HIPPO_DIR")
     if env and Path(env).is_dir():
         return Path(env)
-    d = Path.cwd().resolve()
+    return walk_hippo(Path.cwd().resolve())
+
+
+def walk_hippo(start):
+    """The .hippo/ that owns `start`, walking up — or None. hooks/lib.sh `project_root` is the
+    same rule in shell (§3.3); the two must agree.
+
+    - A `.git` *directory* is a repository's root: the walk ends there, never adopting a project
+      from beyond it.
+    - A `.git` *file* is a linked worktree's root (or a submodule's). A `.hippo/` found at or
+      below it is a checked-out copy, never the project's state — measured (steno, 1.17.1): the
+      project tracked `.hippo/` in git, every lane worktree got a copy, and 8 of 38 held scribe
+      rows, worklog entries and even the wrapper's dispatch and usage rows the real ledger never
+      saw. The walk continues in the main worktree (gitdir → commondir, read from disk, no git
+      spawn), so a lane's or worker's hippo call reaches the project's real .hippo/ wherever the
+      worktree sits (§9.1); a `.git` file with no commondir (a submodule) continues upward.
+    - `$HOME` ends the walk unless it is `start` itself: ~/.hippo belongs to a session whose
+      cwd is home, never to every directory under it — measured, a session in a sibling
+      directory with no .hippo/ wrote its scribe rows and CLI writes to ~/.hippo for six days.
+      Nothing above home is adopted either: an ancestor's .hippo/ may be another user's."""
     try:
         home = Path.home().resolve()
     except (RuntimeError, OSError):
         home = None
-    for p in [d, *d.parents]:
-        if (p / ".hippo").is_dir():
-            return p / ".hippo"
+    found, d = None, start
+    while True:
+        if d == home and d != start:
+            return found
+        if found is None and (d / ".hippo").is_dir():
+            found = d / ".hippo"
+        git = d / ".git"
+        if git.is_dir():
+            return found
+        if git.exists():
+            main = main_worktree(d)
+            if main is not None:
+                return main / ".hippo" if (main / ".hippo").is_dir() else None
+            found = None
+        if d == home or d.parent == d:
+            return found
+        d = d.parent
+
+
+def main_worktree(wt):
+    """The main worktree of the linked worktree rooted at `wt` (its `.git` file → gitdir →
+    commondir, which is `<main>/.git`), or None: a submodule's gitdir has no commondir, and a
+    bare repository has no main worktree."""
+    try:
+        line = (wt / ".git").read_text(encoding="utf-8").splitlines()[0]
+        if not line.startswith("gitdir:"):
+            return None
+        gitdir = wt / line[len("gitdir:"):].strip()  # an absolute gitdir replaces wt
+        common = (gitdir / (gitdir / "commondir").read_text(encoding="utf-8").strip()).resolve()
+    except (OSError, IndexError, UnicodeDecodeError):
+        return None
+    return common.parent if common.name == ".git" else None
+
+
+def linked_worktree_main(start):
+    """The main worktree when `start` lies inside a linked worktree, else None."""
+    for p in [start, *start.parents]:
         if (p / ".git").is_dir():
-            break
-        if p == home:  # never go above $HOME — we could adopt someone else's project
-            break
+            return None
+        if (p / ".git").exists():
+            return main_worktree(p)
     return None
 
 
@@ -379,14 +438,46 @@ def directives(hp):
     return cur
 
 
+# Where an unreadable tasks.yaml's one line goes instead of ending the command: None everywhere
+# but `status`, whose capsule must survive the file (cmd_status).
+TASKS_UNREADABLE = None
+
+
 def tasks_load(hp):
+    """tasks.yaml → {tasks: [...]}; a file that does not parse, or is not that shape, ends the
+    command with one line naming the file, where and why, and a non-zero exit.
+
+    Measured (steno, 1.17.1): a script editing tasks.yaml by hand left it unparseable — the
+    change was committed and pushed — and every hippo command then printed a raw PyYAML
+    traceback. Not an empty list either: a write would then save an empty registry over it.
+    `status` alone carries on (TASKS_UNREADABLE), with the line in what it prints, so the
+    capsule a session starts with still has its directives and says what is broken."""
     p = hp / "tasks.yaml"
-    data = yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else None
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else None
+    except yaml.YAMLError as ex:
+        mark = getattr(ex, "problem_mark", None)
+        where = f"line {mark.line + 1}, column {mark.column + 1}" if mark else "somewhere"
+        why = " ".join(filter(None, (getattr(ex, "problem", None),
+                                     getattr(ex, "context", None)))) or str(ex)
+        return tasks_unreadable(p, f"does not parse at {where}: {one_line(why)}")
     data = data or {}
     if not isinstance(data, dict) or not isinstance(data.get("tasks", []), list):
-        die(f"malformed tasks.yaml: expected {{tasks: [...]}} ({p})")
+        return tasks_unreadable(p, "is not {tasks: [...]}")
     data.setdefault("tasks", [])
     return data
+
+
+def tasks_unreadable(p, what):
+    line = (f"hippo: {p} {what} — fix the file by hand (plain YAML); no task command runs "
+            "until it reads")
+    if TASKS_UNREADABLE is None:
+        # One line on stderr, exit 1 — no usage block to bury it; the SystemExit carries the
+        # line, so a dump of a caught exit (native_guard) says what happened too.
+        sys.exit(line)
+    if line not in TASKS_UNREADABLE:
+        TASKS_UNREADABLE.append(line)
+    return {"tasks": []}
 
 
 def write_durable(p, text):
@@ -705,6 +796,12 @@ def extract_json(text):
 
 
 def cmd_init(_args):
+    """A linked worktree is refused: a .hippo/ there is a copy every walk skips (walk_hippo),
+    so `created` would be a success that records nothing."""
+    main = linked_worktree_main(Path.cwd().resolve())
+    if main is not None:
+        die(f"hippo init: this is a linked git worktree of {main} — its project's .hippo/ "
+            f"belongs there (run `hippo init` in {main})")
     hp = Path.cwd() / ".hippo"
     if hp.is_dir():
         print(f"already exists: {hp}")
@@ -985,46 +1082,105 @@ def age_label(t, now):
     return f"{mins // 60}h{mins % 60:02d}m"
 
 
-def in_flight(hp):
-    """Delegations launched but not yet judged — the one part of "where was I" that is a fact.
+def delegations(hp, rows):
+    """The launches still main's business → [(dispatch row, lane state, lane record)]: launched
+    within IN_FLIGHT_WINDOW_H by a launcher (`wrapper`/`cli`), and either not judged yet or
+    judged while its lane still runs. The state is `watch_state` of the lane's record in
+    .hippo/lanes/ (`running`, `ended`, `lost`), or None for a launch with no record — a `log
+    dispatch` by hand, or a record that could not be written — which nothing can call running
+    or ended.
 
-    Only launcher-written dispatches count (`wrapper`/`cli`): those are the ones somebody chose to
-    launch and will come back to. Scribe-inferred rows would swamp it — measured on a consuming
-    project, the same query over all writers returned 16 where three lanes were actually flying,
-    and restricting it to the launcher returned exactly those three, matching by hand the list the
-    project was maintaining in a file.
-
-    A dispatch older than a day is not in flight, it is forgotten; `prior distill` already reports
-    those as open items, which is the right place for them.
-
-    A lane's self-reported outcome does not land it: the claim rides along, subject visible
-    (§9.3), and the entry leaves this line only when main's verdict arrives. The judge's latest
-    route rides the same way — evidence beside the claim, never a verdict (§3.6)."""
-    rows = read_ledger(hp)
+    Only launcher-written dispatches count: those are the ones somebody chose to launch and will
+    come back to. Scribe-inferred rows would swamp it — measured on a consuming project, the same
+    query over all writers returned 16 where three lanes were actually flying, and restricting
+    it to the launcher returned exactly those three, matching by hand the list the project was
+    maintaining in a file. A dispatch older than a day is not in flight, it is forgotten; `prior
+    distill` already reports those as open items, which is the right place for them."""
     judged = judged_refs(rows)
-    claims = executor_claims(rows)
-    triages = {e.get("ref"): e for e in rows if e.get("ev") == "triage"}
     now = datetime.now(timezone.utc)
     out = []
     for e in rows:
         if e.get("ev") != "dispatch" or e.get("src") not in ("wrapper", "cli"):
             continue
-        if e.get("id") in judged:
-            continue
         t = event_time(e)
         if not t or (now - t) > timedelta(hours=IN_FLIGHT_WINDOW_H):
             continue
-        parts = [age_label(t, now)]
-        if claims.get(e.get("id")):
-            parts.append(f"claims {claims[e.get('id')]}")
-        tri = triages.get(e.get("id"))
-        if tri:
-            parts.append(f"triage {tri.get('route')}")
-            if tri.get("verify") is True:
-                parts.append("verify")
-        tail = " · ".join(parts)
-        out.append(f"{one_line(e.get('scope', ''), 44)} ({tail})")
+        did = str(e.get("id") or "")
+        rec = read_record(hp / "lanes" / f"{did}.json") if SAFE_ID_RE.fullmatch(did) else None
+        state = watch_state(rec) if rec else None
+        if did in judged and state != "running":
+            continue
+        out.append((e, state, rec))
     return out
+
+
+def in_flight(hp):
+    """`in flight` (§6): the delegations not known to have ended — the one part of "where was
+    I" that is a fact. A lane whose record says it runs reads `running <age>`, judged or not
+    (main may judge a lane early; it still runs, and costs); a launch with no lane record keeps
+    the bare age since launch, since nothing tells whether it still runs. A lane that ended is
+    not here but on `lanes_ended`'s line: measured (1.17.1, 46 capsules of one main session),
+    194 of the line's 285 entries (68%) were lanes that had already ended, up to 23.7h old and
+    shown with their age since launch, while lanes main had judged as their wrappers ran
+    vanished (7 wrappers alive, 1 shown).
+
+    A lane's self-reported outcome does not end an entry: the claim rides along, subject
+    visible (§9.3), and the entry leaves only when main's verdict arrives. The judge's latest
+    route rides the same way — evidence beside the claim, never a verdict (§3.6)."""
+    rows = read_ledger(hp)
+    now = datetime.now(timezone.utc)
+    verdicts = {e.get("ref"): e.get("result") for e in reversed(verdict_rows(rows))}
+    out = []
+    for e, state, _ in delegations(hp, rows):
+        if state in ("ended", "lost"):
+            continue
+        age = age_label(event_time(e), now)
+        head = [f"running {age}" if state == "running" else age]
+        if e.get("id") in verdicts:
+            head.append(f"judged {verdicts[e.get('id')]}")
+        out.append(_delegation_item(e, rows, head))
+    return out
+
+
+def lanes_ended(hp):
+    """The capsule's `ended, awaiting your verdict:` line, or None (§6, main's only): the lanes
+    whose record says they ended — or were lost, their wrapper gone with no end recorded — and
+    that main has not judged, each with how it ended and how long ago. Its own line, so an
+    ended lane can never read as running (`in_flight`)."""
+    rows = read_ledger(hp)
+    now = datetime.now(timezone.utc)
+    items = []
+    for e, state, rec in delegations(hp, rows):
+        if state not in ("ended", "lost"):
+            continue
+        if state == "lost":
+            how = "lost: wrapper gone, no end recorded"
+        elif rec.get("signal"):
+            how = f"killed by {rec['signal']}"
+        else:
+            how = ("timed out" if rec.get("timed_out") else
+                   f"rc={rec['rc']}" if rec.get("rc") is not None else rec.get("status", "ended"))
+        at = _iso_time(rec.get("ended") or rec.get("last_at") or rec.get("started"))
+        when = f"{'last seen' if state == 'lost' else 'ended'} {age_label(at, now)} ago"
+        items.append(_delegation_item(e, rows, [how, when] if at else [how]))
+    return f"· ended, awaiting your verdict: {', '.join(items)}" if items else None
+
+
+def _delegation_item(e, rows, head):
+    """`scope (head · claims … · triage …)` — one entry of the in-flight or ended line: the
+    lane's latest claim and the judge's latest route ride beside what is known of its run."""
+    did = e.get("id")
+    parts = list(head)
+    claim = executor_claims(rows).get(did)
+    if claim:
+        parts.append(f"claims {claim}")
+    tri = next((r for r in reversed(rows) if r.get("ev") == "triage" and r.get("ref") == did),
+               None)
+    if tri:
+        parts.append(f"triage {tri.get('route')}")
+        if tri.get("verify") is True:
+            parts.append("verify")
+    return f"{one_line(e.get('scope', ''), 44)} ({' · '.join(parts)})"
 
 
 SCRIBE_FAILING_AT = 3  # this many turn-scribe runs failed in a row earns a capsule line
@@ -1078,10 +1234,29 @@ def task_flag_shows(task, flag):
 
 def task_check(hp, tasks):
     """The capsule's `check:` line, or None (§6, main's capsule only): the flags that still
-    show, in tasks.yaml order. Closing a task is main's call, so the line asks and never acts."""
+    show, in tasks.yaml order. Closing a task is main's call, so the line asks and never acts.
+
+    New work on a task answers its flag as a task write does: a flag is quiet while a
+    delegation on its task is still main's business (`delegations`: running, or not judged
+    yet), and for good once a dispatch on its task is recorded after its stamp. Measured
+    (1.17.1, 46 capsules of one main session): of 102 flags shown, main closed 5; 38 had a
+    dispatch on that task in the 6h before, 12 a lane running on it, and one task was flagged
+    15 times."""
     flags = task_flags(hp)
-    ids = [t["id"] for t in tasks
-           if isinstance(t.get("id"), str) and task_flag_shows(t, flags.get(t["id"]))]
+    rows = read_ledger(hp)
+    busy = {e.get("task") for e, _, _ in delegations(hp, rows)}
+    worked = {}
+    for e in rows:
+        if e.get("ev") == "dispatch" and e.get("task") and (t := event_time(e)):
+            worked[e["task"]] = max(t, worked.get(e["task"], t))
+
+    def shows(task):
+        tid, flag = task["id"], flags.get(task["id"])
+        if not task_flag_shows(task, flag) or tid in busy:
+            return False
+        return tid not in worked or worked[tid] <= _iso_time(flag["t"])
+
+    ids = [t["id"] for t in tasks if isinstance(t.get("id"), str) and shows(t)]
     if not ids:
         return None
     if len(ids) == 1:
@@ -1141,7 +1316,31 @@ def live_directives(hp, reader):
             and (d.get("audience") or "all") in (reader, "all")]
 
 
-def directive_lines(live):
+def directive_ages(hp):
+    """id → (since, rewritten): when the id's current live run began — its first active write
+    after it was last not live — and when that run's text last changed, or None. The rows
+    `directives` folds (a lane's never count).
+
+    A re-add under the same id is how a directive is updated (`--id` reuse), so the latest
+    row's stamp is the age of the wording, not of the rule: measured (1.17.1), a rule shown
+    `live(37d)` showed no age once re-added under its id — the staleness question it carried
+    went with it."""
+    out, prev = {}, {}
+    for e in read_ledger(hp):
+        if e.get("ev") != "directive" or not e.get("id") or e.get("src") == "executor":
+            continue
+        did, t, last = e["id"], event_time(e), prev.get(e["id"])
+        if e.get("state") != "active":
+            out.pop(did, None)
+        elif last is None or last.get("state") != "active":
+            out[did] = (t, None)
+        elif one_line(e.get("text", "")) != one_line(last.get("text", "")):
+            out[did] = (out[did][0], t)
+        prev[did] = e
+    return out
+
+
+def directive_lines(hp, live):
     """One `· live: …` line per directive, in ledger order and in full.
 
     Every active directive appears whole: a directive that is invisible at session start is
@@ -1149,13 +1348,20 @@ def directive_lines(live):
     of the first. Volume is handled by warning the author at `directive add` time and, past
     the total mark, in main's capsule (directive_volume_line) — never by dropping text here.
     Age is the whole staleness mechanism (nothing expires by itself — the verdict stays with
-    main and the user), so it is shown only once it is worth a glance."""
+    main and the user), so it is shown only once it is worth a glance. It counts from the start
+    of the directive's live run (`directive_ages`), and a later rewrite of its text is named
+    beside it: `live(37d, rewritten 2d ago)`."""
+    ages = directive_ages(hp)
     now = datetime.now(timezone.utc)
     out = []
     for d in live:
-        t = event_time(d)
-        age = (now - t).days if t else 0
-        label = f"live({age}d)" if age >= DIRECTIVE_AGE_SHOW_D else "live"
+        # Absent only when withdrawn between the two ledger reads: no age, as for a new rule.
+        since, rewritten = ages.get(d["id"], (None, None))
+        age = (now - since).days if since else 0
+        label = "live"
+        if age >= DIRECTIVE_AGE_SHOW_D:
+            new = (now - rewritten).days if rewritten else age
+            label = f"live({age}d, rewritten {new}d ago)" if new < age else f"live({age}d)"
         out.append(f"· {label}: {one_line(d.get('text', ''))}")
     return out
 
@@ -1187,23 +1393,27 @@ def status_lines(hp, compacted=False, transcript=None):
             f"· priors {stamp('PRIORS.md')} · worklog {stamp('worklog.md')}"
         )
     ]
-    lines += directive_lines(live)
+    lines += directive_lines(hp, live)
     # Nothing flying → no line. The capsule only spends a line on a question that has an answer.
     flying = in_flight(hp)
     if compacted and reader == "main":
         flying += native_in_flight(hp, transcript)
     if flying:
         lines.append(f"· in flight: {', '.join(flying)}")
-    p = hp / "worklog.md"
-    if p.exists():
-        # Within the latest date section, only look at the "- HH:MM …" entries the scribe wrote.
-        # (Nested bullets or free-form human bullets must not be picked up as `last`.)
-        wl = p.read_text(encoding="utf-8").splitlines()
-        starts = [i for i, ln in enumerate(wl) if ln.startswith("## ")]
-        section = wl[starts[-1] + 1 :] if starts else wl
-        entries = [m.group(2).strip() for m in map(WORKLOG_ENTRY.match, section) if m]
-        if entries:
-            lines.append(f"· last: {one_line(entries[-1], 120)}")
+    ended = lanes_ended(hp) if reader == "main" else None  # a verdict is main's to give
+    if ended:
+        lines.append(ended)
+    recent = compacted and reader == "main"
+    entries = worklog_latest(hp, WORKLOG_AFTER_COMPACT if recent else 1)
+    written = store_written(hp, data["tasks"]) if recent else ""
+    if recent and (entries or written):
+        lines.append(f"· last, from the worklog (now {datetime.now().strftime('%m-%d %H:%M')}):")
+        lines += [f"  - {at} {one_line(text, WORKLOG_AFTER_COMPACT_CHARS)}" for at, text in entries]
+        if written:
+            lines.append(f"  - written in hippo, last {STORE_WRITTEN_H}h: {written}")
+    elif entries:
+        at, text = entries[-1]
+        lines.append(f"· last: {at} {one_line(text, 120)}")
     if reader == "executor":
         # The lane's whole operating contract, generated where the lane actually reads
         # (principle 5): briefs no longer hand-copy any of it, and it survives the lane's own
@@ -1231,6 +1441,8 @@ def status_lines(hp, compacted=False, transcript=None):
             "· discipline: report no-go early when the premise does not hold; "
             "long runs go to background — never poll with a foreground sleep"
         )
+        if letter_rule := khala_letter_rule():
+            lines.append(letter_rule)
     else:
         check = task_check(hp, data["tasks"])
         if check:
@@ -1250,20 +1462,101 @@ def status_lines(hp, compacted=False, transcript=None):
         # one caveat: offered bare, main logged 8 of 8 Workflow runs by hand in mlx-vlm, split
         # one run into two ids and wrote model aliases that split PRIORS rows (2026-09-27).
         lines.append(
-            "· cli: task add|set|done|list · log outcome|review|review-status|dispatch "
+            "· cli: task add|set|note|done|list · log outcome|review|review-status|dispatch "
             "(subagent/Workflow runs: recorded, no call) · directive add|withdraw · prior "
-            "· dispatch [--batch] — /hippo:hippo has the flags"
+            "· dispatch [--batch] — flags: /hippo:hippo"
         )
         if compacted:
             # The summary lands in main's context before this capsule does (measured), so the
             # pointer reads "above". "Has", not "ends with": the host appends its own paragraphs
             # after the summary (measured). Worded as a condition because Codex fires
-            # SessionStart(compact) too but gets no PreCompact, so its summary has no such section.
+            # SessionStart(compact) too but gets no PreCompact, so its summary has no such
+            # section. The summary can be older than the compaction and the deltas are as old
+            # as it is, so the worklog lines and hippo's lists win where they disagree
+            # (worklog_latest): measured (1.17.1), 216 of 303 delta commands targeted an id main
+            # had written in the 24h before, and 166 were written again. A delta on an id the
+            # store wrote since is older than that write (store_written).
             lines.append(
-                "· compact: if the summary above has a `## hippo deltas` section, run those "
-                "commands first — they are proposals; skip any that are wrong"
+                "· compact: the summary above may be hours older than this capsule; where it "
+                "disagrees with the `last` lines or hippo's lists, they win. Its `## hippo "
+                "deltas`, if any, are proposals from then: one on an id hippo wrote since (the "
+                "`written` line) is older than that write unless the summary shows it — check "
+                "`hippo task show <id>` first and never replace newer notes with it; skip any "
+                "already recorded or overtaken, and any that are wrong; run the rest"
             )
     return lines
+
+
+WORKLOG_AFTER_COMPACT = 4  # worklog entries main's capsule carries after a compaction
+WORKLOG_AFTER_COMPACT_CHARS = 110  # per entry: four of them stay near 500 chars
+STORE_WRITTEN_H = 3  # hours of task and directive writes main's capsule names after a compaction
+STORE_WRITTEN_TIMED = 6  # writes named with their time; the rest by id
+STORE_WRITTEN_CHARS = 200  # the whole list: with the rest, the compact capsule adds under 1k
+
+
+def store_written(hp, tasks):
+    """The task and directive ids hippo's store was written to in the last STORE_WRITTEN_H
+    hours, newest first → `task feat/a 11:02, directive gpu-pin 10:15, … also feat/b`, or ""
+    — the first STORE_WRITTEN_TIMED with their local time, the rest by id, cut at
+    STORE_WRITTEN_CHARS with the rest counted. A task's write is its `updated` stamp, a
+    directive's its latest ledger row (an add, a rewrite or a withdrawal; a lane's never folds).
+
+    The hook cannot read the summary or tell what time it covers (it lands after the hook
+    returns), so the capsule names the writes it may not know of: the host keeps the latest
+    messages verbatim and summarizes without them, and its `## hippo deltas` then restate what
+    later turns changed — measured (1.17.1), summaries 1.5–2h behind whose deltas would have
+    put an older note over a newer one and re-added a withdrawn directive. 3h covers the oldest
+    summary measured (precomputed ones 46–130 minutes old, idle ones ~55) with room for its own
+    span; a wider window names writes the summary saw anyway."""
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=STORE_WRITTEN_H)
+    writes = {}
+    for t in tasks:
+        u = _iso_time(t["updated"]) if t.get("updated") else None
+        if isinstance(t.get("id"), str) and u and u >= since:
+            writes[f"task {t['id']}"] = u
+    for e in read_ledger(hp):
+        t = event_time(e)
+        if (e.get("ev") == "directive" and e.get("id") and e.get("src") != "executor" and t
+                and t >= since):
+            writes[f"directive {e['id']}"] = t
+    order = sorted(writes, key=writes.get, reverse=True)
+    items = [f"{k} {writes[k].astimezone().strftime('%H:%M')}" if i < STORE_WRITTEN_TIMED
+             else ("also " if i == STORE_WRITTEN_TIMED else "") + k.split(" ", 1)[1]
+             for i, k in enumerate(order)]
+    shown = len(items)
+    while shown and len(", ".join(items[:shown])) > STORE_WRITTEN_CHARS:
+        shown -= 1
+    rest = f" (+{len(items) - shown} more)" if shown < len(items) else ""
+    return ", ".join(items[:shown]) + rest
+
+
+def worklog_latest(hp, n):
+    """The last `n` entries the scribe wrote to worklog.md → [("MM-DD HH:MM", text)], oldest
+    first. Only `- HH:MM …` lines count, each dated by the `## YYYY-MM-DD` section above it:
+    a nested or free-form human bullet is not an entry (it must not read as `last`).
+
+    Every entry carries its date and time, `last:` included (12 chars): a resumed session's
+    `last:` can be days old, and nothing else on the line says so. After a compaction main's
+    capsule carries the last WORKLOG_AFTER_COMPACT, with the time now, because the summary
+    above it can be older than the compaction and state finished work as unfinished: measured
+    (1.17.1, 169 compactions of one main session), 4 precomputed summaries were 46–130 minutes
+    old at the boundary and 99 idle-time ones ~55 minutes; summaries stated things like "the
+    report was not sent" when it had been, and main repeated finished actions on them (at
+    least 8 hand corrections).
+    The worklog was a median 4 minutes behind at compaction — the fresher record, ordered by
+    its times against the summary."""
+    p = hp / "worklog.md"
+    if not p.exists():
+        return []
+    out, day = collections.deque(maxlen=n), ""
+    for ln in p.read_text(encoding="utf-8").splitlines():
+        if ln.startswith("## "):
+            m = re.match(r"## \d{4}-(\d\d-\d\d)\b", ln)
+            day = m.group(1) if m else ""
+        elif m := WORKLOG_ENTRY.match(ln):
+            out.append((f"{day} {m.group(1)}".strip(), m.group(2).strip()))
+    return list(out)
 
 
 WORKER_RULE = ("· hippo task, directive and outcome writes are main's — run one only when your "
@@ -1291,12 +1584,18 @@ def subagent_lines(hp):
     main's state, and a worker acts on them through main's brief, not beside it (principle 2)."""
     live = live_directives(hp, "executor")
     head = ([f"[hippo] directives {len(live)} live — this project's recorded rules",
-             *directive_lines(live)] if live else [])
+             *directive_lines(hp, live)] if live else [])
     return [*head, WORKER_RULE]
 
 
 PRECOMPACT_CAP = 3000  # chars of the whole text: it is appended to every compaction's instructions
 PRECOMPACT_ITEM = 80  # chars of a task's notes or a directive's text per list line
+
+
+def short_age(t, now):
+    """`45m`, `7h`, `12d` — how long ago `t` was, in the one unit that reads at a glance."""
+    mins = max(0, int((now - t).total_seconds()) // 60)
+    return f"{mins}m" if mins < 60 else f"{mins // 60}h" if mins < 48 * 60 else f"{mins // 1440}d"
 
 
 def precompact_lines(hp):
@@ -1318,23 +1617,37 @@ def precompact_lines(hp):
     filled all of it, the summarizer saw none of 18 open tasks, and it proposed re-adding a
     directive recorded two minutes earlier — the newest, cut by the old oldest-first order. What
     does not fit whole is listed by id, a whole line giving way only when that brings every id
-    in; what does not fit even so is cut, oldest first, and counted."""
+    in; what does not fit even so is cut, oldest first, and counted.
+
+    A task's line shows how long ago it was updated and the newest part of its notes — the last
+    item of a list, else the tail — because the head of long notes is boilerplate: measured
+    (1.17.1, one main session), 216 of 303 delta commands (71%) targeted an id main had written
+    in the 24h before, the summarizer unable to see what was recorded. The request says to
+    leave out what the lists show."""
     head = [
         "hippo: end the summary with a section headed exactly `## hippo deltas`: one line per "
         "change this conversation made that hippo's lists below do not show yet, each written as "
         "the exact command that records it —",
         "  hippo task done <id> --note '…'   (a listed task that is finished)",
-        "  hippo task set <id> notes '…'   (a listed task that moved on; replaces its notes)",
+        "  hippo task note <id> '…'   (a listed task that moved on; appends, never replaces)",
         "  hippo directive withdraw <id>   (only if the user said so)",
         "  hippo directive add --id <id> --text '…'   (the user changed it)",
         "  edit <file>: '<old>' → '<new>'   (a memory or doc line that is now false)",
         "or the single line `none` if nothing changed. They are run after the compaction, so "
         "write each one complete.",
+        "Leave out anything the lists below already show: each task's latest notes and how long "
+        "ago it was updated are there.",
     ]
+    now = datetime.now(timezone.utc)
 
-    def notes_of(t):
+    def latest_notes(t):
         n = t.get("notes") or []
-        return " / ".join(map(str, n)) if isinstance(n, list) else str(n)
+        s = one_line(n[-1] if isinstance(n, list) else n) if n else ""
+        return s if len(s) <= PRECOMPACT_ITEM else "…" + s[1 - PRECOMPACT_ITEM:]
+
+    def updated(t):
+        u = _iso_time(t["updated"]) if t.get("updated") else None
+        return f"{short_age(u, now)} ago" if u else ""
 
     def size(lines):
         return sum(len(ln) + 1 for ln in lines)
@@ -1361,11 +1674,11 @@ def precompact_lines(hp):
     tasks = sorted((t for t in tasks_load(hp)["tasks"] if t.get("status") in OPEN_STATUSES),
                    key=lambda t: str(t.get("updated") or ""), reverse=True)
     t_items = [" — ".join(filter(None, (f"- {t.get('id')}", one_line(t.get("title", ""), 100),
-                                        one_line(notes_of(t), PRECOMPACT_ITEM))))
+                                        updated(t), latest_notes(t))))
                for t in tasks]
     live = sorted(live_directives(hp, "main"), key=lambda d: str(d.get("t") or ""), reverse=True)
     d_items = [f"- {d['id']} — {one_line(d.get('text', ''), PRECOMPACT_ITEM)}" for d in live]
-    t_head = ["open tasks (id — title — notes):", *([] if t_items else ["(none open)"])]
+    t_head = ["open tasks (id — title — updated — latest notes):", *([] if t_items else ["(none open)"])]
     d_head = ["live directives (id — text):", *([] if d_items else ["(none live)"])]
     room = PRECOMPACT_CAP - size([*head, *t_head, *d_head]) - 66  # 66: the cut line, 4-digit count
     t_kept, t_cut = fit(t_items, [str(t.get("id")) for t in tasks],
@@ -1380,6 +1693,21 @@ def precompact_lines(hp):
 
 
 def cmd_status(args):
+    """A tasks.yaml that does not read costs status its task lines, never the rest: what it can
+    print, then the file's one line (in the capsule itself under --inject, where the hook keeps
+    stdout only), exit 1 (tasks_load)."""
+    global TASKS_UNREADABLE
+    TASKS_UNREADABLE = []
+    try:
+        status_print(args)
+    finally:
+        broken, TASKS_UNREADABLE = TASKS_UNREADABLE, None
+    if broken:
+        print("\n".join(broken), file=sys.stdout if args.inject else sys.stderr)
+        sys.exit(1)
+
+
+def status_print(args):
     hp = args.hp
     if args.inject:
         # The hook names its moment in HIPPO_INJECT — internal, never a flag (§3.4): SessionStart
@@ -1468,13 +1796,40 @@ def cmd_task_done(args):
         die(f"no such task id: {args.id}")
     t["status"] = "done"
     if args.note:
-        t.setdefault("notes", [])
-        if not isinstance(t["notes"], list):
-            t["notes"] = [t["notes"]]
-        t["notes"].append(args.note)
+        note_append(t, args.note)
     t["updated"] = now_iso()
     tasks_save(args.hp, data)
     print(f"done {args.id}")
+
+
+def note_append(t, text):
+    """Append one note to task `t` as `<YYYY-MM-DDTHH:MMZ> <text>`: notes is a list of strings,
+    oldest first, the latest last. A hand-edited scalar becomes the list's first item."""
+    notes = t.get("notes")
+    notes = [] if notes is None else notes if isinstance(notes, list) else [notes]
+    notes.append(f"{now_iso()[:16]}Z {text}")
+    t["notes"] = notes
+
+
+def cmd_task_note(args):
+    """`task note <id> <text>`: one timestamped note appended, nothing replaced (`task set …
+    notes` stays the replace).
+
+    Measured (steno, 13 days on 1.17.1): 524 `task set <id> notes` calls, 225 of them over
+    1,500 chars — the whole notes re-sent to add a line — notes up to 13 KB, one overwrite that
+    lost notes, and 61 scripts editing tasks.yaml by sed or python, one of which left it
+    unparseable. Append was the operation wanted and the CLI had none. Not a worker write
+    (§3.5.3d): a note claims no state — the task's status, title and deps are untouched."""
+    if not args.text.strip():
+        die("task note: the text is empty — nothing to append")
+    data = tasks_load(args.hp)
+    t = find_task(data, args.id)
+    if not t:
+        die(f"no such task id: {args.id}")
+    note_append(t, args.text)
+    t["updated"] = now_iso()
+    tasks_save(args.hp, data)
+    print(f"{args.id}: note {len(t['notes'])} appended")
 
 
 def cmd_task_drop(args):
@@ -1670,6 +2025,12 @@ def validate_scribe_event(e):
     if effort not in EFFORTS:
         return (f"ev=dispatch: effort must be one of {'|'.join(sorted(EFFORTS))}: {effort!r} "
                 "(use `inherit` when the executor takes its setting from its parent)")
+    # A pair that cannot exist. Measured (steno, 1.17.1): 17 `claude/gpt-6.1-sol/high` rows under
+    # coined ids — the clerk's reading of `hippo:lane` relays, whose prompt names the codex
+    # lane's model. A Claude Code session runs a Claude model; a gpt model is a codex lane.
+    if executor == "claude" and parts[1].lower().startswith("gpt-"):
+        return (f"ev=dispatch: a claude executor does not run {parts[1]!r} — a gpt model is a "
+                "codex lane, which `hippo dispatch` records (a hippo:lane agent is its relay)")
     return None
 
 
@@ -1698,15 +2059,45 @@ def check_scribe_outcome(hp, e, native=None, held=None):
     rows = read_ledger(hp)
     # A lane's self-report is a claim, not a verdict (§9.2): the scribe recording main's
     # explicit acceptance signal *after* a claim is the normal flow, not a re-judgment.
-    if e.get("ref") in judged_refs(rows):
-        return (f"ev=outcome: ref={e.get('ref')!r} already has a verdict — the scribe does not "
-                "re-judge (at most one outcome per dispatch; a second verdict belongs to main)")
+    last = [x for x in verdict_rows(rows) if x.get("ref") == e.get("ref")]
+    if last:  # one that agrees never gets here (`scribe_restates`): this one disagrees
+        return (f"ev=outcome: ref={e.get('ref')!r} already has a verdict ("
+                f"{last[-1].get('result')}, {last[-1].get('src')}) and this one says "
+                f"{e.get('result')!r} — the scribe does not re-judge (at most one outcome per "
+                "dispatch; a second verdict belongs to main)")
     why = (held or {}).get(e.get("ref")) or still_running(hp, e.get("ref"), rows, native)
     if why:
         return (f"ev=outcome: ref={e.get('ref')!r} was still running when this window was read: "
                 f"{why}. A verdict needs an ended delegation; a launch or a progress line is "
                 "not one")
     return None
+
+
+def scribe_restates(hp, e, native=None):
+    """True for a clerk event that only restates what the ledger already holds: set aside with
+    no dump, counted on the run's meter (`restated`) — a restatement is no failure.
+
+    Measured (steno, 13 days on 1.17.1): 371 of 385 failure dumps were "N events rejected", and
+    324 of the 471 rejected events were the scribe re-emitting a verdict main had already
+    written — agreeing with it in 318. The dumps buried the few that mattered. So: an outcome
+    whose ref's latest verdict has the same result; a dispatch under an id the ledger already
+    has; and a dispatch naming a run hippo skips as a relay (NATIVE_SKIP — a hippo:lane agent
+    babysits a codex lane its wrapper records), bare or `ag-`-prefixed. A verdict that
+    disagrees with the recorded one is not a restatement and is still dumped
+    (`check_scribe_outcome`)."""
+    if not isinstance(e, dict):
+        return False
+    if e.get("ev") == "outcome":
+        last = [x for x in verdict_rows(read_ledger(hp)) if x.get("ref") == e.get("ref")]
+        return bool(last) and last[-1].get("result") == e.get("result")
+    if e.get("ev") != "dispatch" or not isinstance(e.get("id"), str):
+        return False
+    did = e["id"]
+    if any(x.get("ev") == "dispatch" and x.get("id") == did for x in read_ledger(hp)):
+        return True
+    runs = (native or {}).get("runs", {})
+    run = runs.get(did) or runs.get(NATIVE_PREFIX + did)
+    return run is not None and run["skip"]
 
 
 def still_running(hp, ref, rows, native=None):
@@ -1727,12 +2118,9 @@ def still_running(hp, ref, rows, native=None):
     if run is not None:
         return None if run["ended"] else (f"native run {run['id']} has not ended (no "
                                           "notification, TaskStop or end in its run file yet)")
-    if not isinstance(ref, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", ref):
-        return None
-    rec = _read_json(hp / "lanes" / f"{ref}.json")
+    rec = lane_record(hp, ref)
     if rec:
-        return (f"its lane record has no end and its wrapper (pid {rec.get('pid')}) is alive"
-                if watch_state(rec) == "running" else None)
+        return lane_running(rec)
     launch = next((e for e in rows if e.get("ev") == "dispatch" and e.get("id") == ref
                    and e.get("src") == "wrapper"), None)
     t, now = event_time(launch or {}), datetime.now(timezone.utc)
@@ -1740,6 +2128,41 @@ def still_running(hp, ref, rows, native=None):
             or any(e.get("ev") in EXIT_EVS and e.get("ref") == ref for e in rows)):
         return None
     return f"no lane record and no exit row yet, launched {age_label(t, now)} ago"
+
+
+def lane_record(hp, ref):
+    """The wrapper lane record `ref` names, or {} — none, or `ref` is no lane id."""
+    if not isinstance(ref, str) or not SAFE_ID_RE.fullmatch(ref):
+        return {}
+    return _read_json(hp / "lanes" / f"{ref}.json")
+
+
+def lane_running(rec):
+    """Why the lane on record `rec` is running right now → a reason, or None — read as `--watch`
+    reads it (watch_state): no end on record and its wrapper alive. A record left behind by a
+    wrapper that died says nothing new from then on, and its dead pid is what tells it apart:
+    such a lane reads ended or lost, never running, so nothing it holds waits forever."""
+    if watch_state(rec) != "running":
+        return None
+    return f"its lane record has no end and its wrapper (pid {rec.get('pid')}) is alive"
+
+
+def verdict_on_running(hp, ref):
+    """Main's verdict on a lane still running → the one-line refusal, or None.
+
+    Measured (steno, 13 days on 1.17.1): main's cleanup loop wrote `lost/harness` on 7 lanes
+    that were mid-run, and six of them ran on to finish with `lost` as the first verdict —
+    the one PRIORS reads. The scribe was already held to an ended delegation
+    (`check_scribe_outcome`); main's own door had no such check. Only the positive reading
+    refuses: a running wrapper on record. The scribe's fallback for a launch with no record
+    (`still_running`) stays the scribe's — main typing a verdict on a lane whose record could
+    not be written must not wait out a day. A lane's own claim (src=executor) is written while
+    it runs by design and never reaches here."""
+    why = lane_running(lane_record(hp, ref))
+    if why is None:
+        return None
+    return (f"outcome: {ref} is still running ({why}) — nothing recorded. A verdict needs an "
+            f"ended lane: wait (`hippo dispatch --watch {ref}`) or stop it, then judge it")
 
 
 def check_scribe_directive(hp, e, start):
@@ -1844,6 +2267,7 @@ def log_outcome_bulk(args):
     known = {e.get("id") for e in ledger if e.get("ev") == "dispatch"}
     judged = judged_refs(ledger)
     claims = executor_claims(ledger)
+    claiming = resolve_src() == "executor"  # from inside a lane: claims, written while it runs
     rows, problems, seen = [], [], {}
     for n, raw in enumerate(sys.stdin.read().splitlines(), 1):
         if not raw.strip():
@@ -1919,6 +2343,10 @@ def log_outcome_bulk(args):
             problems.append(f"{where}: {ref} has no executor claim yet — judging an unclaimed "
                             "lane keeps the scalar command")
             continue
+        refusal = None if claiming else verdict_on_running(args.hp, ref)
+        if refusal:
+            problems.append(f"{where}: {refusal}")
+            continue
         rows.append(e)
     if problems:
         die(f"outcome --from-batch: {len(problems)} problem(s), nothing written\n"
@@ -1976,6 +2404,11 @@ def cmd_log(args):
         if not ref:
             die("outcome: --ref is required (inside a dispatched lane HIPPO_DISPATCH supplies it)")
         e.update(ref=resolve_ref(args.hp, ref), result=args.result)
+        refusal = None if resolve_src() == "executor" else verdict_on_running(args.hp, e["ref"])
+        if refusal:
+            # One line and no usage block: the command was right, the moment was not.
+            print(refusal, file=sys.stderr)
+            sys.exit(1)
         for k in ("attr", "rework", "by", "note"):
             if getattr(args, k) is not None:
                 e[k] = getattr(args, k)
@@ -2151,7 +2584,8 @@ def prior_cells(rows, prices=None):
             continue
         b = cells.setdefault((d.get("kind"), d.get("exec")),
                              {"judged": 0, "accepted": 0, "revised": 0, "refuted": 0,
-                              "no-go": 0, "lost": 0, "rework": 0, "tokens": 0, "usd": 0.0,
+                              "no-go": 0, "lost": 0, "dropped": 0, "rework": 0, "tokens": 0,
+                              "usd": 0.0,
                               "priced": 0, "unpriced": 0,
                               "unpriced_models": collections.Counter()})
         b["judged"] += 1
@@ -2176,13 +2610,13 @@ def prior_cells(rows, prices=None):
 
 
 def prior_n(b):
-    """The denominator of a first-pass rate: a no-go never started and a lost result was never
-    seen, so neither is a judgment of the work."""
-    return b["judged"] - b["no-go"] - b["lost"]
+    """The denominator of a first-pass rate: a no-go never started, a lost result was never
+    seen and a dropped one was closed unjudged, so none is a judgment of the work."""
+    return b["judged"] - b["no-go"] - b["lost"] - b["dropped"]
 
 
 AGREEMENT_ROUTES = ("accept-candidate", "escalate", "no-go-candidate", "failed")
-AGREEMENT_RESULTS = ("accepted", "revised", "refuted", "no-go", "lost")
+AGREEMENT_RESULTS = ("accepted", "revised", "refuted", "no-go", "lost", "dropped")
 
 
 def triage_agreement(rows):
@@ -2226,7 +2660,7 @@ def triage_agreement(rows):
         lines += ["", f"below the n={PRIOR_MIN_SAMPLE} threshold, no row reported "
                       f"({len(thin)}): " + ", ".join(thin)]
     acc = table["accept-candidate"]
-    b = sum(acc.values())
+    b = sum(acc.values()) - acc["dropped"]  # closed unjudged: neither right nor wrong
     if b:
         a = acc["accepted"] + acc["revised"]
         rate = f" ({100 * a / b:.1f}%)" if b >= PRIOR_MIN_SAMPLE else f" (n={b}, no rate)"
@@ -2261,14 +2695,14 @@ def prior_facts(rows, now, prices=None):
     per_exec, unpriced_models = {}, collections.Counter()
     for (_, ex), b in cells.items():
         p = per_exec.setdefault(ex, {"judged": 0, "accepted": 0, "revised": 0, "refuted": 0,
-                                     "no-go": 0, "lost": 0})
+                                     "no-go": 0, "lost": 0, "dropped": 0})
         for k in p:
             p[k] += b[k]
         unpriced_models.update(b["unpriced_models"])
 
     # Cells under the threshold are named but never given a rate: a percentage over n=1 reads as
     # evidence and is not one. Naming them keeps the omission visible instead of silent.
-    lines = ["## routing — accepted / (judged − no-go − lost), per kind × exec", "",
+    lines = ["## routing — accepted / (judged − no-go − lost − dropped), per kind × exec", "",
              f"prices as of {prices.get('as_of') or 'unknown'} (prices.yaml); "
              "cost columns cover measured usage only",
              "",
@@ -2282,7 +2716,7 @@ def prior_facts(rows, now, prices=None):
             thin.append(f"{kind}×{ex} (n={n})")
             continue
         verdicts = ", ".join(f"{k} {b[k]}" for k in ("accepted", "revised", "refuted", "no-go",
-                                                     "lost") if b[k])
+                                                     "lost", "dropped") if b[k])
         tok = f"{b['tokens']:,}" if b["tokens"] else "—"
         star = "*" if b["unpriced"] else ""
         usd_s = f"${b['usd']:.2f}{star}" if b["priced"] else ("—" + star)
@@ -2294,6 +2728,10 @@ def prior_facts(rows, now, prices=None):
     if thin:
         lines += ["", f"below the n={PRIOR_MIN_SAMPLE} threshold, no rate reported "
                       f"({len(thin)}): " + ", ".join(thin)]
+    dropped = sum(b["dropped"] for b in cells.values())
+    if dropped:
+        lines += ["", f"dropped: {dropped} — closed with no verdict on the work (replaced by a "
+                      "later delegation, or too old to judge); in no rate or loss count here"]
     if unpriced_models:
         lines += ["", "unpriced usage (* above — model not on the price sheet, or no billing "
                       "breakdown): " + ", ".join(f"{m}×{c}" for m, c in
@@ -2312,18 +2750,19 @@ def prior_facts(rows, now, prices=None):
               "| exec | judged | refuted+revised | rate |", "|---|---:|---:|---:|"]
     thin_exec = []
     for ex, b in sorted(per_exec.items(), key=lambda kv: -kv[1]["judged"]):
-        bad = b["refuted"] + b["revised"]
-        if b["judged"] < PRIOR_MIN_SAMPLE:
-            thin_exec.append(f"{ex} (n={b['judged']})")
+        bad, n = b["refuted"] + b["revised"], b["judged"] - b["dropped"]
+        if n < PRIOR_MIN_SAMPLE:
+            thin_exec.append(f"{ex} (n={n})")
             continue
-        lines.append(f"| {ex} | {b['judged']} | {bad} | {100 * bad / b['judged']:.1f}% |")
+        lines.append(f"| {ex} | {n} | {bad} | {100 * bad / n:.1f}% |")
     if thin_exec:
         lines += ["", f"below the n={PRIOR_MIN_SAMPLE} threshold, no rate reported "
                       f"({len(thin_exec)}): " + ", ".join(thin_exec)]
 
     lines += triage_agreement(rows)
 
-    attr = collections.Counter(e.get("attr") for e in outs if e.get("result") != "accepted")
+    attr = collections.Counter(e.get("attr") for e in outs
+                               if e.get("result") not in ("accepted", "dropped"))
     unjoined = sum(1 for e in outs if e.get("ref") not in known)
     lines += ["", "## attribution of non-accepted outcomes", "",
               f"work {attr['work']} / brief {attr['brief']} / harness {attr['harness']} "
@@ -2485,6 +2924,8 @@ DISPATCH_USAGE = (
     "usage: hippo dispatch --kind <kind> --scope <scope> [--task <task-id>] [--depth N] "
     "[--fast] [--] <codex exec args...>\n"
     "       everything after -- goes to codex exec verbatim, even if it looks like a wrapper flag\n"
+    "       a resume (`-- … resume <session> …`) may omit --kind, --scope, --task and --depth:\n"
+    "       each is taken from the newest lane record of that session\n"
     "       --depth 0 (default): the lane is told not to re-delegate; --depth 1: it may spawn\n"
     "       children, which start at depth 0 (§9.5 — the clause is indexed, never enforced)\n"
     '       --fast: launch on codex\'s fast service tier (-c service_tier="fast"); '
@@ -2500,7 +2941,8 @@ def split_dispatch_argv(argv):
     """Strip dispatch's own flags and hand everything else to codex exec untouched.
 
     Why not argparse: the remaining arguments are codex's grammar (-m, -c k=v, -C dir …) and
-    this parser has no business interpreting them. After `--`, even wrapper-shaped flags pass."""
+    this parser has no business interpreting them. After `--`, even wrapper-shaped flags pass.
+    A missing --kind or --scope is resumed_labels' to fill or refuse; an absent --depth is None."""
     fields = {"kind": "", "scope": "", "task": "", "depth": ""}
     fast = False
     rest = []
@@ -2527,15 +2969,13 @@ def split_dispatch_argv(argv):
             rest.append(a)
             i += 1
             continue
-    if not fields["kind"] or not fields["scope"]:
-        die(DISPATCH_USAGE, 2)
     if fields["depth"]:
         try:
             fields["depth"] = int(fields["depth"])
         except ValueError:
             die(f"dispatch: --depth must be an integer: {fields['depth']!r}\n{DISPATCH_USAGE}", 2)
     else:
-        fields["depth"] = 0
+        fields["depth"] = None
     return fields["kind"], fields["scope"], fields["task"], fields["depth"], fast, rest
 
 
@@ -2657,7 +3097,6 @@ LANE_SCOPE_CHARS = 48
 LANE_KILL_GRACE = 5.0  # seconds codex gets after a forwarded signal before its group is killed
 LANE_DRAIN = 2.0  # seconds stderr may stay open after codex exits (a child it left behind)
 LANE_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
-LANE_STATUSLINE = ".statusline"  # the pointer the plugin's subagentStatusLine follows (§3.6)
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 # codex runs every command through the user's shell and prints it on the line after an `exec`
 # header as `/bin/zsh -lc '<command>' in <cwd>` — 1,657 of 1,657 in sixteen real lane logs
@@ -2729,30 +3168,18 @@ def first_sentence(text):
 
 def lanes_dir(hp):
     """.hippo/lanes/, with files a week old pruned — a new lane start is the one moment this
-    directory is written anyway, so no schedule is needed (§4) — and the pointer the plugin's
-    subagentStatusLine follows kept current: Claude Code substitutes no ${CLAUDE_PLUGIN_ROOT}
-    in a plugin's settings.json (measured, 2.1.281), and the wrapper is the one process that
-    knows where this plugin lives. Called once per wrapper run: batch lanes share it."""
+    directory is written anyway, so no schedule is needed (§4). Called once per wrapper run:
+    batch lanes share it. (The `.statusline` pointer older versions kept here is pruned like
+    any other file once it is a week old.)"""
     d = hp / "lanes"
     d.mkdir(exist_ok=True)
     cutoff = time.time() - LANE_KEEP_DAYS * 86400
     for p in d.iterdir():
         try:
-            if p.name != LANE_STATUSLINE and p.stat().st_mtime < cutoff:
+            if p.stat().st_mtime < cutoff:
                 p.unlink()
         except OSError:
             pass  # a directory, or a concurrent prune got there first
-    ptr, script = d / LANE_STATUSLINE, str(SCRIPTS / "lane_status.py")
-    if _read_text(ptr) != script:
-        # Lanes started in the same instant rewrite it through one tmp file, and every loser's
-        # rename fails (measured: 2 of 3 simultaneous starts). The winner wrote the same path,
-        # so only a pointer still not ours makes a sound — never the lane's record.
-        try:
-            write_durable(ptr, script)
-        except OSError as err:
-            if _read_text(ptr) != script:
-                print(f"dispatch: {ptr} not written ({err}) — agent-panel rows keep their "
-                      "default", file=sys.stderr)
     return d
 
 
@@ -2769,7 +3196,7 @@ def lanes_dir_or_note(hp):
 
 class LaneItems:
     """codex's items, one JSON line each, in .hippo/lanes/<id>.events.jsonl (§3.6): what a viewer
-    draws as rows without reading codex's log grammar itself — the hippo:lane mod (`mods/lane.ts`)
+    draws as rows without reading codex's log grammar itself — the hippo:lane mod (`hooks/lane.ts`)
     shows them as the relay agent's own transcript. Fed every raw stderr line by Lane.feed:
 
       exec      a command as it starts — `n`, `cmd` (the shell's argument, exact), `cwd`
@@ -2902,7 +3329,7 @@ class Lane:
     on record from the start, because a killed wrapper may not live to print one."""
 
     def __init__(self, did, scope, exec_, record, log, report, kind, task="", depth=0,
-                 codex_args=None, out=None, face=None):
+                 codex_args=None, out=None, face=None, khala=None):
         self.path = record  # None: no .hippo/, no record — the stream still runs
         self.out = out or sys.stderr
         self.label = one_line(scope, LANE_SCOPE_CHARS)
@@ -2921,6 +3348,7 @@ class Lane:
         self.rec["attempts"] = []
         if face:  # `workflow`: launched by `--batch … --entry`, so --watch polls each minute
             self.rec["face"] = face
+        self.rec.update(khala_fields(khala))  # its khala address, as its claim wrote it
         self.session_id = self.model = ""
         self.footer_total = None
         self.capacity = False  # this attempt's stderr ends on a CAPACITY_SIGNATURES line (feed)
@@ -3215,6 +3643,325 @@ def tee_stdout(src, copy):
                 return
 
 
+# --- a lane's environment: no Claude session, and a khala name of its own (§3.6) -----------
+
+# A Claude Code session's own variables: every CLAUDE_CODE_* (its id, messaging socket and
+# token, bridge id, entrypoint, …), CLAUDECODE, CLAUDE_PID and CLAUDE_EFFORT (the effort of
+# that session's current turn). Main's Bash calls carry them, and a codex lane is not that
+# session: one that bound khala's Claude path with them would ring main's doorbell for its own
+# mail. Nothing in hippo reads them inside a lane. Other CLAUDE_* names (CLAUDE_CONFIG_DIR,
+# CLAUDE_PLUGIN_ROOT, …) are configuration, not the session: they pass.
+CLAUDE_SESSION_PREFIX = "CLAUDE_CODE_"
+CLAUDE_SESSION_VARS = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT")
+KHALA_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")  # khala's rule for a session or node name
+KHALA_ADDRESS_RE = re.compile(r"([a-z0-9][a-z0-9-]*)@([a-z0-9][a-z0-9-]*)")
+KHALA_RESERVED = frozenset(("conduit", "khala", "khala-gateway", "gateway", "operator", "user"))
+KHALA_WHOAMI_TIMEOUT = 10  # seconds
+KHALA_CODEX_SESSION = ".khala-codex-session"  # the name khala-codex binds a session in its cwd as
+KHALA_LEDGER = ("khala", "khala_parent")  # what of a lane's identity rides its ev:dispatch row
+
+
+def lane_env(base, khala=None):
+    """A codex lane's environment: `base` without a Claude session's own variables and, when
+    khala is installed, with the lane's identity — KHALA_SESSION, and KHALA_PARENT only when
+    main's address is known (an inherited one names whoever launched main)."""
+    env = {k: v for k, v in base.items()
+           if not k.startswith(CLAUDE_SESSION_PREFIX) and k not in CLAUDE_SESSION_VARS}
+    env.pop("HIPPO_KHALA_PARENT", None)
+    if khala is not None:
+        env.pop("KHALA_PARENT", None)
+        env["KHALA_SESSION"] = khala["name"]
+        if khala.get("khala_parent"):
+            env["KHALA_PARENT"] = khala["khala_parent"]
+            env["HIPPO_KHALA_PARENT"] = khala["khala_parent"]
+    return env
+
+
+def khala_letter_rule():
+    """The capsule names only the parent this wrapper assigned, never an inherited address."""
+    parent = os.environ.get("HIPPO_KHALA_PARENT", "")
+    if os.environ.get("HIPPO_DISPATCH") and KHALA_ADDRESS_RE.fullmatch(parent):
+        return (
+            f"· khala: Write to your parent ({parent}) only when you need a decision or are "
+            "blocked and cannot continue. Put progress and results in your report. The relay "
+            "already tells your parent when the lane ends. Write to peers named in your brief "
+            "as instructed."
+        )
+    return ""
+
+
+def khala_name_ok(name):
+    return bool(KHALA_NAME_RE.fullmatch(name or "")) and name not in KHALA_RESERVED
+
+
+def khala_name(text):
+    """`text` as a khala name — lowercased, every other character a `-`, runs collapsed, ends
+    trimmed — or "" when nothing usable is left."""
+    name = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return name if khala_name_ok(name) else ""
+
+
+def khala_main(base):
+    """None when khala is not on PATH — then a lane gets no identity and hippo does nothing
+    khala-shaped. Otherwise (main's address, None), or (None, why not): `<identity>@<node>` as
+    `khala whoami` prints it for the caller — the session that launches the lane. Never guessed:
+    no directory name stands in for it."""
+    khala = shutil.which("khala", path=base.get("PATH"))
+    if khala is None:
+        return None
+    try:
+        r = subprocess.run([khala, "whoami"], env=base, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=KHALA_WHOAMI_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, f"`khala whoami` did not answer in {KHALA_WHOAMI_TIMEOUT}s"
+    except OSError as err:
+        return None, f"`khala whoami` could not run ({err})"
+    out = r.stdout.strip()
+    if r.returncode != 0:
+        said = one_line(r.stderr or r.stdout, 120) or "no output"
+        return None, f"`khala whoami` exited {r.returncode} ({said})"
+    if not KHALA_ADDRESS_RE.fullmatch(out):
+        return None, f"`khala whoami` printed no <identity>@<node> ({one_line(out, 80)!r})"
+    return out, None
+
+
+def khala_records(ld):
+    for p in ld.glob("d*.json") if ld is not None else ():
+        rec = read_record(p)
+        if rec and isinstance(rec.get("khala"), str):
+            yield rec
+
+
+def resumed_session(args):
+    """The codex session id `args` resume (`… resume <session> …`), or None — they resume none,
+    or name none (`resume --last`)."""
+    at = codex_resume_at(args)
+    if at is None:
+        return None
+    after = args[at + 1:]
+    return next((a for i, a in enumerate(after) if not a.startswith("-")
+                 and (i == 0 or after[i - 1] not in CODEX_VALUE_OPTIONS)), None)
+
+
+def resumed_exec(hp, rest, label):
+    """A resume's exec label: the slots its own argv leaves `unset` taken from the lane whose
+    session it resumes → (label, a stderr note or None).
+
+    Measured (steno, 13 days on 1.17.1): 78 of 641 dispatches (12%) were resumes typed as
+    `-- -C <dir> resume <session> "…"` — no `-m`, no effort — and recorded `codex/unset/unset`,
+    which made PRIORS a `research × codex/unset/unset` row of n=61; every one of the 78 resumed a
+    session another lane record of the project names with its model and effort. The model and
+    effort codex resumes on are the session's own, so the resumed lane's are the honest
+    label: from the newest record of that session that has the slot (`.hippo/lanes/`, kept a
+    week), the model else from its `ev:usage` row (written from codex's banner). Argv still
+    wins — a `-m` on the resume is what codex runs. Nothing found is said, not guessed."""
+    _, model, effort = label.split("/")
+    sid = resumed_session(rest)
+    if "unset" not in (model, effort) or sid is None or hp is None:
+        return label, None
+    recs = sorted((r for p in (hp / "lanes").glob("d*.json") if (r := read_record(p))
+                   and r.get("codex_session") == sid and isinstance(r.get("exec"), str)),
+                  key=lambda r: r.get("started") or "", reverse=True)
+    used = {r.get("id"): r.get("model") for r in read_ledger(hp)
+            if r.get("ev") == "usage" and r.get("src") == "wrapper"} if recs else {}
+    found = {}
+    for r in recs:
+        parts = r["exec"].split("/")
+        slots = {"model": parts[1], "effort": parts[2]} if len(parts) == 3 else {}
+        if slots.get("model") in (None, "unset") and used.get(r.get("id")):
+            slots["model"] = used[r.get("id")]
+        for k, v in slots.items():
+            if v and v != "unset":
+                found.setdefault(k, (v, r.get("id")))
+    have = {"model": model, "effort": effort}
+    taken = {k: found[k] for k in have if have[k] == "unset" and k in found}
+    have.update({k: v for k, (v, _) in taken.items()})
+    new = f"codex/{have['model']}/{have['effort']}"
+    if not taken:
+        return label, (f"no lane record of it names a model or effort — recorded as {label}; "
+                       "pass -m and -c model_reasoning_effort=… to label it")
+    froms = ", ".join(sorted({d for _, d in taken.values()}))
+    return new, f"exec {new}, taken from lane {froms}"
+
+
+def resumed_labels(hp, rest, kind, scope, task, depth):
+    """A resume's kind, scope, task and depth: what its command line leaves out taken from the
+    newest lane record of the session it resumes → (kind, scope, task, depth, a stderr note or
+    None). The scope gets " (resumed)", as on the wrapper's own `resume:` line.
+
+    Measured (one consumer, 2026-11-18): a resume typed as `-- -C <dir> resume <session> "…"`
+    failed on a missing --scope — main's own restart checklist had dropped it — while the lane
+    record of that session held the scope, the kind and the task. The record is the durable
+    source: the `ev:dispatch` row holds the same labels but not the session id. Depth comes along
+    for the same reason resume_command carries it: it is the session's, and HIPPO_DEPTH sets the
+    re-delegation clause the session's capsule re-injects — a depth-1 lane resumed as depth 0
+    would be told the opposite of its launch. The command line always wins. Not a resume, or no
+    record of the session: a missing --kind/--scope stays the usage error, never a guess."""
+    sid = resumed_session(rest)
+    recs = [r for p in (hp / "lanes").glob("d*.json") if (r := read_record(p))
+            and r.get("codex_session") == sid] if sid and hp is not None else []
+    rec = max(recs, key=lambda r: r.get("started") or "") if recs else {}
+    taken = {}
+    if rec:  # a lane record always holds kind and scope (Lane.__init__)
+        if not kind:
+            kind = taken["kind"] = rec["kind"]
+        if not scope:
+            s = rec["scope"]
+            scope = taken["scope"] = s if s.endswith(" (resumed)") else f"{s} (resumed)"
+        if not task and rec.get("task"):
+            task = taken["task"] = rec["task"]
+        if depth is None and rec.get("depth"):
+            depth = taken["depth"] = rec["depth"]
+    if not kind or not scope:
+        if sid is None:
+            die(DISPATCH_USAGE, 2)
+        die(f"dispatch: --kind and --scope are required — no lane record of session {sid} to "
+            f"take them from\n{DISPATCH_USAGE}", 2)
+    if not taken:
+        return kind, scope, task, depth or 0, None
+    said = ", ".join(f"{k} {shlex.quote(str(v)) if k == 'scope' else v}" for k, v in taken.items())
+    return kind, scope, task, depth or 0, f"{said}, taken from lane {rec.get('id')}"
+
+
+def khala_resumed(ld, args):
+    """The name of the lane whose codex session `args` resume (`… resume <session> …`), off
+    that lane's record — None when they resume none, or no record of it names one."""
+    sid = resumed_session(args)
+    recs = [r for r in khala_records(ld) if sid and r.get("codex_session") == sid]
+    name = max(recs, key=lambda r: r.get("started") or "")["khala"].split("@")[0] if recs else ""
+    return name if khala_name_ok(name) else None
+
+
+@contextlib.contextmanager
+def lanes_claim(ld):
+    """An flock on .hippo/lanes/ itself — no lock file a prune could take away — across the
+    processes and threads that start lanes on this checkout (an flock is per open file)."""
+    if ld is None:
+        yield
+        return
+    fd = os.open(ld, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def khala_session_file(workdir, name):
+    """`<workdir>/.khala-codex-session` = `name`, so a resume of the lane's session binds the
+    same name — only in a lane's own worktree (`.claude/worktrees/<w>/…`): the main checkout's
+    file is main's — and the file kept out of the lane's commits (khala_exclude). → notes: the
+    file holds another name (never overwritten), or it or the exclude could not be written."""
+    d = Path(workdir).resolve()
+    parts = d.parts
+    if not d.is_dir() or not any(parts[i:i + 2] == (".claude", "worktrees")
+                                 for i in range(len(parts) - 2)):
+        return []
+    p, notes = d / KHALA_CODEX_SESSION, []
+    try:
+        with open(p, "x", encoding="utf-8") as f:
+            f.write(name + "\n")
+    except FileExistsError:
+        held = _read_text(p)
+        if held is None or held.splitlines() != [name]:
+            notes.append(f"{p} names {one_line(held, 40)!r}, not {name} — left as it is")
+    except OSError as err:
+        return [f"{p} not written ({err})"]
+    note = khala_exclude(d)
+    return notes + [note] if note else notes
+
+
+def khala_exclude(workdir):
+    """The exact line `.khala-codex-session` in the repository's own `info/exclude` — shared by
+    all its worktrees, untracked — so a lane's `git add -A` never commits the file; the tracked
+    .gitignore is the project's and is never touched. → a note when it could not be added, else
+    None (outside a git repository nothing can commit it)."""
+    try:
+        r = subprocess.run(["git", "-C", str(workdir), "rev-parse", "--git-common-dir"],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as err:
+        return (f"info/exclude not checked ({err}) — a lane's commit could carry "
+                f"{KHALA_CODEX_SESSION}")
+    if r.returncode != 0:
+        return None
+    p = Path(workdir) / r.stdout.strip() / "info" / "exclude"  # relative to workdir, or absolute
+    try:
+        text = p.read_text(encoding="utf-8") if p.exists() else ""
+        if KHALA_CODEX_SESSION not in text.splitlines():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open("a", encoding="utf-8") as f:
+                f.write(("\n" if text and not text.endswith("\n") else "") + KHALA_CODEX_SESSION
+                        + "\n")
+    except OSError as err:
+        return f"{p} not updated ({err}) — a lane's commit could carry {KHALA_CODEX_SESSION}"
+    return None
+
+
+def khala_lane(main, base, did, task, args, workdir, ld):
+    """The lane's khala identity (§3.6) — {name, khala, khala_parent, khala_note, why} — or None
+    when khala is not on PATH (`main`, from khala_main). The name, the first that applies:
+      - the caller's choice: an inherited KHALA_SESSION that is a usable name and not main's
+        own. One equal to main's, or not provably different because main's address is
+        unknown, is never taken — a lane must never answer as main;
+      - a resume's: the name on the record of the lane whose session it resumes, as it was;
+      - the slug of `--task <type>/<slug>` (khala_name), else `lane-<8 hex of the dispatch id>`.
+    Any but a resume's gets `-2`, `-3`, … while main or a lane this checkout's records show
+    running holds it: a batch's lanes share one environment, and two running lanes never share
+    a name. Chosen under lanes_claim and claimed by the lane's record, written before the lock
+    goes — so lanes starting together, in one batch or in separate processes, never collide."""
+    if main is None:
+        return None
+    address, why = main
+    me, _, node = (address or "").partition("@")
+    held, notes = base.get("KHALA_SESSION") or "", []
+    chosen = held if khala_name_ok(held) and me and held != me else ""
+    if held and not khala_name_ok(held):
+        notes.append(f"KHALA_SESSION={held!r} is no khala name — replaced")
+    elif held and not me:
+        notes.append(f"KHALA_SESSION={held} may be main's own name (main's address is "
+                     "unknown) — replaced")
+    with lanes_claim(ld):
+        name = None if chosen else khala_resumed(ld, args)
+        if name is None:
+            stem = chosen or khala_name(task.split("/", 1)[-1]) or f"lane-{did[1:9]}"
+            taken = {me} | {r["khala"].split("@")[0] for r in khala_records(ld)
+                            if watch_state(r) == "running"}
+            name, n = stem, 1
+            while name in taken:
+                n += 1
+                name = f"{stem}-{n}"
+        kh = {"name": name, "khala": f"{name}@{node}" if node else name, "why": why}
+        if address:
+            kh["khala_parent"] = address
+        if ld is not None:
+            try:
+                write_durable(ld / f"{did}.json", json.dumps(
+                    {"id": did, "pid": os.getpid(), "started": now_iso(), "khala": kh["khala"]}))
+            except OSError:
+                pass  # the lane's own record makes the sound (Lane.write)
+        # Under the lock too: lanes of one repository append to one info/exclude.
+        for note in khala_session_file(workdir, name):
+            print(f"dispatch: {note}", file=sys.stderr)
+            notes.append(note)
+    if why:
+        notes.append(f"no KHALA_PARENT: {why}")
+    if notes:
+        kh["khala_note"] = "; ".join(notes)
+    return kh
+
+
+def khala_fields(kh, keys=(*KHALA_LEDGER, "khala_note")):
+    """What of a lane's identity goes on record: its lane record by default, `KHALA_LEDGER` for
+    its ev:dispatch row — {} without one."""
+    return {k: kh[k] for k in keys if k in kh} if kh else {}
+
+
+def khala_said(kh):
+    """The launch line's text: the lane's address and its parent's, or why it has none."""
+    return f"khala: {kh['khala']} · " + (f"parent {kh['khala_parent']}" if kh.get("khala_parent")
+                                         else f"no parent — {kh['why']}")
+
+
 def run_dispatch(argv):
     """DESIGN §3.6. A failed record never blocks the launch — this surface's real job is running
     codex and the ledger is a side effect. But a lost record always makes a sound."""
@@ -3225,6 +3972,8 @@ def run_dispatch(argv):
     if "--watch" in head:
         return run_watch(argv)
     kind, scope, task, depth, fast, rest = split_dispatch_argv(argv)
+    hp = find_hippo()
+    kind, scope, task, depth, labels_note = resumed_labels(hp, rest, kind, scope, task, depth)
     if fast:
         # Prepended, so a caller's own -c service_tier=… later in argv still wins (codex takes
         # the last -c for a key). exec_label never reads it: the tier is a launch condition,
@@ -3234,37 +3983,46 @@ def run_dispatch(argv):
     # A launch from inside a lane is a child: record who spawned it (§9.5 — an unintended
     # depth-2 becomes an event in the ledger, not a prohibition nobody can check).
     parent = os.environ.get("HIPPO_DISPATCH", "")
-    hp = find_hippo()
-    check_fanout(hp, parent, exec_label(rest).split("/")[1])
+    exec_, exec_note = resumed_exec(hp, rest, exec_label(rest))
+    if labels_note or exec_note:  # one line for what a resume took from its lane
+        said = "; ".join(n for n in (labels_note, exec_note) if n)
+        print(f"dispatch: resume of session {resumed_session(rest)}: {said}", file=sys.stderr)
+    check_fanout(hp, parent, exec_.split("/")[1])
+    # The lane's files (§3.6): codex's raw stderr, its stdout (the report) and the record,
+    # written before the id is printed so a watcher never races the record into existence.
+    # With no .hippo/ there is no record and the raw log goes to a temp file the last line names.
+    ld = lanes_dir_or_note(hp) if hp is not None else None
+    # Its khala name, claimed by its record before the ledger row names it.
+    kh = khala_lane(khala_main(os.environ), os.environ, did, task, rest,
+                    lane_dir(rest, Path.cwd()), ld)
     bad = "no .hippo/"
     if hp is None:
         print("dispatch: no .hippo/ — skipping the dispatch record", file=sys.stderr)
     else:
-        e = {"ev": "dispatch", "id": did, "kind": kind, "exec": exec_label(rest), "scope": scope,
+        e = {"ev": "dispatch", "id": did, "kind": kind, "exec": exec_, "scope": scope,
              "depth": depth}
         if task:
             e["task"] = task
         if parent:
             e["parent"] = parent
+        e.update(khala_fields(kh, KHALA_LEDGER))
         bad = validate_event(e)
         if bad:
             print(f"dispatch: record failed ({bad}) — the delegation proceeds anyway", file=sys.stderr)
         else:
             # The ledger line goes to stderr: stdout's first line belongs to the dispatch id (§3.6).
             print(json.dumps(append_event(hp, e, src="wrapper"), ensure_ascii=False), file=sys.stderr)
-    # The lane's files (§3.6): codex's raw stderr, its stdout (the report) and the record,
-    # written before the id is printed so a watcher never races the record into existence.
-    # With no .hippo/ there is no record and the raw log goes to a temp file the last line names.
-    ld = lanes_dir_or_note(hp) if hp is not None else None
     if ld is not None:
         log, report_copy, record = ld / f"{did}.log", ld / f"{did}.out", ld / f"{did}.json"
     else:
         fd, name = tempfile.mkstemp(prefix=f"hippo-{did}-", suffix=".log")
         os.close(fd)
         log, report_copy, record = Path(name), None, None
-    lane = Lane(did, scope, exec_label(rest), record, log, report_copy, kind, task, depth,
-                codex_resume_args(rest, Path.cwd()))
+    lane = Lane(did, scope, exec_, record, log, report_copy, kind, task, depth,
+                codex_resume_args(rest, Path.cwd()), khala=kh)
     print(f"dispatch:{did}", flush=True)
+    if kh:
+        lane.say(khala_said(kh))
     # The lane inherits its own dispatch id (§9.2): every hippo write it makes arrives as
     # src=executor, and `log outcome` needs no --ref. Set even when the record failed — the
     # id was printed and is the lane's name either way. HIPPO_DEPTH indexes the
@@ -3274,6 +4032,7 @@ def run_dispatch(argv):
     if hp is not None:
         os.environ["HIPPO_DIR"] = str(hp)
     os.environ["PATH"] = lane_path()
+    env = lane_env(os.environ, kh)
     # The judge, when there is one (§3.6): notes about the brief before the launch, and the
     # lane's final message — captured to a file, so stdout stays untouched — for triage after.
     on = jev_backend(hp) != "off"
@@ -3311,7 +4070,7 @@ def run_dispatch(argv):
             try:
                 child = subprocess.Popen(
                     ["codex", "exec", *argv], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, start_new_session=True,
+                    stderr=subprocess.PIPE, env=env, start_new_session=True,
                 )
             except OSError as err:
                 print(f"dispatch: could not run codex: {err}", file=sys.stderr)
@@ -3358,7 +4117,8 @@ def run_dispatch(argv):
 
 WATCH_FOR = 540  # seconds: under the Bash tool's 600s ceiling, so one call never outlives it
 # A lane launched through `--entry` is relayed from inside a Workflow, where nothing hippo prints
-# draws a row (the subagentStatusLine is not run for a Workflow's agents — measured, 2026-10-01)
+# draws a row (the subagentStatusLine was not run for a Workflow's agents — measured, 2026-10-01;
+# whether AgentRow is raised for them is unmeasured)
 # and the relay's own tool results are the only live view: one a minute, at ~$0.005 a call.
 WATCH_FOR_WORKFLOW = 60
 WATCH_POLL = 1.0
@@ -3401,7 +4161,7 @@ def parse_watch_argv(argv):
 def watch_window(rec):
     """How long one --watch call blocks when `--for` does not say: a minute for a lane the
     Workflow face launched (its relay's tool results are its only live view), nine minutes
-    otherwise (a plain agent row is drawn by lane_status.py, so its relay need not poll)."""
+    otherwise (a plain agent row is drawn by hooks/lane_row.ts, so its relay need not poll)."""
     return WATCH_FOR_WORKFLOW if rec.get("face") == "workflow" else WATCH_FOR
 
 
@@ -3476,6 +4236,9 @@ def watch_lines(rec, state):
     else:
         lines.append("report: none — the lane printed no final message")
     lines.append(f"raw log: {rec.get('log')}")
+    if rec.get("khala"):  # where its mail goes — main may still write, or read what is left
+        lines.append(f"khala: {rec['khala']}"
+                     + (f" · parent {rec['khala_parent']}" if rec.get("khala_parent") else ""))
     cmd = resume_command(rec)
     if cmd:
         lines.append(f"resume: {cmd}")
@@ -3645,12 +4408,14 @@ def resume_command(rec):
     """The `hippo dispatch` command that resumes a lane's codex session, from its record — for
     a lane that ended killed, on a model-capacity error the wrapper did not resume away (its
     resumes used up, or a batch entry's timeout too near), or whose triage named a cause a
-    resume can clear (transient, environment) — or None. None too without a session id or the
-    arguments to resume with: no line rather than a broken command. It launches a new single
-    dispatch — a batch lane's included — with the lane's labels and " (resumed)" on its scope."""
+    resume can clear (transient, environment), and for a lane with a khala name however it
+    ended: one that finished can still have letters waiting, and a resume is how it reads them
+    (§3.6) — or None. None too without a session id or the arguments to resume with: no line
+    rather than a broken command. It launches a new single dispatch — a batch lane's included —
+    with the lane's labels and " (resumed)" on its scope; khala_lane gives it the lane's name."""
     at_capacity = (rec.get("attempts") or [{}])[-1].get("reason") == "capacity"
     if not (rec.get("status") == "killed" or at_capacity
-            or rec.get("cause") in RELAUNCHABLE_CAUSES):
+            or rec.get("cause") in RELAUNCHABLE_CAUSES or rec.get("khala")):
         return None
     sid, args, kind = rec.get("codex_session"), rec.get("codex_args"), rec.get("kind")
     if not sid or not isinstance(args, list) or not kind:
@@ -5078,7 +5843,7 @@ class BatchRecord:
     """`.hippo/lanes/<bid>.json` — a full batch run as one row (§3.6): the counts, the lanes
     running now, the newest event, and at the end its status and where its harvest is. Written
     whole, by this process alone, at every lane start and exit and at the end; `--watch <bid>`
-    and lane_status.py read it with the running lanes' own records. Without .hippo/ there is
+    and hooks/lane_row.ts read it with the running lanes' own records. Without .hippo/ there is
     no record, as there is none for a lane."""
 
     def __init__(self, bid, ld, mp, journal, total, todo):
@@ -5144,6 +5909,7 @@ class BatchRun:
         self.journal = mp.parent / f"{mp.stem}.journal.jsonl"
         self.outdir = mp.parent / f"{mp.stem}.out"
         self.parent = os.environ.get("HIPPO_DISPATCH", "")
+        self.khala = khala_main(os.environ)  # main's khala address, asked once per run
         self.record, self.face = record, face
         self.stop = threading.Event()
         self.state = {"launched": 0, "ok": 0, "failed": 0, "done": 0, "warned": False,
@@ -5243,6 +6009,10 @@ class BatchRun:
                 self.state["warned"] = True
                 if first:
                     print(msg, file=sys.stderr)
+            cmd = adapter_argv(en)
+            kh = khala_lane(self.khala, os.environ, did, en["task"], cmd[2:],
+                            lane_dir(cmd[2:], en["cwd"]), self.ld)
+            e.update(khala_fields(kh, KHALA_LEDGER))
             if bad:
                 # Same stance as single dispatch: a lost record makes a sound, never a blocked launch.
                 print(f"dispatch --batch: {en['id']}: record failed ({bad}) — the launch "
@@ -5257,19 +6027,21 @@ class BatchRun:
         with BATCH_LOCK:
             self.state["launched"] += 1
         out_p, err_p = self.outdir / f"{en['id']}.out", self.outdir / f"{en['id']}.err"
-        env = {**os.environ, "HIPPO_DISPATCH": did, "HIPPO_DEPTH": str(en["depth"]),
-               "PATH": lane_path(), **({"HIPPO_DIR": str(hp)} if hp is not None else {})}
-        cmd = adapter_argv(en)
+        env = lane_env({**os.environ, "HIPPO_DISPATCH": did, "HIPPO_DEPTH": str(en["depth"]),
+                        "PATH": lane_path(), **({"HIPPO_DIR": str(hp)} if hp is not None else {})},
+                       kh)
         # The same lane machinery as a single dispatch (§3.6): <id>.err keeps its shape (the
         # raw stderr, byte for byte), the compact stream joins the batch's own stderr, and the
         # record lands in .hippo/lanes/ under the dispatch id.
         lane = Lane(did, en["scope"], e["exec"], self.ld / f"{did}.json" if self.ld else None,
                     err_p, out_p, en["kind"], en["task"], en["depth"],
-                    codex_resume_args(cmd[2:], en["cwd"]), face=self.face)
+                    codex_resume_args(cmd[2:], en["cwd"]), face=self.face, khala=kh)
         if self.face:
             # The Workflow face's relay greps this, as it does a single dispatch's — printed
             # once the record exists, so a watcher never races it into existence.
             print(f"dispatch:{did}", flush=True)
+        if kh:
+            lane.say(khala_said(kh))
         # The entry's timeout bounds the whole lane, capacity waits and resumes included.
         deadline = None if en["timeout"] is None else time.monotonic() + en["timeout"]
 
@@ -6226,6 +6998,14 @@ TRANSCRIPT_FLUSH_WAIT = 0.25  # s; Claude Code writes a transcript on a 100ms fl
 # model turn; the next one needs a new prompt, which takes a new prompt id.
 NO_TURN_MARKS = ("<command-name>", "<local-command-stdout>", "<bash-input>", "<bash-stdout>",
                  "[Request interrupted by user")
+# How old a compacting agent's last line can be at either compaction hook. At PreCompact it is
+# under a second old (stamped 25–51ms before the hook starts, §3.4); at SessionStart(compact) as
+# old as the summary took, nothing the compaction writes landing before the hook returns —
+# measured over 169 compactions of one main session, the slowest summary took 5.5 minutes
+# (327s). An idle main compacts ~55 minutes after its last turn (107 of those 169, all past
+# 54 minutes), so a dead agent's line is at least that old by then. One bound serves both
+# hooks: three times the slowest summary, a quarter of the idle gap.
+COMPACTING_AGENT_RECENT = timedelta(minutes=15)
 
 
 def compaction_agent(transcript, prompt_id, trigger=None):
@@ -6245,9 +7025,17 @@ def compaction_agent(transcript, prompt_id, trigger=None):
       whatever the agents show — main losing its request is the worse error;
     - main at the hook's prompt and not at a compaction point, or already past that prompt
       (compacting, it could not have moved on), is not compacting: the compaction is that of an
-      agent at a compaction point — any `agent-*.jsonl` under the session's subagents/, a
-      Workflow's agents included; the one whose line is the latest;
+      agent at a compaction point whose last line is recent (COMPACTING_AGENT_RECENT) — any
+      `agent-*.jsonl` under the session's subagents/, a Workflow's agents included; the one
+      whose line is the latest; with none, main's;
     - a PreCompact with trigger `manual` is main's: only the user types /compact, into main.
+
+    The recency bound is what keeps an idle main's own compaction main's. The host compacts an
+    idle main ~55 minutes after its turn ended, and main, its turn ended, is at no compaction
+    point; a dead agent's transcript can be at one for good — measured, one `hippo:lane` relay
+    whose transcript ended on 2026-11-10 took every later idle compaction of its session (3 of 3),
+    and main got neither its deltas request nor its capsule. A compacting agent's last line is
+    as old as its summary at most; a line older than that is a dead agent's.
 
     Left as main's: an agent compacting while main, at the same prompt, waits on its reply, and
     one compacting while main's own compaction runs."""
@@ -6265,8 +7053,10 @@ def compaction_agent(transcript, prompt_id, trigger=None):
         main = _latest_turn(transcript)
         if not main or _compaction_point(main):
             return None
-    at = [(recs[-1].get("timestamp") or "", path) for path in agents
-          for recs in [_latest_turn(path, main=False)] if _compaction_point(recs)]
+    since = datetime.now(timezone.utc) - COMPACTING_AGENT_RECENT
+    at = [(t, path) for path in agents for recs in [_latest_turn(path, main=False)]
+          if _compaction_point(recs) and (t := _iso_time(recs[-1].get("timestamp"))) is not None
+          and t >= since]
     if not at:
         return None
     path = max(at)[1]
@@ -7512,7 +8302,7 @@ def cmd_scribe(args):
              if r["ref"] and r["ref"] != r["id"]} if native else {}
     start = (window_start(transcript, since, end)
              if any(isinstance(e, dict) and e.get("ev") == "directive" for e in events) else None)
-    rejected = []
+    rejected, restated = [], 0
     for e in events:
         # lifetime is retired (§3.2) and the prompt no longer asks for it; a clerk that still
         # says `turn` must not make its directive invisible to the view.
@@ -7521,6 +8311,9 @@ def cmd_scribe(args):
         if (isinstance(e, dict) and e.get("ev") == "outcome" and isinstance(e.get("ref"), str)
                 and e["ref"] in alias):
             e["ref"] = alias[e["ref"]]
+        if scribe_restates(hp, e, native):
+            restated += 1
+            continue
         taken, verr = native_guard(hp, native_take, hp, e, native, alias) or (False, None)
         if not taken:
             verr = (validate_event(e) or validate_scribe_event(e) or check_ref(hp, e)
@@ -7541,7 +8334,8 @@ def cmd_scribe(args):
         worklog_append(hp, obj["worklog"].strip())
     settle()
     save_cursor()
-    append_event(hp, {**meter, "ok": True}, src="scribe")
+    append_event(hp, {**meter, "ok": True, **({"restated": restated} if restated else {})},
+                 src="scribe")
     auto_distill(hp)
     # 9. Open tasks that look ended (DESIGN §3.5.9) — last, on both paths: it reads nothing
     # the scribe wrote (the clerk never writes tasks.yaml) and nothing waits on it.
@@ -7583,6 +8377,10 @@ def build_parser():
     a.add_argument("field")
     a.add_argument("value")
     a.set_defaults(fn=cmd_task_set, writes=True)
+    a = t.add_parser("note", help="append one timestamped note (set … notes replaces)")
+    a.add_argument("id")
+    a.add_argument("text")
+    a.set_defaults(fn=cmd_task_note, writes=True)
     a = t.add_parser("done", help="mark as done")
     a.add_argument("id")
     a.add_argument("--note", help="append to notes")
@@ -7779,16 +8577,21 @@ def main():
     if args.fn is not cmd_init:
         hp = find_hippo()
         if hp is None:
-            # Reads stay completely silent outside a project (§3.1). A *write* does not: the
+            if args.fn is cmd_status and args.inject and (letter_rule := khala_letter_rule()):
+                print(letter_rule)
+                return
+            # Other reads stay silent outside a project (§3.1). A *write* does not: the
             # caller typed it expecting a record, and silence reads as success. (Worktrees are
-            # no longer the usual cause — find_hippo walks through their .git file, §9.1.) A `cd`
-            # into another tree in the same shell call is (measured, 2026-09-26: main's `task
+            # no longer the usual cause — walk_hippo continues in their main worktree, §9.1.) A
+            # `cd` into another tree in the same shell call is (measured, 2026-09-26: main's `task
             # set` after one was lost), so the way back leads: `init` first makes a stray one.
+            # The cwd is named: a session outside any project once wrote to ~/.hippo for six
+            # days without anyone seeing which directory it resolved from.
             if getattr(args, "writes", False):
                 print(
-                    "hippo: no .hippo/ found from here — nothing was recorded. Run it again from "
-                    "the project root (or with HIPPO_DIR=<root>/.hippo); `hippo init` only for a "
-                    "new project.",
+                    f"hippo: no .hippo/ found from {Path.cwd()} — nothing was recorded. Run it "
+                    "again from the project root (or with HIPPO_DIR=<root>/.hippo); `hippo init` "
+                    "only for a new project.",
                     file=sys.stderr,
                 )
             sys.exit(0)

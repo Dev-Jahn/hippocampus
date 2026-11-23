@@ -261,6 +261,25 @@ def test_age_appears_in_the_capsule_from_fourteen_days(tmp_project, run_hippo):
                     "· live: use GPUs 0 and 1 only"]
 
 
+def test_age_counts_from_the_first_add_and_names_a_rewrite(tmp_project, run_hippo):
+    """Measured (1.17.1): a rule shown `live(37d)` showed no age once re-added under its id.
+    The age runs from the start of the id's live run; a later change of text is named beside
+    it, a re-add of the same text is not; a withdrawal ends the run."""
+    _backdate_directive(tmp_project, "reworded", "hold the perf claims", 37)
+    _backdate_directive(tmp_project, "reworded", "hold the perf claims until the rerun", 2)
+    _backdate_directive(tmp_project, "restated", "use GPU 0", 20)
+    _add(run_hippo, tmp_project, "use GPU 0", "restated")
+    _backdate_directive(tmp_project, "reborn", "never push", 40)
+    assert run_hippo(["directive", "withdraw", "reborn"], cwd=tmp_project).returncode == 0
+    _add(run_hippo, tmp_project, "never push", "reborn")
+
+    out = run_hippo(["status", "--inject"], cwd=tmp_project)
+    assert out.returncode == 0, out.stderr
+    live = [ln for ln in out.stdout.splitlines() if ln.startswith("· live")]
+    assert live == ["· live(37d, rewritten 2d ago): hold the perf claims until the rerun",
+                    "· live(20d): use GPU 0", "· live: never push"]
+
+
 def test_stale_note_names_every_directive_30d_or_older(tmp_project, run_hippo):
     _backdate_directive(tmp_project, "stale-hold", "hold off on speed claims", 41)
     _backdate_directive(tmp_project, "older-hold", "never touch the waystone", 52)

@@ -1,13 +1,13 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
-import { doneText, isDispatchCommand, parseItem } from './lane.ts'
+import { doneText, isDispatchCommand, parseItem } from '../hooks/lane'
 
 const RELAY = 'relay-1'
 const HEX = 'd' + 'a'.repeat(32)
 const COMMAND = 'hippo dispatch --kind impl --scope "parser fix" -m gpt-6-luna "Fix the parser."'
 const OUTPUT = '/tmp/tasks/b1.output'
 const RECORD = `/work/.hippo/lanes/${HEX}.json`
-const FINAL = `lane ${HEX} exited rc=0 after 2m10s · 2 cmds · parser fix\nreport: /work/.hippo/lanes/${HEX}.out\nraw log: /work/.hippo/lanes/${HEX}.log`
+const FINAL = `lane ${HEX} exited rc=0 after 2m10s · 2 cmds · parser fix\nreport: /work/.hippo/lanes/${HEX}.out\nraw log: /work/.hippo/lanes/${HEX}.log\n`
 
 // What the wrapper writes to <id>.events.jsonl (LaneItems, cli/hippo_cli.py).
 const ITEMS = [
@@ -23,7 +23,7 @@ const ITEMS = [
 type Chunk = { kind: string; index?: number; text?: string; id?: string; name?: string; json?: string }
 
 // The relay's one Bash call of a step, run as the engine runs it: through the module's hooks.
-async function runBash($, step: { chunks: Chunk[] }) {
+async function runBash($: any, step: { chunks: Chunk[] }) {
   const tool = step.chunks.find((c) => c.kind === 'tool')!
   const input = JSON.parse(step.chunks.find((c) => c.kind === 'input')!.json!)
   expect(tool.name).toBe('Bash')
@@ -31,7 +31,7 @@ async function runBash($, step: { chunks: Chunk[] }) {
   return input
 }
 
-async function readStep($, index: number, agentId = RELAY) {
+async function readStep($: any, index: number, agentId = RELAY) {
   const chunks: Chunk[] = []
   const stream = $.turn.step({ turnId: 'turn-1', index, model: 'claude-sonnet', messageCount: 1, agentId })
   let r = await stream.next()
@@ -41,27 +41,40 @@ async function readStep($, index: number, agentId = RELAY) {
 
 // Claude Code, as far as one relay needs it: the model (counted — it must never be asked), the
 // Bash tool (answering with the next text of `bash`), and the lane's files.
-function host(on, bash: string[], served: { lines: number }) {
+function host(on: any, bash: string[], served: { lines: number }, record = RECORD) {
   const asked = { model: 0 }
   on('session.start', () => ({ cwd: '/work' }))
   on('tool.register', () => ({ value: { tool: 'mcp__hippo__codex' } }))
   on('agent.spawn', () => ({ model: 'claude-sonnet', agentId: RELAY }))
-  on('turn.step', async function* ($, e) {
+  on('turn.step', async function* ($: unknown, e: { turnId: string; index: number }) {
     asked.model++
     yield { kind: 'text', index: 0, text: 'model' }
     return { turnId: e.turnId, index: e.index, answer: 'model', toolUses: [], stopReason: 'end_turn', usage: null }
   })
-  on('tool.call', ($, e) => {
+  on('tool.call', () => {
     const text = bash.shift() ?? ''
     return { result: { stdout: text, stderr: '' }, text }
   })
   on('session.cwd', () => ({ value: '/work' }))
-  on('fs.exists', ($, e) => ({ value: e.path === RECORD }))
-  on('fs.read', () => ({ value: JSON.stringify({ id: HEX, pid: 4242 }) }))
-  on('process.run', ($, e) => ({ value: { exitCode: 0, stdout: e.argv[0] === 'tail' ? ITEMS.slice(served.lines).join('') : '', stderr: '' } }))
-  on('process.spawn', async function* ($, e) {
+  on('env.get', ($: unknown, e: { name: string }) => ({ value: e.name === 'HIPPO_DIR' && record ? '/work/.hippo' : undefined }))
+  on('fs.stat', ($: unknown, e: { path: string }) => {
+    if (e.path === '/work/.hippo' && record) return { value: { kind: 'dir' } }
+    if (e.path === record) return { value: { kind: 'file' } }
+    return { deny: `ENOENT: ${e.path}` }
+  })
+  on('fs.exists', ($: unknown, e: { path: string }) => ({ value: e.path === record }))
+  on('fs.read', ($: unknown, e: { path: string }) => {
+    if (e.path === record) return { value: JSON.stringify({ id: HEX, pid: 4242, scope: 'parser fix' }) }
+    // Codex's displayed output can mention a different dispatch after the real grep result.
+    if (e.path === `/work/session/subagents/agent-${RELAY}.jsonl`) {
+      return { value: `dispatch:${HEX}\ndispatch:d${'b'.repeat(32)}\n` }
+    }
+    return { deny: `ENOENT: ${e.path}` }
+  })
+  on('process.run', ($: unknown, e: { argv: string[] }) => ({ value: { exitCode: 0, stdout: e.argv[0] === 'tail' ? ITEMS.slice(served.lines).join('') : '', stderr: '' } }))
+  on('process.spawn', async function* ($: unknown, e: { argv: string[] }) {
     // `tail -n +K -F <id>.events.jsonl`: the lines from K on, as the wrapper has written them.
-    const from = Number(e.argv[2].slice(1)) - 1
+    const from = Number(e.argv[2]!.slice(1)) - 1
     const lines = ITEMS.slice(from, served.lines)
     if (lines.length) yield { stream: 'stdout', text: lines.join('') }
     return { value: { code: 0, signal: null } }
@@ -71,7 +84,7 @@ function host(on, bash: string[], served: { lines: number }) {
 }
 
 test('the item grammar the mod reads is the wrapper’s, line by line', () => {
-  expect(parseItem(ITEMS[1])).toEqual({ k: 'exec', n: 1, cmd: 'sed -n 1,80p src/parser.py', cwd: '/work' })
+  expect(parseItem(ITEMS[1]!)).toEqual({ k: 'exec', n: 1, cmd: 'sed -n 1,80p src/parser.py', cwd: '/work' })
   expect(parseItem('{"k": "exe')).toEqual({ k: 'unreadable' })
   expect(doneText({ k: 'done', n: 2, rc: 1, ms: 812, out: 'F.. 1 failed\n', lines: 1 })).toBe('Exit code 1\nF.. 1 failed')
   expect(doneText({ k: 'done', n: 1, rc: 0, ms: 3, out: '', lines: 1 })).toBe('(No output)')
@@ -83,6 +96,13 @@ test('a hippo:lane relay asks no model: launch, id, codex rows, final lines', as
   const bash: string[] = []
   const served = { lines: 3 }
   const asked = host(on, bash, served)
+  mock.clock(on, { now: Date.parse('2026-10-02T02:00:15Z') })
+  on('session.info', () => ({ value: { transcriptPath: '/work/session.jsonl' } }))
+  let panel: string | undefined
+  on('ui.render', { component: 'AgentRow' }, ($, e, next) => {
+    panel = e.props.body
+    return next(e)
+  })
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await $.agent.spawn({ prompt: COMMAND, description: 'parser fix', subagentType: 'hippo:lane' } as never)
 
@@ -104,6 +124,10 @@ test('a hippo:lane relay asks no model: launch, id, codex rows, final lines', as
   const inputs = step.chunks.filter((c) => c.kind === 'input').map((c) => JSON.parse(c.json!))
   expect(inputs.map((i) => i.command)).toEqual(['sed -n 1,80p src/parser.py', 'pytest -q'])
   expect(step.result.stopReason).toBe('tool_use')
+  const ui = await $.ui.mount({ plugin: 'hippo', component: 'AgentRow', surface: 'terminal',
+    props: { id: RELAY, type: 'hippo:lane', cwd: '/work', tokenSamples: [] } as never })
+  expect(panel).toMatch(/^codex · parser fix · /)
+  await ui.unmount()
 
   // Each row's result is codex's output; a failed command reads as Bash's would.
   served.lines = ITEMS.length
@@ -115,7 +139,7 @@ test('a hippo:lane relay asks no model: launch, id, codex rows, final lines', as
   // 4. The lane is over: its last message, then lane.md's own final call.
   step = await readStep($, 3)
   expect(step.chunks.filter((c) => c.kind === 'text').map((c) => c.text)).toEqual(['One test fails; fixing it.'])
-  bash.push(FINAL + '\n')
+  bash.push(FINAL)
   expect((await runBash($, step)).command).toBe(`hippo dispatch --watch ${HEX}`)
 
   // 5. Its output is the reply, verbatim.
@@ -123,6 +147,19 @@ test('a hippo:lane relay asks no model: launch, id, codex rows, final lines', as
   expect(step.result.answer).toBe(FINAL)
   expect(step.result.stopReason).toBe('end_turn')
   expect(asked.model).toBe(0)
+})
+
+test('the relay hands the conversation to the model when there is no lane record', async ($, on) => {
+  const asked = host(on, [
+    `Command running in background. Output is being written to: ${OUTPUT}. You will be notified.`,
+    `dispatch:${HEX}`,
+  ], { lines: 0 }, '')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.agent.spawn({ prompt: COMMAND, subagentType: 'hippo:lane' } as never)
+  await runBash($, await readStep($, 0))
+  await runBash($, await readStep($, 1))
+  expect((await readStep($, 2)).result.answer).toBe('model')
+  expect(asked.model).toBe(1)
 })
 
 test('every other agent, and a lane prompt that is no dispatch command, is the model’s', async ($, on) => {

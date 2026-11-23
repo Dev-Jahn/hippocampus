@@ -162,6 +162,16 @@ def test_other_tool_use_is_one_line_saying_what_was_done(tmp_path):
     assert "PYTEST-OUT" not in text and "FILE-BODY" not in text
 
 
+def test_a_hippo_lane_relay_reads_as_the_codex_lane_it_relays(tmp_path):
+    """Shown as a plain Agent call, a relay whose prompt is `hippo dispatch … -m gpt-…` was
+    recorded by the clerk as a `claude/gpt-…` dispatch, 17 times (steno, 1.17.1)."""
+    path = _write(tmp_path / "relay.jsonl", [
+        _call("r1", "Agent", {"description": "lane one", "subagent_type": "hippo:lane",
+                              "prompt": "hippo dispatch --kind impl --scope x -- -m gpt-6.1-sol"})])
+    (line,) = _line(_digest(path), 1)
+    assert "hippo:lane relay — a codex lane `hippo dispatch` records itself" in line
+
+
 def _codex(tmp_path):
     def item(payload, kind="response_item"):
         return {"type": kind, "payload": payload}

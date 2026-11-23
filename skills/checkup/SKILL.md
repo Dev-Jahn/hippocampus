@@ -68,7 +68,9 @@ Code) or `~/.codex/sessions/` in dated subdirectories (Codex) — take the newes
 ## Check 3 — waste patterns (ledger + a sample of recent transcripts)
 
 - **Orphan dispatches**: a dispatch with no outcome after 24h — check whether the process still
-  exists, and report "dead but unjudged" separately from "still running".
+  exists, and report "dead but unjudged" separately from "still running". One nobody will judge —
+  replaced by a later delegation, or too old — closes as `log outcome --result dropped`, never
+  `lost`: `lost` counts against the harness in PRIORS.
 - **Rework concentration**: (kind × exec) cells with a high rework sum — candidates for
   reconsidering routing, cross-checked against PRIORS.
 - **Attribution skew**: a high share of attr=brief points at brief quality, attr=harness at
@@ -86,6 +88,12 @@ Code) or `~/.codex/sessions/` in dated subdirectories (Codex) — take the newes
 - `briefs/`: briefs whose task is done or dropped are dead weight — list them with their age and
   propose deletion (git never held them, so removal is the only cleanup).
 - If old done tasks are more than half of tasks.yaml, propose moving them to a separate file.
+- Stray copies: when `.hippo/` is tracked in git, every worktree (`git worktree list`) carries a
+  copy hippo never reads, and one that `git -C <worktree> status --short .hippo` shows changed
+  holds rows an older hippo wrote there that are **not in the ledger** — report each with its
+  row count, propose re-recording what still matters through the CLI and then discarding the
+  copy's changes, and propose `.gitignore` lines for the generated files (`lanes/`, `failures/`,
+  `cursors.json`, `scribe.lock`, `task-flags.json`, `worker-writes.json`).
 
 ## Report format
 

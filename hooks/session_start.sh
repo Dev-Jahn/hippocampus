@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # hippo SessionStart hook: the capsule (§6), at startup, resume, clear and after a compaction.
-# Silent no-op unless the session's cwd sits inside a project that has .hippo/.
+# With no .hippo/, only a lane with a hippo-assigned khala parent receives context.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 cwd="$(json_get cwd)"
 moment="$(json_get source)"
-if ! project_root "$cwd" >/dev/null; then
+if ! project_root "$cwd" >/dev/null &&
+  { [ -z "${HIPPO_DISPATCH:-}" ] || [ -z "${HIPPO_KHALA_PARENT:-}" ]; }; then
   # An isolation:"worktree" agent compacts in <project>/.claude/worktrees/agent-<id>, past the
   # .git file the walk stops at. For a compaction only, walk `through` it as SubagentStart does,
   # and the CLI prints that agent's slice or nothing: a main session run inside a worktree has

@@ -54,7 +54,7 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   subject goes in `--scope`.
 - **Routing**: `exec = executor/model/effort`; the executor is the agent that did the work
   (`codex claude fork subagent workflow`), never how it was launched. Codex ladder, top down:
-  `gpt-6-astra` > `gpt-6.1-sol` > `gpt-6-luna`; slugs come from
+  `gpt-6.2-astra` > `gpt-6.2-sol` > `gpt-6-luna`; slugs come from
   `~/.codex/models_cache.json`, never guessed. `ultra` is a multi-agent mode — an orchestrator
   lane's tier. An atomized fragment goes cheap; fragmentation exists so the tier can drop.
   `--fast` = codex's fast service tier, same exec axis.
@@ -66,6 +66,17 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   through `run_in_background`, never nohup/disown (orphans) or `> log 2>&1` (raw stderr stays in
   `.hippo/lanes/<id>.log`, the report in `<id>.out`). A killed lane still records rc and usage.
   A codex argument that collides with a wrapper flag goes after `--`.
+- A lane never carries your Claude session's variables. **Where `khala` is installed it gets its
+  own name** — `KHALA_SESSION` = the `--task` slug (`-2` on a clash, the same on a resume) and
+  `KHALA_PARENT` = you, from `khala whoami` — shown as `khala: <name>@<node>` on its launch line,
+  in its final lines and in its record: write to that address, and never name the lane itself in
+  the brief. The lane's capsule tells it to write to its parent only when it needs a decision or
+  is blocked and cannot continue. Progress and results belong in its report, and the relay
+  already tells you when it ends. Do put in the brief any peer it should write to (say a Claude
+  subagent you give a mailbox with a `KHALA_SESSION=<name>` line; see the khala skill) — it
+  sends and replies there directly, without you. The repo's `info/exclude` keeps its
+  worktree's `.khala-codex-session` out of commits. **khala says an ended lane has unread letters**: run that lane's `resume:`
+  line — it reads them as it starts, under the same name, with you as its parent.
 - **Deadlines (Claude Code)**: a background call's `timeout` is its deadline — 30 minutes when
   none is given — so every background `hippo dispatch`, plain form and batch alike, passes
   `timeout: 2147483647` (the lane agent does); the host clamps it to its maximum, 2 hours. A
@@ -81,13 +92,15 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
 - **Neutral vocabulary**: GPU memory "overlap", "contamination", "injection" tripped the
   executor's content filter ten times — write safety statements in neutral academic terms.
 - **Resume, do not relaunch**: a lane that ended killed, at model capacity or on a
-  `transient`/`environment` cause ends with `resume: <command>` — the same codex session as a
-  new dispatch. Run it as printed, or swap its closing prompt to steer — in single quotes, or
-  `"$p"` from a single-quoted variable, so `$` and backticks stay literal (never `--last` when
-  lanes run in parallel). A resumed lane has no brief of its own, so its triage is weak
-  evidence: read its report. A model-capacity error the wrapper resumes by itself, up to 3
-  times, after 1, 2 and 4 minutes — the stream says so as it waits, and `--watch` lists the
-  `attempts:`.
+  `transient`/`environment` cause — and any lane with a khala name, however it ended — ends
+  with `resume: <command>` — the same codex session as a new dispatch. Run it as printed, or
+  swap its closing prompt to steer — in single quotes, or `"$p"` from a single-quoted variable,
+  so `$` and backticks stay literal (never `--last` when lanes run in parallel). A resume you
+  type yourself (`hippo dispatch -- -C <dir> resume <session> "…"`) may omit `--kind`,
+  `--scope`, `--task` and `--depth`: each comes from that session's lane record. A resumed lane
+  has no brief of its own, so its triage is weak evidence: read its report. A model-capacity
+  error the wrapper resumes by itself, up to 3 times, after 1, 2 and 4 minutes — the stream
+  says so as it waits, and `--watch` lists the `attempts:`.
 
 ## 2b. Batch
 
@@ -110,7 +123,8 @@ entries:
     `Workflow({scriptPath: "…/m.workflow.js"})` it names — each lane an agent in `/workflows`,
     its progress in that agent's Activity every minute — then `hippo dispatch --batch m.yaml`
     for the harvest (one-row way if a lane failed: the rerun relaunches it first). Cost, in
-    relays: ≈ $0.02 per lane + ≈ $0.004 per minute of lane runtime.
+    relays: zero model calls on the mod path. The Haiku fallback makes additional calls as
+    watch windows expire.
   - *A wide batch*: `Agent(subagent_type: "hippo:lane", description: "<batch scope>", prompt:
     "hippo dispatch --batch m.yaml")` — one row (`codex batch · m · 6m02s · 4 running · 12/40
     done · 1 failed · last: …`), one relay for the whole batch, the harvest in its reply (a

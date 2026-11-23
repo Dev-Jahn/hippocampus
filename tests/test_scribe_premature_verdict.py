@@ -216,16 +216,38 @@ def test_a_lane_that_ends_while_the_clerk_reads_takes_no_verdict_from_that_windo
     assert "'dlane' was still running" in _dumps(tmp_project)
 
 
-def test_main_and_a_lane_are_never_gated(tmp_project, run_hippo):
-    """Main's own verdict is main's call whenever it makes it, and a lane's claim is a claim."""
+def test_main_waits_for_a_running_lane_and_a_lane_claims_while_it_runs(tmp_project, run_hippo):
+    """Measured (steno, 1.17.1): main's cleanup wrote `lost/harness` on 7 lanes mid-run and six
+    ran on to finish under that first verdict. Main's verdict — scalar and bulk — is refused
+    while the wrapper is alive, in one line that says what to do; the lane's own claim is not;
+    and once the wrapper is gone the same verdict lands."""
     _seed(tmp_project, _dispatch("dlane"))
     _lane(tmp_project, "dlane")
-    main = run_hippo(["log", "outcome", "--ref", "dlane", "--result", "lost"], cwd=tmp_project)
     lane = run_hippo(["log", "outcome", "--result", "accepted"], cwd=tmp_project,
                      env={"HIPPO_DISPATCH": "dlane"})
-    assert main.returncode == 0 and lane.returncode == 0, (main.stderr, lane.stderr)
+    assert lane.returncode == 0, lane.stderr
+
+    main = run_hippo(["log", "outcome", "--ref", "dlane", "--result", "lost"], cwd=tmp_project,
+                     env={"HIPPO_DISPATCH": ""})
+    assert main.returncode == 1
+    assert main.stderr.strip().count("\n") == 0, "one line, no usage block"
+    assert "dlane is still running" in main.stderr
+    assert "hippo dispatch --watch dlane" in main.stderr
+
+    journal = tmp_project / "wave.journal.jsonl"
+    journal.write_text(json.dumps({"event": "exit", "id": "one", "attempt": 1,
+                                   "dispatch": "dlane", "rc": 0}) + "\n", encoding="utf-8")
+    row = json.dumps({"entry": "one", "attempt": 1, "result": "accepted", "note": "read it"})
+    bulk = run_hippo(["log", "outcome", "--from-batch", str(journal)], cwd=tmp_project,
+                     env={"HIPPO_DISPATCH": ""}, input_text=row + "\n")
+    assert bulk.returncode == 2 and "line 1: outcome: dlane is still running" in bulk.stderr
+
+    _lane(tmp_project, "dlane", pid=_dead_pid())  # the wrapper died with no end on record
+    main = run_hippo(["log", "outcome", "--ref", "dlane", "--result", "lost"], cwd=tmp_project,
+                     env={"HIPPO_DISPATCH": ""})
+    assert main.returncode == 0, main.stderr
     assert [(e["src"], e["result"]) for e in read_ledger(tmp_project)
-            if e["ev"] == "outcome"] == [("cli", "lost"), ("executor", "accepted")]
+            if e["ev"] == "outcome"] == [("executor", "accepted"), ("cli", "lost")]
 
 
 # --------------------------------------------------------------------------

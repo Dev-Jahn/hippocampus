@@ -831,14 +831,17 @@ def test_m6_find_ws_stops_at_home(tmp_path, run_hippo):
     )
     assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
 
-    # …while a .hippo at $HOME itself is still perfectly findable.
+    # A .hippo at $HOME itself is not adopted from below either (measured: a sibling session
+    # wrote to ~/.hippo for six days, DESIGN §3.3) — only a session in $HOME itself finds it.
     (home / ".hippo").mkdir()
     (home / ".hippo" / "ledger.jsonl").touch()
-    ok = run_hippo(
+    below = run_hippo(
         ["status", "--inject"],
         cwd=home / "projects" / "elsewhere",
         env={"HOME": str(home)},
     )
+    assert (below.returncode, below.stdout, below.stderr) == (0, "", "")
+    ok = run_hippo(["status", "--inject"], cwd=home, env={"HOME": str(home)})
     assert ok.returncode == 0, ok.stderr
     assert ok.stdout.startswith("[hippo]"), ok.stdout
 
@@ -979,4 +982,4 @@ def test_m11_inject_last_ignores_nested_and_free_bullets(tmp_project, run_hippo)
     proc = run_hippo(["status", "--inject"], cwd=tmp_project)
     assert proc.returncode == 0, proc.stderr
     last = [ln for ln in proc.stdout.splitlines() if ln.startswith("· last:")]
-    assert last == ["· last: the real last entry"], proc.stdout
+    assert last == ["· last: 07-31 10:00 the real last entry"], proc.stdout

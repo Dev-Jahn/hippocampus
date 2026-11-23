@@ -1,8 +1,10 @@
-import type { Register } from 'claude-code'
+import type { EngineInterface as Engine, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
+
+import { alive, findHippoFrom, registerLaneRow } from './lane_row'
 
 // The hippo:lane relay without a model (Claude Code mods; DESIGN §3.6 "The lane agent").
 //
-// agents/lane.md is a sonnet relay: it launches one `hippo dispatch …` command in the background,
+// agents/lane.md is the Haiku fallback: it launches one `hippo dispatch …` command in the background,
 // greps the lane's id, loops `hippo dispatch --watch <id>` and replies with its final lines. This
 // module answers that agent's model requests itself, so the relay makes none, and draws the
 // lane's codex items as the agent's own transcript: each command codex runs is a tool row (input
@@ -14,8 +16,8 @@ import type { Register } from 'claude-code'
 // finds the lane in the transcript) and the final `--watch` (whose output is the reply,
 // verbatim). The codex rows are calls to `mcp__hippo__codex`, a tool this module registers and
 // answers from `.hippo/lanes/<id>.events.jsonl` (the wrapper's reading of codex's log, LaneItems
-// in cli/hippo_cli.py), drawn as `Bash(<command>)` / `Update(<files>)`: nothing runs, nothing
-// reaches a permission check. A whole batch (`batch:<id>`) shows its progress line once a minute.
+// in cli/hippo_cli.py), drawn as `Bash(<command>)` / `Update(<files>)`. The tool displays what
+// codex runs. A whole batch (`batch:<id>`) shows its progress line once a minute.
 //
 // Anything off the expected path — a prompt that is no `hippo dispatch` command, no output file,
 // no id, no lane record, a watch that fails, an error here — hands the agent back to its model,
@@ -48,7 +50,6 @@ type Relay = {
   description: string
   cwd?: string
   phase: Phase
-  output?: string // the background shell's output file
   id?: string // `dispatch:d…` or `batch:b…`, as printed
   record?: string // .hippo/lanes/<id>.json
   items: Item[] // <id>.events.jsonl, by line
@@ -89,7 +90,7 @@ function quote(s: string): string {
 }
 
 // One step's response, streamed as the engine expects a model's.
-function answered(e, text: string, toolUses: { name: string; input: unknown }[]) {
+function answered(e: TurnStepInput, text: string, toolUses: TurnStepResult['toolUses']): TurnStepResult {
   return {
     turnId: e.turnId,
     index: e.index,
@@ -100,15 +101,15 @@ function answered(e, text: string, toolUses: { name: string; input: unknown }[])
   } as const
 }
 
-async function* reply(e, text: string) {
+async function* reply(e: TurnStepInput, text: string) {
   yield { kind: 'text', index: 0, text } as const
   yield { kind: 'stop', stopReason: 'end_turn', usage: null } as const
   return answered(e, text, [])
 }
 
-const rowId = (e, relay: Relay) => `toolu_hippo_lane_${String(e.turnId).replace(/[^A-Za-z0-9_-]/g, '').slice(-12)}_${relay.rows++}`
+const rowId = (e: TurnStepInput, relay: Relay) => `toolu_hippo_lane_${e.turnId.replace(/[^A-Za-z0-9_-]/g, '').slice(-12)}_${relay.rows++}`
 
-async function* call(e, relay: Relay, block: number, text: string, name: string, input: Record<string, unknown>) {
+async function* call(e: TurnStepInput, relay: Relay, block: number, text: string, name: string, input: Record<string, unknown>) {
   yield { kind: 'tool', index: block, id: rowId(e, relay), name } as const
   yield { kind: 'input', index: block, json: JSON.stringify(input) } as const
   yield { kind: 'stop', stopReason: 'tool_use', usage: null } as const
@@ -121,31 +122,24 @@ const watchCall = (relay: Relay) => ({
   timeout: WATCH_TIMEOUT,
 })
 
-// The lane record, found as hippo finds `.hippo/`: walking up from where the agent runs.
-async function findRecord($, relay: Relay): Promise<string | undefined> {
-  const hex = relay.id!.slice(relay.id!.indexOf(':') + 1)
-  let dir = relay.cwd ?? (await $.session.cwd())
-  for (;;) {
-    const path = `${dir}/.hippo/lanes/${hex}.json`
-    if (await $.fs.exists(path)) return path
-    const up = dir.slice(0, dir.lastIndexOf('/'))
-    if (!up || up === dir) return undefined
-    dir = up
-  }
+// Use the same project state as the panel row, including when the agent is in a worktree.
+async function findRecord($: Engine, id: string, cwd: string): Promise<string | undefined> {
+  const hippo = await findHippoFrom($, cwd)
+  if (!hippo) return undefined
+  const path = `${hippo}/lanes/${id.slice(id.indexOf(':') + 1)}.json`
+  if (await $.fs.exists(path)) return path
 }
 
 // The wrapper is done when its record says so, or when it is gone (`hippo dispatch --watch`'s
 // watch_state: `ended`, else a live pid, else a recorded status).
-async function wrapperDone($, relay: Relay): Promise<boolean> {
+async function wrapperDone($: Engine, relay: Relay): Promise<boolean> {
   let rec
   try {
     rec = JSON.parse(await $.fs.read(relay.record!))
   } catch {
     return false // mid-replace: the next check reads it
   }
-  if (rec.ended || rec.status) return true
-  if (typeof rec.pid !== 'number') return false
-  return (await $.process.run(['kill', '-0', String(rec.pid)])).exitCode !== 0
+  return !!rec.ended || !(await alive($, rec.pid))
 }
 
 function take(relay: Relay, line: number, text: string) {
@@ -162,25 +156,31 @@ const TICK = Symbol('tick')
 // done. Every wait here is a `$` call — a `tail -F` piece or a `sleep` — so none of it is the
 // hook's own time. Readers that overlap (two codex rows at once) each read the same lines and
 // keep the first copy of each.
-async function follow($, relay: Relay, enough: () => boolean, signal?: AbortSignal) {
+async function follow($: Engine, relay: Relay, enough: () => boolean, signal: AbortSignal) {
   const path = relay.record!.replace(/\.json$/, '.events.jsonl')
-  const pause = () => $.process.run(['sleep', String(LIVENESS_EVERY)]).then(() => TICK)
+  const pause = () => $.process.run(['sleep', String(LIVENESS_EVERY)]).then((): typeof TICK => TICK)
   let tick = pause()
-  while (!enough() && !signal?.aborted) {
+  while (!enough() && !signal.aborted) {
     let line = relay.items.length
     const tail = $.process.spawn({ argv: ['tail', '-n', `+${line + 1}`, '-F', path] })[Symbol.asyncIterator]()
     let piece = tail.next()
     let buf = ''
     let done = false
     try {
-      while (!enough() && !signal?.aborted) {
+      while (!enough() && !signal.aborted) {
         const got = await Promise.race([piece, tick])
         if (got === TICK) {
           tick = pause()
           if ((done = await wrapperDone($, relay))) break
           continue
         }
-        if (got.done) break // tail itself ended: start it again where this left off
+        if (got.done) {
+          // Tail exited: give a missing file time to appear before starting a new reader.
+          await tick
+          done = await wrapperDone($, relay)
+          tick = pause()
+          break
+        }
         if (got.value.stream === 'stdout') {
           buf += got.value.text
           for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
@@ -191,7 +191,7 @@ async function follow($, relay: Relay, enough: () => boolean, signal?: AbortSign
         piece = tail.next()
       }
     } finally {
-      await tail.return?.()
+      await tail.return({ code: null, signal: null })
     }
     if (done) {
       // The wrapper is done: what it wrote after the last piece read is read whole, once.
@@ -205,14 +205,14 @@ async function follow($, relay: Relay, enough: () => boolean, signal?: AbortSign
 // One step of a relay that follows its lane: codex's messages stream as text while it works;
 // the step ends on its next command(s) — one tool row each — or, once the lane is over, on the
 // final `--watch`.
-async function* step($, e, relay: Relay, signal: AbortSignal) {
+async function* step($: Engine, e: TurnStepInput, relay: Relay, signal: AbortSignal) {
   let block = -1
   let text = ''
   for (;;) {
     await follow($, relay, () => relay.shown < relay.items.length || relay.over, signal)
     if (signal.aborted) throw new Error('stopped')
     while (relay.shown < relay.items.length) {
-      const item = relay.items[relay.shown]
+      const item = relay.items[relay.shown]!
       if (item.k === 'said' || item.k === 'thinking') {
         relay.shown++
         block++
@@ -224,7 +224,7 @@ async function* step($, e, relay: Relay, signal: AbortSignal) {
         // Commands codex started together are rows of one step, as parallel tool calls are.
         const uses: { name: string; input: Record<string, unknown> }[] = []
         for (; relay.shown < relay.items.length; relay.shown++) {
-          const it = relay.items[relay.shown]
+          const it = relay.items[relay.shown]!
           if (it.k === 'done' || it.k === 'unreadable') continue
           if (it.k !== 'exec' && it.k !== 'patch') break
           const input = it.k === 'exec'
@@ -259,12 +259,12 @@ function patchFiles(text: string): string {
   return names.length ? names.join(', ') : 'patch'
 }
 
-async function* drive($, e, relay: Relay, signal: AbortSignal) {
+async function* drive($: Engine, e: TurnStepInput, relay: Relay, signal: AbortSignal): AsyncGenerator<TurnStepChunk, TurnStepResult | undefined> {
   if (relay.phase === 'launch') {
     if (!isDispatchCommand(relay.command)) return undefined // the model reads the prompt
     relay.phase = 'id'
     return yield* call(e, relay, 0, '', 'Bash', {
-      command: relay.command.trim(),
+      command: relay.command,
       description: relay.description || 'Run the codex lane',
       run_in_background: true,
       timeout: LAUNCH_TIMEOUT,
@@ -273,7 +273,6 @@ async function* drive($, e, relay: Relay, signal: AbortSignal) {
   if (relay.phase === 'id') {
     const out = OUTPUT_RE.exec(relay.last?.text ?? '')?.[1]
     if (!out) return undefined // not in the background: lane.md has the rest
-    relay.output = out
     // The launch prints its id within a second or two; the grep then reads it the first time.
     await $.process.run(['sh', '-c', `i=0; while [ $i -lt ${ID_WAIT_SECONDS * 5} ]; do grep -qE '${ID_RE.source}' "$1" && exit 0; i=$((i+1)); sleep 0.2; done; exit 1`, 'sh', out], {
       timeoutMs: (ID_WAIT_SECONDS + 10) * 1000,
@@ -288,7 +287,7 @@ async function* drive($, e, relay: Relay, signal: AbortSignal) {
     const id = ID_RE.exec(relay.last?.text ?? '')?.[0]
     if (!id) return undefined
     relay.id = id
-    relay.record = await findRecord($, relay)
+    relay.record = await findRecord($, id, relay.cwd ?? await $.session.cwd())
     if (!relay.record) return undefined // no `.hippo/`: lane.md waits on the command itself
     if (id.startsWith('batch:')) {
       relay.phase = 'watch'
@@ -300,8 +299,8 @@ async function* drive($, e, relay: Relay, signal: AbortSignal) {
   if (relay.phase === 'watch') {
     const last = relay.last
     if (last && !last.isError) {
-      relays.delete(e.agentId) // done: a later message to this agent is its model's
-      return yield* reply(e, last.text.replace(/\n+$/, ''))
+      relays.delete(e.agentId!) // done: a later message to this agent is its model's
+      return yield* reply(e, last.text)
     }
     // Exit 3: the window passed with the lane (or batch) still running — the same call again.
     if (last && /^Exit code 3\b/.test(last.text)) return yield* call(e, relay, 0, '', 'Bash', watchCall(relay))
@@ -311,6 +310,9 @@ async function* drive($, e, relay: Relay, signal: AbortSignal) {
 }
 
 export const register: Register = (on) => {
+  // The relay knows its id from the grep. Displayed Codex output may mention other dispatches.
+  registerLaneRow(on, (agentId) => relays.get(agentId)?.id?.split(':')[1])
+
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await $.tool.register({
@@ -382,13 +384,13 @@ export const register: Register = (on) => {
     return result
   })
 
-  on('tool.call', { tool: TOOL_NAME }, async ($, e) => {
+  on('tool.call', { tool: TOOL_NAME }, async ($, e, next) => {
     const relay = e.agentId ? relays.get(e.agentId) : undefined
     const item = relay?.items[(e as { item?: number }).item ?? -1]
     if (!relay?.record || !item) return { deny: 'This tool only draws a codex lane inside a hippo:lane relay; nothing ran.' }
     if (item.k === 'patch') return { result: item.text }
     if (item.k !== 'exec') return { deny: 'No codex command at that item.' }
-    await follow($, relay, () => relay.dones.has(item.n) || relay.over)
+    await follow($, relay, () => relay.dones.has(item.n) || relay.over, next.signal)
     const done = relay.dones.get(item.n)
     if (!done) return { result: 'No result: the lane ended before codex printed one.' }
     return done.rc ? { isError: true, result: doneText(done) } : { result: doneText(done) }

@@ -3,15 +3,15 @@ that continues a lane's codex session, and the wrapper's own resume of a session
 on a model-capacity error.
 
 Contract under test: the triage line names the cause the judge named, in the one shape every
-surface prints; a lane that ended killed, or whose cause a resume can clear, ends on the exact
-`hippo dispatch … -- <codex args> resume <session> "<continuation>"` command — single dispatch
-and batch lane alike, quoted so a hostile scope cannot break it, and absent when there is no
-session to resume; and a lane whose codex exited non-zero on the measured capacity line is
-resumed in place — the same session, up to len(CAPACITY_WAITS) times — staying one lane: one
-record with its attempts, one raw log, the last attempt's report, one usage row (the rollout
-is cumulative across a resume, so nothing is counted twice), one triage. A signal during the
-wait ends it at once, killed, one during a resume reaches the resumed codex, and any other
-failure is never resumed.
+surface prints; a lane that ended killed, or whose cause a resume can clear, or that has a
+khala name however it ended, ends on the exact `hippo dispatch … -- <codex args> resume
+<session> "<continuation>"` command — single dispatch and batch lane alike, quoted so a
+hostile scope cannot break it, and absent when there is no session to resume; and a lane
+whose codex exited non-zero on the measured capacity line is resumed in place — the same
+session, up to len(CAPACITY_WAITS) times — staying one lane: one record with its attempts, one
+raw log, the last attempt's report, one usage row (the rollout is cumulative across a resume,
+so nothing is counted twice), one triage. A signal during the wait ends it at once, killed, one
+during a resume reaches the resumed codex, and any other failure is never resumed.
 
 The lanes run in-process (hippo_cli.run_dispatch / run_batch) so CAPACITY_WAITS can be cut to
 hundredths of a second by monkeypatch; no test here sleeps for the real schedule. The stub
@@ -503,6 +503,76 @@ def test_a_lane_that_resumes_an_earlier_lanes_session_pays_only_its_own_tokens(
     assert json.loads(capture.read_text())["state"]["brief"] is None
 
 
+def test_a_resume_typed_without_a_model_inherits_the_lanes_label(lab, capfd):
+    """Measured (steno, 1.17.1): 78 of 641 dispatches were resumes typed as `-- -C <dir> resume
+    <session> "…"` and recorded `codex/unset/unset` — a PRIORS row of n=61 — while a lane record
+    of each session named its model and effort. The resume takes the slots its argv leaves
+    unset from that record and says so; a session no record names stays unset, said too."""
+    code, first, _, _ = _dispatch(capfd)
+    assert code == 0
+
+    def resume(sid):
+        with pytest.raises(SystemExit) as done:
+            hippo_cli.run_dispatch(["--kind", "research", "--scope", "accounts (resumed)", "--",
+                                    "-C", lab.cwd, "resume", sid, hippo_cli.RESUME_CONTINUE])
+        out, err = capfd.readouterr()
+        assert done.value.code == 0, err
+        return out.splitlines()[0].removeprefix("dispatch:"), err
+
+    did, err = resume(SID)
+    rows = {e["id"]: e for e in _rows(lab.project, "dispatch")}
+    assert rows[did]["exec"] == "codex/gpt-6.1-sol/high"
+    assert lab.record(did)["exec"] == "codex/gpt-6.1-sol/high", "a resume of it inherits too"
+    assert f"exec codex/gpt-6.1-sol/high, taken from lane {first}" in err
+
+    did, err = resume("01a0ffff-0000-7000-8000-000000000000")
+    assert {e["id"]: e for e in _rows(lab.project, "dispatch")}[did]["exec"] == \
+        "codex/unset/unset"
+    assert "no lane record of it names a model or effort" in err
+
+
+def test_a_resume_typed_without_labels_inherits_them_from_the_lane(lab, capfd):
+    """Measured (2026-11-18): a resume typed as `-- -C <dir> resume <session> "…"` failed on a
+    missing --scope while the lane record of that session held it. A resume takes the kind,
+    scope, task and depth its command line leaves out from that record, in one stderr line with
+    the exec; what the command line gives wins; a session no record names stays the usage
+    error, saying why."""
+    with pytest.raises(SystemExit):
+        hippo_cli.run_dispatch(["--kind", "impl", "--scope", "accounts", "--task",
+                                "impl/accounts", "--depth", "1", "-m", "gpt-6.1-sol", "-c",
+                                "model_reasoning_effort=high", "--skip-git-repo-check", PROMPT])
+    first = capfd.readouterr().out.splitlines()[0].removeprefix("dispatch:")
+
+    def resume(*flags, sid=SID):
+        with pytest.raises(SystemExit) as done:
+            hippo_cli.run_dispatch([*flags, "--", "-C", lab.cwd, "resume", sid,
+                                    hippo_cli.RESUME_CONTINUE])
+        out, err = capfd.readouterr()
+        return done.value.code, (out.splitlines() or [""])[0].removeprefix("dispatch:"), err
+
+    code, did, err = resume()
+    assert code == 0, err
+    rows = {e["id"]: e for e in _rows(lab.project, "dispatch")}
+    assert {k: rows[did].get(k) for k in ("kind", "scope", "task", "depth", "exec")} == {
+        "kind": "impl", "scope": "accounts (resumed)", "task": "impl/accounts", "depth": 1,
+        "exec": "codex/gpt-6.1-sol/high"}
+    assert (f"dispatch: resume of session {SID}: kind impl, scope 'accounts (resumed)', "
+            f"task impl/accounts, depth 1, taken from lane {first}; exec "
+            f"codex/gpt-6.1-sol/high, taken from lane {first}") in err.splitlines()
+
+    code, did, err = resume("--kind", "research", "--scope", "audit", "--depth", "0")
+    assert code == 0, err
+    row = {e["id"]: e for e in _rows(lab.project, "dispatch")}[did]
+    assert (row["kind"], row["scope"], row["task"], row["depth"]) == (
+        "research", "audit", "impl/accounts", 0)
+
+    other = "01a0ffff-0000-7000-8000-000000000000"
+    code, _, err = resume(sid=other)
+    assert code == 2
+    assert err.startswith(f"dispatch: --kind and --scope are required — no lane record of "
+                          f"session {other} to take them from\n")
+
+
 def test_a_count_that_went_down_is_a_restart_not_a_negative_cost(lab):
     """The last count before the lane started is its baseline — unless the count fell below
     it: then the session's count began again, and all of it is the lane's."""
@@ -709,6 +779,10 @@ def test_which_lanes_get_a_resume_line():
     assert line({**rec, "status": "exited", "cause": "environment"})
     assert line({**rec, "status": "exited", "cause": "capability"}) is None
     assert line({**rec, "status": "exited"}) is None
+    # A lane with a khala name, however it ended: a finished one can still have letters waiting.
+    assert line({**rec, "status": "exited", "khala": "x@mbp"})
+    assert line({**rec, "status": "exited", "cause": "capability", "khala": "x@mbp"})
+    assert line({**rec, "status": "exited", "khala": "x@mbp", "codex_session": None}) is None
     assert line({**rec, "status": "killed", "codex_session": None}) is None, "no session"
     assert line({**rec, "status": "killed", "codex_args": None}) is None, "no prompt found"
     assert line({k: v for k, v in rec.items() if k != "kind"} | {"status": "killed"}) is None

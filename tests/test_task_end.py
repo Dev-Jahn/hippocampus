@@ -125,6 +125,37 @@ def test_a_flag_goes_quiet_once_the_task_is_touched_or_closed(tmp_project, run_h
     assert (hp / "task-flags.json").read_text(encoding="utf-8") == text
 
 
+def test_a_flag_goes_quiet_while_work_on_its_task_goes_on(tmp_project, run_hippo):
+    """Measured (1.17.1): of 102 flags shown main closed 5; 38 had a dispatch on the task in the
+    6h before and 12 a lane running on it. A delegation on the task that is still main's
+    business hides the flag while it is; a dispatch on the task recorded after the flag's
+    stamp hides it for good."""
+    from datetime import datetime, timedelta, timezone
+    hp = tmp_project / ".hippo"
+    now = datetime.now(timezone.utc)
+    ago = lambda h: (now - timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+    ids = ("feat/a", "feat/b", "feat/c")
+    (hp / "tasks.yaml").write_text(yaml.safe_dump({"tasks": [
+        {"id": tid, "title": tid, "status": "active", "notes": [], "deps": [], "updated": ago(9)}
+        for tid in ids]}), encoding="utf-8")
+    (hp / "task-flags.json").write_text(json.dumps(
+        {tid: {"t": ago(4), "p": 0.9} for tid in ids}), encoding="utf-8")
+
+    def dispatch(did, task, hours, src="wrapper"):
+        return {"t": ago(hours), "ev": "dispatch", "id": did, "kind": "impl",
+                "exec": "codex/gpt-6-sol/high", "scope": did, "task": task, "src": src}
+
+    rows = [dispatch("d1", "feat/a", 6),  # launched before the flag, not judged yet
+            dispatch("d2", "feat/b", 2, "cli"),  # recorded after the flag, judged at once
+            {"t": ago(1), "ev": "outcome", "ref": "d2", "result": "accepted", "src": "cli"}]
+    with (hp / "ledger.jsonl").open("a", encoding="utf-8") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    assert _checks(_capsule(run_hippo, tmp_project)) == [LINE_ONE.format("feat/c")]
+    assert run_hippo(["log", "outcome", "--ref", "d1", "--result", "accepted"],
+                     cwd=tmp_project).returncode == 0
+    assert _checks(_capsule(run_hippo, tmp_project)) == [LINE_MANY.format("feat/a, feat/c")]
+
+
 def test_the_check_line_is_main_s_at_every_session_start(tmp_project, run_hippo):
     """Every SessionStart source carries it, before the grammar; a subagent's slice and a lane's
     capsule never do — closing a task is main's call."""
