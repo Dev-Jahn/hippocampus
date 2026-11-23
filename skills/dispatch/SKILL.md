@@ -49,6 +49,8 @@ hippo dispatch --kind impl --scope "pass2 tensorize" --task feat/x \
   Workflow script calls it as `agent("<command on one line>", {agentType: 'hippo:lane'})`, no
   schema, when a later step reads the lane's result; many lanes go to `--batch` (§2b). The
   plain Bash form stays for Codex and for a lane launched in a lane.
+- **Lane agent prompts** must be the `hippo dispatch …` command alone, including for a batch.
+  Anything else is refused. Put the lane's working directory in `-C <dir>` inside the command.
 - **`--kind` is the PRIORS axis — reuse a tag**: `impl fix perf verify audit design research
   spike docs infra chore` (one ledger carried 26 tags over 108 dispatches, 19 used once). The
   subject goes in `--scope`.

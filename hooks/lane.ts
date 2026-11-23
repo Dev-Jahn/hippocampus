@@ -19,11 +19,11 @@ import { alive, findHippoFrom, registerLaneRow } from './lane_row'
 // in cli/hippo_cli.py), drawn as `Bash(<command>)` / `Update(<files>)`. The tool displays what
 // codex runs. A whole batch (`batch:<id>`) shows its progress line once a minute.
 //
-// Anything off the expected path — a prompt that is no `hippo dispatch` command, no output file,
-// no id, no lane record, a watch that fails, an error here — hands the agent back to its model,
-// which carries on with lane.md as written. Without mods (Codex host, --safe-mode,
-// disableAllHooks, Claude Code's hooks-module rollout switched off) none of this loads and
-// lane.md runs exactly as before.
+// A prompt that fails the dispatch-command check gets a refusal on the first step. Failures
+// during the relay — no output file, no id, no lane record, a watch that fails, an error here —
+// hand the agent back to its model, which carries on with lane.md as written. Without mods
+// (Codex host, --safe-mode, disableAllHooks, Claude Code's hooks-module rollout switched off),
+// lane.md supplies the check and the whole relay.
 
 const AGENT = 'hippo:lane'
 const TOOL = 'codex'
@@ -261,7 +261,11 @@ function patchFiles(text: string): string {
 
 async function* drive($: Engine, e: TurnStepInput, relay: Relay, signal: AbortSignal): AsyncGenerator<TurnStepChunk, TurnStepResult | undefined> {
   if (relay.phase === 'launch') {
-    if (!isDispatchCommand(relay.command)) return undefined // the model reads the prompt
+    if (!isDispatchCommand(relay.command)) {
+      relays.delete(e.agentId!)
+      const firstLine = relay.command.split(/\r\n?|\n/, 1)[0]
+      return yield* reply(e, `The hippo:lane prompt must be the command alone, beginning with \`hippo dispatch\`. The first line received was ${JSON.stringify(firstLine)}. Use \`-C <dir>\` for the lane's working directory.`)
+    }
     relay.phase = 'id'
     return yield* call(e, relay, 0, '', 'Bash', {
       command: relay.command,
