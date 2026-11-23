@@ -1453,8 +1453,16 @@ why the Workflow's long lane was 570s.
 In the same 2026-10-14 Haiku 5.5 measurement, 4 of 6 runs without `.hippo/` rewrote the
 `lsof` path's reply. Deviations included a dropped first line, a code fence and a sentence
 of the agent's own. Steps 4–5 now explicitly require the last Bash command's full output,
-from its first line through its last, including blank lines. The revised wording has not
-been re-measured.
+from its first line through its last, including blank lines. Re-measured by main with the
+revised wording (2026-11-23, Claude Code 2.1.330, six real `gpt-6-luna` lanes, no `.hippo/`,
+the mod handing over to Haiku 5.5): no run dropped a first line, fenced the reply or added a
+sentence. Three replies matched the last output exactly, two lost one blank line and one lost
+the blank line and the trailing `[exited with code 0]`.
+
+Measured the same day with `.hippo/` (one real `gpt-6-luna` lane, 33s): the relay's six
+assistant turns — launch, grep, one `mcp__hippo__codex` row, the final `--watch` and the reply
+— each carry 0 input and 0 output tokens in the agent's transcript. The mod answered all of
+them and Haiku was never called.
 
 **The row** (`hooks/lane_row.ts`, registered by `hooks/lane.ts`, §3.4).
 Claude Code asks a mod's `ui.render` hook on `AgentRow` for each agent row as its props change;
