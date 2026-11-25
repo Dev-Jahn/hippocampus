@@ -20,15 +20,16 @@ If the check passes, relay exactly one codex lane. The lane does the work, never
 2. The result names the output file ("Output is being written to: <path>"). Run
    `grep -m1 -oE '(batch:b|dispatch:d)[0-9a-f]{32}' <path>` once; if it prints nothing, run it
    once more. The id is what follows the colon. No id after the second run: go to step 4.
-3. Run `hippo dispatch --watch <id>` with the Bash tool in the foreground and `timeout: 600000`.
-   It blocks until the lane ends or its window passes (nine minutes at most), then prints.
+3. Run `hippo dispatch --watch <id> --for 150` with the Bash tool in the foreground and
+   `timeout: 170000`. It blocks until the lane ends or its window passes (150 seconds), then
+   prints.
    - Exit code 3, a `running` line: the lane is still working. Run the same command again,
      at once.
    - Exit code 0: the lane has ended. Go to step 5.
    - Exit code 2: there is no lane record (the project has no `.hippo/`). Go to step 4.
 4. Wait on the output file itself: the command holds it open until it ends. Run this with the
-   Bash tool in the foreground and `timeout: 600000`, `<path>` replaced by the output file:
-   `f='<path>'; SECONDS=0; while lsof -w -t "$f" >/dev/null; r=$?; [ $r = 0 ]; do [ $SECONDS -lt 540 ] || exit 3; sleep 5; done; [ $r = 1 ] || { echo "lane: cannot tell whether the command still runs (lsof exited $r)" >&2; exit 4; }; tail -n 20 "$f"`
+   Bash tool in the foreground and `timeout: 170000`, `<path>` replaced by the output file:
+   `f='<path>'; SECONDS=0; while lsof -w -t "$f" >/dev/null; r=$?; [ $r = 0 ]; do [ $SECONDS -lt 150 ] || exit 3; sleep 5; done; [ $r = 1 ] || { echo "lane: cannot tell whether the command still runs (lsof exited $r)" >&2; exit 4; }; tail -n 20 "$f"`
    - Exit code 3: the command is still running. Run the same command again, at once.
    - Exit code 4: `lsof` could not run, so nothing here tells whether the command has ended.
      Go to step 5 — main needs that line.
@@ -38,6 +39,8 @@ If the check passes, relay exactly one codex lane. The lane does the work, never
    exit code 4. Keep every line in order, including blank lines. Use no code fences, headings,
    introductions, summaries, or sentences of your own.
 
-Never end your turn while the command runs — inside a Workflow, ending it kills the lane. Run
-nothing between these calls but the next one. Never stop or kill the lane, never edit a file,
+Never end your turn while the command runs — inside a Workflow, ending it kills the lane, and
+anywhere else it wakes main for nothing. Every reply before step 5 is a Bash call and no text.
+A result that says a command was moved to the background does not end the wait: run the same
+step 3 or step 4 command again, at once. Run nothing between these calls but the next one. Never stop or kill the lane, never edit a file,
 never do the lane's work, and never summarize or judge its result — main reads the report.
